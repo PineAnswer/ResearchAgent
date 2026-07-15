@@ -48,6 +48,26 @@ def run_offline_demo(database_path: Path | None = None) -> dict:
 
     service.save_artifact(
         project.project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {
+                    "paper_id": "DEMO-PAPER",
+                    "title": "离线演示论文",
+                    "source": "offline-demo",
+                }
+            ],
+            "executed_queries": ["few-shot remote sensing", "data augmentation"],
+        },
+    )
+    project = service.transition(
+        project.project_id,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+
+    service.save_artifact(
+        project.project_id,
         "ScreeningDecision",
         {
             "included_paper_ids": ["DEMO-PAPER"],

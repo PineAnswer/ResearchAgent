@@ -6,12 +6,14 @@ from typing import Any
 from research_agent.application.artifact_normalization import normalize_artifact_payload
 from research_agent.application.ports import ArtifactExporterPort, ResearchRepositoryPort
 from research_agent.domain.models import (
+    CandidateSetSnapshot,
     InsufficientEvidence,
     PaperCard,
     ResearchStage,
     ReviewResult,
     ScreeningDecision,
     SearchReport,
+    SearchFeedback,
     SynthesisReport,
 )
 
@@ -26,6 +28,9 @@ class InsufficientEvidenceError(WorkflowPrerequisiteError):
 
 ARTIFACT_SCHEMAS = {
     "SearchReport": SearchReport,
+    "SupplementalSearchReport": SearchReport,
+    "SearchFeedback": SearchFeedback,
+    "CandidateSetSnapshot": CandidateSetSnapshot,
     "ScreeningDecision": ScreeningDecision,
     "PaperCard": PaperCard,
     "SynthesisReport": SynthesisReport,
@@ -37,6 +42,7 @@ SYSTEM_ARTIFACTS = {"RuntimeFallback", "ScreeningLog"}
 
 REQUIRED_ARTIFACTS = {
     ResearchStage.SEARCHED: "SearchReport",
+    ResearchStage.SEARCH_REVIEW_PENDING: "CandidateSetSnapshot",
     ResearchStage.SCREENED: "ScreeningDecision",
     ResearchStage.EXTRACTED: "PaperCard",
     ResearchStage.SYNTHESIZED: "SynthesisReport",
@@ -68,6 +74,9 @@ class ResearchService:
     def get_project(self, project_id: str):
         return self.repository.get_project(project_id)
 
+    def list_projects(self, limit: int = 20):
+        return self.repository.list_projects(limit)
+
     def get_snapshot(self, project_id: str) -> dict[str, Any]:
         return {
             "project": self.repository.get_project(project_id).model_dump(mode="json"),
@@ -87,6 +96,42 @@ class ResearchService:
             if item.kind == "PaperCard":
                 cards[str(item.payload.get("paper_id", ""))] = item.payload
         return cards
+
+    @staticmethod
+    def _candidate_id(candidate: dict[str, Any]) -> str:
+        return str(
+            candidate.get("paper_id")
+            or candidate.get("doi")
+            or f"title:{candidate.get('title', '')}"
+        )
+
+    @classmethod
+    def _validate_screening_decision(cls, artifacts, payload: dict[str, Any]) -> None:
+        snapshots = [item for item in artifacts if item.kind == "CandidateSetSnapshot"]
+        if not snapshots:
+            raise WorkflowPrerequisiteError(
+                "ScreeningDecision requires a human-reviewed CandidateSetSnapshot"
+            )
+        available_ids = {
+            cls._candidate_id(candidate)
+            for candidate in snapshots[-1].payload.get("candidates", [])
+        }
+        included = [str(item) for item in payload.get("included_paper_ids", [])]
+        excluded = [str(item) for item in payload.get("excluded_paper_ids", [])]
+        if len(included) != len(set(included)):
+            raise WorkflowPrerequisiteError("ScreeningDecision includes duplicate paper IDs")
+        overlap = sorted(set(included) & set(excluded))
+        if overlap:
+            raise WorkflowPrerequisiteError(
+                "ScreeningDecision includes and excludes the same papers: "
+                + ", ".join(overlap)
+            )
+        unknown = sorted(set(included) - available_ids)
+        if unknown:
+            raise WorkflowPrerequisiteError(
+                "ScreeningDecision includes papers outside the reviewed candidate set: "
+                + ", ".join(unknown)
+            )
 
     @classmethod
     def _evidence_index(cls, artifacts) -> dict[str, dict[str, Any]]:
@@ -216,6 +261,8 @@ class ResearchService:
             self._validate_synthesis_evidence(artifacts, payload)
         elif kind == "ReviewResult":
             self._validate_review_evidence(artifacts, payload)
+        elif kind == "ScreeningDecision":
+            self._validate_screening_decision(artifacts, payload)
         required_kind = REQUIRED_ARTIFACTS.get(target)
         existing_kinds = {item.kind for item in artifacts}
         if required_kind is not None and required_kind != kind and required_kind not in existing_kinds:

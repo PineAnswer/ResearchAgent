@@ -22,6 +22,7 @@ def test_full_reviewed_flow(tmp_path) -> None:
     project = repository.create_project("topic", "question")
     for stage in [
         ResearchStage.SEARCHED,
+        ResearchStage.SEARCH_REVIEW_PENDING,
         ResearchStage.SCREENED,
         ResearchStage.EXTRACTED,
         ResearchStage.SYNTHESIZED,
@@ -39,4 +40,4 @@ def test_full_reviewed_flow(tmp_path) -> None:
     project = repository.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
 
     assert project.stage is ResearchStage.COMPLETED
-    assert len(repository.list_events(project.project_id)) == 7
+    assert len(repository.list_events(project.project_id)) == 8

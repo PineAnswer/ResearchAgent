@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 from langchain.tools import ToolRuntime
 from pydantic import ValidationError
@@ -19,6 +21,7 @@ from research_agent.infrastructure.sqlite_repository import ProjectNotFound
 def build_project_tools(
     service: ResearchService,
     runtime_state: ResearchRuntimeState | None = None,
+    on_search_committed: Callable[[str], dict[str, Any]] | None = None,
 ):
     from langchain_core.tools import tool
 
@@ -178,6 +181,7 @@ def build_project_tools(
                 },
                 ensure_ascii=False,
             )
+        search_review = None
         try:
             if subagent_type == "literature-scout":
                 artifact, project = service.save_artifact_and_transition(
@@ -187,6 +191,9 @@ def build_project_tools(
                     ResearchStage.SEARCHED,
                     actor="literature-scout",
                 )
+                if payload.get("candidates") and on_search_committed is not None:
+                    search_review = on_search_committed(project_id)
+                    project = service.get_project(project_id)
             elif subagent_type == "paper-reader":
                 artifact = service.save_artifact(project_id, "PaperCard", payload)
                 project = service.get_project(project_id)
@@ -251,6 +258,7 @@ def build_project_tools(
             {
                 "artifact": artifact.model_dump(mode="json"),
                 "project": project.model_dump(mode="json"),
+                "search_review": search_review,
             },
             ensure_ascii=False,
             default=str,

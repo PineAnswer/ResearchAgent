@@ -38,6 +38,8 @@ def _project_status_text(result: dict) -> str:
         return "科研项目已通过证据审查并完成。"
     if stage == "INCONCLUSIVE":
         return "本轮执行已结束：证据不足，当前没有可确认的科研结论。"
+    if stage == "SEARCH_REVIEW_PENDING":
+        return "初次检索已完成：当前正在等待用户审核候选论文。"
     if verdict == "REVISE":
         return "本轮执行已结束：报告需要修订，尚未通过证据审查。"
     return f"本轮执行已结束：当前项目阶段为{stage}。"

@@ -69,19 +69,19 @@
 
 ### 1.3 两者如何配合
 
-以保存筛选决定为例：
+以用户确认检索候选集为例：
 
 ```text
-主 Agent
-  → 调用 save_screening_decision
-  → Tool 接收 project_id、入选列表、排除列表和理由
+用户
+  → POST /api/projects/{project_id}/search-feedback，action=accept
+  → SearchReviewService 读取最新版 CandidateSetSnapshot
   → ResearchService 校验 ScreeningDecision 和当前阶段
   → Repository 在 SQLite 事务中保存产物并推进到 SCREENED
 ```
 
 其中：
 
-- `save_screening_decision` Tool 属于确定性能力，负责提供固定参数接口并调用服务；
+- `SearchReviewService` 属于确定性能力，负责合并候选、校验反馈并调用业务服务；
 - `ResearchService` 属于业务层，负责检查数据和阶段是否符合科研工作流；
 - Repository 和 SQLite 属于持久化层，负责把已经批准的业务变化可靠保存。
 
@@ -131,7 +131,7 @@ Repository / SQLite：保存通过检查的结果
 ### 2.1 状态主线
 
 ```text
-CREATED → SEARCHED → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → COMPLETED
+CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → COMPLETED
 ```
 
 上述各 `stage` 表示项目当前完成到哪一步，让数据库能够确定回答“项目现在进行到哪里、已经具备哪些正式产物”。
@@ -140,19 +140,22 @@ CREATED → SEARCHED → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDI
 |---|---|---|---|
 | `CREATED` | 项目已创建 | SQLite 中已有 `ResearchProject`，包含 `project_id`、主题和研究问题 | 先建立稳定项目 ID，后续所有 Agent 结果才能绑定到同一项目 |
 | `SEARCHED` | 文献检索已完成 | 已保存并校验 `SearchReport`，真实检索词和候选论文可追踪 | 将“已经搜索过”与“尚未开始搜索”区分开，空候选也可以在此处正常结束 |
+| `SEARCH_REVIEW_PENDING` | 候选论文等待人工审核 | 已保存 `CandidateSetSnapshot`，检索词、候选集、排除项和轮次可追踪 | 允许用户补充检索词、增删论文，再显式确认入选集 |
 | `SCREENED` | 候选论文筛选已完成 | 已保存 `ScreeningDecision`，入选和排除论文 ID 已确定 | Reader 只能处理明确入选的论文，避免把检索候选直接当成精读结果 |
 | `EXTRACTED` | 论文证据提取已完成 | 每篇入选论文都有 `PaperCard`，并且至少存在一条可追踪 Evidence | 确认综合所需的证据材料已经齐备，阻止 Synthesizer 使用不完整论文卡片 |
 | `SYNTHESIZED` | 跨论文综合已完成 | 已保存 `SynthesisReport`，其中引用的 Evidence ID 已通过校验 | 将“单篇证据已经提取”和“跨论文结论已经形成”分开审计 |
 | `REVIEW_PENDING` | 综合报告已提交审查 | `SynthesisReport` 已持久化，项目等待独立 Reviewer 读取 | 给 Reviewer 设置明确入口，防止它在综合报告尚未稳定时提前审查 |
 | `REVIEWED` | 证据审查已完成 | 已保存 `ReviewResult`，Verdict 为 `PASS` 或 `REVISE` | 审查完成不等于项目完成；`REVISE` 仍需返回证据或综合阶段修改 |
 | `COMPLETED` | 项目通过并完成 | 当前 `ReviewResult.verdict == PASS` | 只有通过独立证据审查的报告才能成为最终完成结果 |
-| `INCONCLUSIVE` | 证据不足，流程正常结束 | 已保存 `InsufficientEvidence`，记录原因、查询、失败和建议 | 允许系统诚实结束，避免为了进入 `COMPLETED` 而生成缺乏证据的结论 |
+| `INCONCLUSIVE` | 流程受控终止 | 已保存 `InsufficientEvidence`，记录证据不足、用户停止或连续结构化结果失败等原因 | 阻止系统在无法安全继续时生成缺乏依据的结论；具体原因需要读取 Artifact 和首个失败事件 |
 
 一条正常成功路径对应的正式产物如下：
 
 ```text
 CREATED
   → SearchReport                         → SEARCHED
+  → CandidateSetSnapshot                 → SEARCH_REVIEW_PENDING
+  → SearchFeedback（可多轮）             → SEARCH_REVIEW_PENDING
   → ScreeningDecision                    → SCREENED
   → 每篇入选论文的 PaperCard             → EXTRACTED
   → SynthesisReport                      → SYNTHESIZED
@@ -168,9 +171,9 @@ CREATED
 | 小节 | 阶段目标 | 主执行者 | 核心函数 | 正常输出 |
 |---|---|---|---|---|
 | 3.1 | 建立项目身份 | 主 Agent | `create_research_project` | `ResearchProject`，阶段为 `CREATED` |
-| 3.2 | 检索并提交候选论文 | 主 Agent + Scout | `task`、`search_openalex`、`search_crossref`、`commit_subagent_result` | `SearchReport`，阶段为 `SEARCHED` |
+| 3.2 | 检索并提交候选论文 | 主 Agent + Scout | `task`、`search_openalex`、`search_crossref`、`commit_subagent_result` | `SearchReport` 与候选集快照，非空时进入 `SEARCH_REVIEW_PENDING` |
 | 3.3 | 处理零候选或证据不足 | 主 Agent | `finish_inconclusive` | `InsufficientEvidence`，阶段为 `INCONCLUSIVE` |
-| 3.4 | 固定入选和排除论文 | 主 Agent | `save_screening_decision` | `ScreeningDecision`，阶段为 `SCREENED` |
+| 3.4 | 补充检索并固定论文集合 | 用户 + `SearchReviewService` | 检索反馈 API、`search_openalex`、`verify_doi` | 多轮反馈；确认后保存 `ScreeningDecision` 并进入 `SCREENED` |
 | 3.5 | 逐篇提取可定位证据 | 主 Agent + Reader | `task`、`fetch_paper_text`、`extract_pdf_text`、`commit_subagent_result` | 多个 `PaperCard`，随后进入 `EXTRACTED` |
 | 3.6 | 基于 Evidence 形成跨论文综合 | 主 Agent + Synthesizer | `task`、`get_active_research_project`、`commit_subagent_result` | `SynthesisReport`，阶段为 `SYNTHESIZED` |
 | 3.7 | 独立审查并决定结束方式 | 主 Agent + Reviewer | `advance_project_stage`、`task`、`commit_subagent_result` | `ReviewResult`，随后完成、修订或证据不足终止 |
@@ -278,13 +281,14 @@ CREATED
 8. `recording_runnable` 将结果存入 `ResearchRuntimeState`，并使用真实执行记录覆盖 `search_terms`。
 9. 主 Agent 调用：`commit_subagent_result(project_id, "literature-scout")`
 
-10. 系统原样读取暂存结果，保存 `SearchReport` 并原子推进：`CREATED → SEARCHED`
+10. 系统原样读取暂存结果，保存 `SearchReport` 并原子推进：`CREATED → SEARCHED`。
+11. 候选非空时，系统保存 `CandidateSetSnapshot` 并进入 `SEARCH_REVIEW_PENDING`；本次 Agent 执行返回 `awaiting_input`。
 
 **设计原因**
 
 这里限制 Scout 只能委派一次，并限制具体检索工具的调用次数，主要用于控制外部 API 成本、匿名额度和重复搜索。`search_terms` 最终由实际工具日志覆盖，可以避免模型在报告中填写并未执行的查询词。
 
-(但希望后续加入根据人机协作，如用户可主动提供检索思路，调整当前检索方向功能)
+用户可以在审核阶段提交新的检索词、手动加入 DOI 或论文元数据、排除候选。系统去重查询和论文，并将每轮反馈持久化。
 
 `SearchReport` 的字段直接服务于筛选阶段：
 
@@ -344,48 +348,46 @@ SEARCHED → INCONCLUSIVE
 
 ### 3.4 筛选与 SCREENED
 
-> **阶段卡片**  
-> **目标：** 根据候选论文元数据确定哪些论文进入精读。  
-> **输入：** 已保存的 `SearchReport.candidates`。  
-> **执行者：** 主 Agent。  
-> **输出：** `ScreeningDecision`。  
-> **状态变化：** `SEARCHED → SCREENED`。
+> **阶段卡片**
+> **目标：** 让用户补充检索方向、增删候选，并显式确定哪些论文进入精读。
+> **输入：** 已保存的 `CandidateSetSnapshot`。
+> **执行者：** 用户与 `SearchReviewService`。
+> **输出：** `SearchFeedback`、可选的 `SupplementalSearchReport`、新版 `CandidateSetSnapshot`；确认时生成 `ScreeningDecision`。
+> **状态变化：** 补充检索保持 `SEARCH_REVIEW_PENDING`；确认后 `SEARCH_REVIEW_PENDING → SCREENED`。
 
 **产物格式**
 
-主 Agent 根据 `SearchReport` 生成：
+用户通过反馈接口提交：
 
 ```json
 {
-  "included_paper_ids": ["P001"],
+  "action": "refine",
+  "suggested_queries": ["新的检索方向"],
+  "added_papers": [{"doi": "10.xxxx/example"}],
   "excluded_paper_ids": ["P002"],
-  "reasons": ["P001：与研究问题直接相关；P002：仅讨论相邻问题"]
+  "comment": "排除相邻问题，补充目标领域检索"
 }
 ```
 
 **调用函数**
 
 ```text
-save_screening_decision(
-  project_id,
-  included_paper_ids,
-  excluded_paper_ids,
-  reasons,
-  actor="research-supervisor"
-)
+POST /api/projects/{project_id}/search-feedback
 ```
 
 **参数与设计原因**
 
-`included_paper_ids` 是进入精读阶段的论文 ID 列表，`excluded_paper_ids` 是排除列表，`reasons` 是字符串理由列表，`actor` 是写入状态事件的操作者名称。专用筛选工具可以同时校验论文 ID、保存决定并推进阶段，主 Agent 无需手工拼装通用 Artifact JSON。
+`action=refine` 会执行去重后的补充检索并停留在人工审核阶段；`action=accept` 把当前未排除候选固化为入选集；`action=stop` 保存证据不足说明并结束。手动 DOI 会先经 Crossref 核验；未提供 DOI 的手工论文标记为 `user-unverified`，用户填写的摘要不会进入后续证据链。
 
 该工具在同一业务动作中完成：
 
 ```text
-校验 ScreeningDecision
-  → 保存产物
-  → SEARCHED → SCREENED
-  → 追加 state_event
+保存 SearchFeedback
+  → 可选补充检索和 DOI 核验
+  → 保存新版 CandidateSetSnapshot
+  → accept 时校验并保存 ScreeningDecision
+  → SEARCH_REVIEW_PENDING → SCREENED
+  → POST /api/projects/{project_id}/continue
 ```
 
 ### 3.5 逐篇精读与 EXTRACTED
@@ -583,6 +585,8 @@ commit_subagent_result(project_id, "research-synthesizer")
 - `gap.evidence_ids` 与 `supporting_paper_ids` 对应；
 - 假设中的精确数字能够在对应 Evidence 引文中找到。
 
+当前数字校验采用通用正则 `\d+(?:\.\d+)?%?` 提取假设中的数字，再用字符串包含关系检查 Evidence 引文。因此 `2D`、`3DVG`、`FFL-3DOG` 等技术术语可能被误判，`2023` 等较长数字也可能让单独的 `3` 被错误视为已有支持。该限制及诊断方法见[《故障诊断与当前限制》](troubleshooting.md)。
+
 `SynthesisReport` 的结构：
 
 | 字段 | 含义 |
@@ -731,7 +735,7 @@ extract_pdf_text
 verify_doi
 ```
 
-`verify_doi` 仍保留在文献工具实现中，但当前 Agent 图没有把它分配给任何 Agent；Reviewer 只读取项目快照并检查现有 Evidence。该实现与 Reviewer Prompt 中“禁止联网核验 DOI”的规则一致。
+`verify_doi` 没有分配给任何 Agent，由 `SearchReviewService` 在用户手动加入 DOI 时调用；Reviewer 只读取项目快照并检查现有 Evidence。该实现与 Reviewer Prompt 中“禁止联网核验 DOI”的规则一致。
 
 因此：
 
@@ -777,7 +781,8 @@ verify_doi
 
 | 子 Agent 类型 | 保存产物 | 状态变化 |
 |---|---|---|
-| `literature-scout` | `SearchReport` | `CREATED → SEARCHED` |
+| `literature-scout` | `SearchReport`、`CandidateSetSnapshot` | `CREATED → SEARCHED → SEARCH_REVIEW_PENDING`（非空候选） |
+| 检索审核服务 | `SearchFeedback`、可选 `SupplementalSearchReport`、`CandidateSetSnapshot`、确认时的 `ScreeningDecision` | 补充时保持 `SEARCH_REVIEW_PENDING`；确认后进入 `SCREENED` |
 | `paper-reader` | `PaperCard` | 保持 `SCREENED` |
 | `research-synthesizer` | `SynthesisReport` | `EXTRACTED → SYNTHESIZED` |
 | `evidence-reviewer` | `ReviewResult` | `REVIEW_PENDING → REVIEWED` |
@@ -786,11 +791,14 @@ verify_doi
 
 - active project 与提交的 `project_id` 不一致：返回 `active_project_mismatch`。
 - 没有未消费结果：返回 `subagent_result_unavailable`。
+- 模型调用结束但没有可解析的结构化对象：运行时暂存 `_subagent_error=structured_response_missing`，随后按无效结果处理。
 - 结构、阶段或 Evidence 校验失败：返回 `subagent_commit_rejected`。
 - 无效结果会被标记为已消费，避免重复提交同一错误结果。
 - 除 Scout 外，第一次拒绝允许重新委派一次。
 - 连续第二次失败后要求停止重试并进入 `INCONCLUSIVE`。
 - 主 Agent 始终禁止手工重建子 Agent JSON。
+
+`structured_response_missing` 可能表现为模型已消耗 completion token、`finish_reason=tool_calls`，但消息里没有可执行工具调用或 `structured_response`。现有日志只保存 LangChain 解析后的响应，无法始终进一步区分模型兼容接口和框架适配层。第一次失败允许重新委派；第二次仍无效时进入 `INCONCLUSIVE`。
 
 `commit_subagent_result(project_id, subagent_type, runtime)` 中，`project_id` 用于防止跨项目提交，`subagent_type` 用于找到对应暂存槽并选择正确 Schema，`runtime` 由框架自动注入并提供当前 `thread_id`。工具不接受 `payload_json`，正是为了保持子 Agent 原始结构化结果。
 
@@ -820,6 +828,7 @@ Middleware 是模型调用和工具执行之间的拦截层。`SerialToolExecuti
 | 当前阶段与 Agent 要求不符 | `subagent_stage_not_ready` |
 | 上一份同类型结果尚未提交 | `subagent_result_must_be_committed` |
 | 重复委派 `literature-scout` | `literature_scout_limit_reached` |
+| 人工审核阶段由主 Agent 保存筛选或直接终止 | `human_search_review_required` |
 
 子 Agent 的阶段要求：
 
@@ -839,7 +848,8 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 | 当前阶段 | 允许目标 | 关键前置条件 |
 |---|---|---|
 | `CREATED` | `SEARCHED` | 保存并校验 `SearchReport` |
-| `SEARCHED` | `SCREENED`、`INCONCLUSIVE` | `ScreeningDecision`，或保存证据不足说明 |
+| `SEARCHED` | `SEARCH_REVIEW_PENDING`、`INCONCLUSIVE` | 保存候选集快照，或零候选时保存证据不足说明 |
+| `SEARCH_REVIEW_PENDING` | `SCREENED`、`INCONCLUSIVE` | 用户确认当前候选集，或通过反馈接口停止 |
 | `SCREENED` | `EXTRACTED`、`INCONCLUSIVE` | 每篇入选论文都有 `PaperCard`；至少一条 Evidence |
 | `EXTRACTED` | `SYNTHESIZED`、`INCONCLUSIVE` | `SynthesisReport` 引用真实 Evidence |
 | `SYNTHESIZED` | `REVIEW_PENDING`、`INCONCLUSIVE` | 无新增产物推进 |
@@ -860,13 +870,17 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 - REVISE 后无法补充证据；
 - 检索或全文服务持续不可用，现有证据不足以支持综合。
 
-`INCONCLUSIVE` 表示本轮检索已经执行，但证据不足以形成可审计结论。
+`INCONCLUSIVE` 是多种受控终止原因的汇总状态。它可能表示证据不足，也可能表示用户主动停止、综合或审查连续生成无效结构化结果，或其他无法安全继续的条件。
 
-保留该终止状态可以区分两类结果：运行异常表示系统未能完成工作；`INCONCLUSIVE` 表示系统按流程工作并明确发现证据不足。后者会保存已尝试查询、失败信息和改进建议，不需要制造确定性科研结论。
+该状态会保存 `InsufficientEvidence` 和已成功提交的前序产物。判断根因时必须读取 `InsufficientEvidence.reason` 与运行日志中的首个 `artifact.commit_failed`；只有 `COMPLETED + PASS` 表示正式科研完成。当前 `INCONCLUSIVE` 是终态，API 没有从 `EXTRACTED` 恢复综合或重新打开项目的入口。
 
 ## 8. 当前实现判断
 
-### 8.1 
+### 8.1 可视化人工审核入口
+
+启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供本地测试台，支持最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。Swagger 保留在 `/docs`。
+
+排除、`accept` 和 `stop` 当前没有撤销接口；多人同时测试同一项目时也应避免并发提交。前端会锁定单个浏览器中的提交按钮并显示确认提示，这无法替代服务端幂等或项目级运行锁。
 
 ### 8.2 子 Agent 无直接通信
 
@@ -890,22 +904,24 @@ research-synthesizer → evidence-reviewer
 
 ### 8.3 子 Agent Skill 的实际加载情况
 
-`build_subagent_registry` 中包含：
+`WorkspaceBootstrapper` 会在启动时复制、校验并读取全部 Skill。`build_subagent_registry` 随后把角色 Skill 全文直接拼接到对应子 Agent 的 system prompt：
 
-```python
-del skill_paths
-```
+- `literature-scout` → `literature-search`；
+- `paper-reader` → `paper-reading`；
+- `research-synthesizer` → `research-synthesis`；
+- `evidence-reviewer` → `evidence-review`。
 
-因此，4 个子 Agent 当前主要依赖：
+4 个子 Agent 同时依赖：
 
 - 各自的 system prompt；
+- 已注入的完整角色 Skill；
 - 显式工具列表；
 - `response_format` JSON Schema；
 - 中间件限制。
 
-只有主 Agent 在 `create_deep_agent` 中加载 `research-protocol` Skill。
+主 Agent 也会把 `research-protocol` Skill 全文直接注入 system prompt。
 
-当前注册函数通过 `del skill_paths` 明确不把角色 Skill 路径交给编译后的窄 Agent，避免它们同时获得通用文件系统能力；角色行为主要由 system prompt 和 JSON Schema 提供。这与部分架构说明中“每个角色遵循独立 Skill”的描述存在差异。
+直接注入使每个角色都能遵循独立 Skill，同时无需为读取 Skill 向窄化子 Agent 开放通用文件系统能力。工具权限、中间件、JSON Schema 和 Python 状态机仍提供确定性约束。
 
 ### 8.4 确定性边界
 
@@ -922,35 +938,32 @@ Prompt / research-protocol
 
 ## 9. 代码依据
 
-| 文件 | 关键范围 | 用途 |
-|---|---:|---|
-| `src/research_agent/agents/supervisor.py` | 65–382 | Supervisor 初始化、主图构建、入口方法、日志和降级策略 |
-| `src/research_agent/agents/registry.py` | 33–121 | 4 个子 Agent 的工具、结构化输出和调用限制 |
-| `src/research_agent/agents/prompts.py` | 1–77 | 主 Agent 与各子 Agent 的行为约束 |
-| `src/research_agent/agents/runtime_state.py` | 68–326 | 线程级暂存、查询记录、全文获取守卫和 `recording_runnable` |
-| `src/research_agent/agents/workflow_guard.py` | 16–176 | 首工具、阶段、委派类型和 Scout 次数限制 |
-| `src/research_agent/agents/serial_tools.py` | 18–85 | 单工具调用和串行执行 |
-| `src/research_agent/tools/project_tools.py` | 20–521 | 项目工具、Evidence 目录、原样提交、阶段推进和 `INCONCLUSIVE` |
-| `src/research_agent/tools/literature_tools.py` | 197–534 | OpenAlex、Crossref、PDF 缓存、PDF 解析和 DOI 工具 |
-| `src/research_agent/application/research_service.py` | 29–275 | 产物校验、Evidence 校验和阶段前置条件 |
-| `src/research_agent/domain/workflow.py` | 15–54 | 状态迁移与 PASS/REVISE 门禁 |
+| 文件 | 关键符号 | 用途 |
+|---|---|---|
+| `src/research_agent/agents/supervisor.py` | `ResearchSupervisor` | Supervisor 初始化、主图构建、入口方法、日志和降级策略 |
+| `src/research_agent/agents/registry.py` | `build_subagent_registry` | 4 个子 Agent 的工具、结构化输出和调用限制 |
+| `src/research_agent/agents/prompts.py` | `MAIN_SYSTEM_PROMPT`、角色 Prompt | 主 Agent 与各子 Agent 的行为约束 |
+| `src/research_agent/agents/runtime_state.py` | `ResearchRuntimeState`、`recording_runnable` | 线程级暂存、查询记录、全文获取守卫和结构化响应记录 |
+| `src/research_agent/agents/workflow_guard.py` | `ResearchWorkflowGuardMiddleware` | 首工具、阶段、委派类型和 Scout 次数限制 |
+| `src/research_agent/agents/serial_tools.py` | `SerialToolExecutionMiddleware` | 单工具调用和串行执行 |
+| `src/research_agent/tools/project_tools.py` | `build_project_tools` | 项目工具、Evidence 目录、原样提交、阶段推进和 `INCONCLUSIVE` |
+| `src/research_agent/tools/literature_tools.py` | `build_literature_tools` | OpenAlex、Crossref、PDF 缓存、PDF 解析和 DOI 工具 |
+| `src/research_agent/application/research_service.py` | `ResearchService` | 产物校验、Evidence 校验和阶段前置条件 |
+| `src/research_agent/application/search_review.py` | `SearchReviewService` | 人工反馈、补充检索、候选合并与确认 |
+| `src/research_agent/domain/workflow.py` | `validate_transition` | 状态迁移与 PASS/REVISE 门禁 |
 
 ## 10. 验证记录
 
 执行命令：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q `
-  tests/test_supervisor_policy.py `
-  tests/test_project_tools.py `
-  tests/test_workflow_guard.py `
-  tests/test_serial_tool_execution.py
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 结果：
 
 ```text
-21 passed
+74 passed
 ```
 
 ## 11. 总结
@@ -962,6 +975,6 @@ Prompt / research-protocol
 3. 所有模型和工具调用强制串行。
 4. 正式结构化结果通过线程级暂存原样提交。
 5. 业务校验和状态推进由 Python 代码控制。
-6. Evidence 不足可以正常进入 `INCONCLUSIVE`。
+6. 证据不足、用户停止或连续结构化结果失败会受控进入 `INCONCLUSIVE`，具体原因保存在 Artifact 与运行事件中。
 
-后续同步项目文档时，建议优先更新 `流程.mmd`，并明确子 Agent Skill 的真实加载策略以及主 Agent 自动文件工具的权限范围。
+当前已知的数值校验误判、结构化响应缺失和恢复边界见[《故障诊断与当前限制》](troubleshooting.md)。

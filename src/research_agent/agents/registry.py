@@ -12,6 +12,7 @@ from research_agent.agents.prompts import (
     REVIEWER_PROMPT,
     SCOUT_PROMPT,
     SYNTHESIZER_PROMPT,
+    inject_skill,
 )
 from research_agent.agents.runtime_state import (
     ExecutedSearchTrackingMiddleware,
@@ -32,15 +33,23 @@ def _bounded_middleware(tool_call_limit: int) -> list:
 
 def build_subagent_registry(
     tools_by_name: Mapping[str, BaseTool],
-    skill_paths: Mapping[str, str],
+    skill_contents: Mapping[str, str],
     model: str | BaseChatModel,
     runtime_state: ResearchRuntimeState | None = None,
     max_openalex_searches: int = 3,
     max_crossref_searches: int = 1,
     max_paper_fetches_per_paper: int = 2,
 ) -> Sequence[dict]:
-    del skill_paths  # Compiled narrow agents do not receive general filesystem capabilities.
     state = runtime_state or ResearchRuntimeState()
+    required_skills = {
+        "literature-search",
+        "paper-reading",
+        "research-synthesis",
+        "evidence-review",
+    }
+    missing_skills = sorted(required_skills - set(skill_contents))
+    if missing_skills:
+        raise ValueError("Missing subagent Skills: " + ", ".join(missing_skills))
 
     scout_tools = [tools_by_name["search_openalex"]]
     if max_crossref_searches > 0:
@@ -67,7 +76,11 @@ def build_subagent_registry(
         (
             "literature-scout",
             "检索并筛选学术论文，返回结构化 SearchReport。",
-            SCOUT_PROMPT,
+            inject_skill(
+                SCOUT_PROMPT,
+                "literature-search",
+                skill_contents["literature-search"],
+            ),
             scout_tools,
             SearchReport,
             scout_middleware,
@@ -75,7 +88,7 @@ def build_subagent_registry(
         (
             "paper-reader",
             "获取开放全文或使用摘要证据，并生成一篇 PaperCard。",
-            READER_PROMPT,
+            inject_skill(READER_PROMPT, "paper-reading", skill_contents["paper-reading"]),
             [tools_by_name["fetch_paper_text"], tools_by_name["extract_pdf_text"]],
             PaperCard,
             [
@@ -92,7 +105,11 @@ def build_subagent_registry(
         (
             "research-synthesizer",
             "只基于可定位 Evidence 比较论文并生成 SynthesisReport。",
-            SYNTHESIZER_PROMPT,
+            inject_skill(
+                SYNTHESIZER_PROMPT,
+                "research-synthesis",
+                skill_contents["research-synthesis"],
+            ),
             [tools_by_name["get_active_research_project"]],
             SynthesisReport,
             _bounded_middleware(2),
@@ -100,7 +117,11 @@ def build_subagent_registry(
         (
             "evidence-reviewer",
             "只读审查引用、证据和结论的对应关系。",
-            REVIEWER_PROMPT,
+            inject_skill(
+                REVIEWER_PROMPT,
+                "evidence-review",
+                skill_contents["evidence-review"],
+            ),
             [tools_by_name["get_active_research_project"]],
             ReviewResult,
             [

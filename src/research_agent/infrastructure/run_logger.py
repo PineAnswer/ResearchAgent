@@ -557,6 +557,8 @@ class ResearchRunLogger(BaseCallbackHandler):
             return "completed"
         if stage == "INCONCLUSIVE":
             return "inconclusive"
+        if stage == "SEARCH_REVIEW_PENDING":
+            return "awaiting_input"
         if verdict == "REVISE":
             return "needs_revision"
         return "incomplete"
@@ -630,7 +632,13 @@ class ResearchRunLogger(BaseCallbackHandler):
             }
         )
         self._write_json(self.run_path, self._run_record)
-        if effective_status not in {"completed", "inconclusive", "needs_revision", "incomplete"}:
+        if effective_status not in {
+            "completed",
+            "inconclusive",
+            "needs_revision",
+            "incomplete",
+            "awaiting_input",
+        }:
             message = f"科研任务结束：{effective_status}"
         elif project_status.get("stage") == "COMPLETED" and review.get("verdict") == "PASS":
             message = "科研项目已通过审查并完成"

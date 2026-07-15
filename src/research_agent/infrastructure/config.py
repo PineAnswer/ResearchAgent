@@ -30,6 +30,8 @@ class Settings:
     search_max_retries: int = 3
     search_backoff_seconds: float = 1.0
     search_max_retry_wait_seconds: float = 30.0
+    max_search_review_rounds: int = 3
+    max_suggested_queries_per_round: int = 3
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,5 +71,12 @@ class Settings:
             search_max_retry_wait_seconds=max(
                 0.0,
                 float(os.getenv("RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS", "30.0")),
+            ),
+            max_search_review_rounds=max(
+                0, int(os.getenv("RESEARCH_AGENT_MAX_SEARCH_REVIEW_ROUNDS", "3"))
+            ),
+            max_suggested_queries_per_round=max(
+                1,
+                int(os.getenv("RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND", "3")),
             ),
         )

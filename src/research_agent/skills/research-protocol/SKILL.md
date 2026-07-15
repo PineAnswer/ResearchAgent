@@ -12,16 +12,18 @@ description: 证据驱动科研项目的总流程与状态推进规范
 - 调用 `create_research_project` 并记录 `project_id`。
 - 成功创建项目之前禁止委派任何子 Agent，也禁止保存产物。
 
-## 第二步：检索文献 → SEARCHED
+## 第二步：检索文献 → SEARCH_REVIEW_PENDING
 
 - 委派一次 literature-scout。
 - literature-scout 每个任务只能委派一次；禁止使用 general-purpose 或第二次委派绕过检索限制。
 - 调用 `commit_subagent_result(project_id, "literature-scout")`，由系统原样提交结构化结果并进入 SEARCHED。
 - 如果 SearchReport 的 `candidates` 为空，立即调用 `finish_inconclusive` 保存检索词、失败原因和建议，项目进入 `INCONCLUSIVE` 并正常结束。禁止创建空 ScreeningDecision 或继续到 EXTRACTED。
+- 如果存在候选论文，系统会创建候选集快照并进入 `SEARCH_REVIEW_PENDING`。立即停止本轮 Agent 执行，等待用户通过检索审核 API 补充查询、加入或排除论文。
 
-## 第三步：筛选论文 → SCREENED
+## 第三步：用户确认候选集 → SCREENED
 
-- 根据 SearchReport 生成 ScreeningDecision。
+- 只有用户提交 `action=accept` 后，检索审核服务才能根据当前候选集生成 ScreeningDecision。
+- Supervisor在 `SEARCH_REVIEW_PENDING` 阶段禁止自行调用 `save_screening_decision`。
 - ScreeningDecision 的固定格式如下；`reasons` 只能包含字符串，并按入选论文顺序描述理由：
 
 ```json
@@ -32,7 +34,8 @@ description: 证据驱动科研项目的总流程与状态推进规范
 }
 ```
 
-- 调用 `save_screening_decision`，原子保存并进入 SCREENED。
+- 检索审核服务原子保存 `ScreeningDecision` 并进入 SCREENED。
+- 新一轮继续执行收到已绑定的 `project_id` 和 `SCREENED` 状态后，禁止重新创建项目或重新检索，从逐篇 `paper-reader` 开始。
 
 ## 第四步：精读论文 → EXTRACTED
 
@@ -41,8 +44,8 @@ description: 证据驱动科研项目的总流程与状态推进规范
 1. 从 SearchReport 复制该论文完整元数据，包括 paper_id、title、authors、year、abstract、doi、url、source。
 2. 委派一个 paper-reader。它会使用 `fetch_paper_text` 自动尝试 OpenAlex/arXiv 开放全文。
 3. 收到 PaperCard 后立即调用 `commit_subagent_result(project_id, "paper-reader")` 原样保存。
-5. 保存成功后再处理下一篇。
-6. 全部入选论文保存完成后，调用 `advance_project_stage(project_id, "EXTRACTED", "paper-reader")`。
+4. 保存成功后再处理下一篇。
+5. 全部入选论文保存完成后，调用 `advance_project_stage(project_id, "EXTRACTED", "paper-reader")`。
 
 PaperCard 官方字段固定为：
 
@@ -91,6 +94,6 @@ PaperCard 官方字段固定为：
 ## 停止规则
 
 - 子 Agent 返回 `_subagent_error` 时仍调用 `commit_subagent_result`，由系统记录拒绝并释放结果；根据 `retry_allowed` 决定重新委派或进入 `INCONCLUSIVE`。
-- 同一工具错误连续出现两次时停止重试，保留局限并进入可继续的下一步。
+- 工具返回结构化错误时严格遵循其中的 `instruction` 和 `retry_allowed`；禁止为了继续流程而跳过前置产物或非法推进状态。
 - 子 Agent 达到工具调用上限时，Supervisor不得以相同指令重复委派。
 - 所有状态变化必须经过 Python 状态机。

@@ -4,7 +4,7 @@ PI_PROMPT = """
 ## 必须遵守的规则
 
 1. 同一条 AI 消息最多调用一个工具。必须等待该工具返回结果，再决定下一次调用。
-2. 正常状态逐步推进：CREATED → SEARCHED → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → COMPLETED；证据不足时从SEARCHED或SCREENED进入INCONCLUSIVE并结束。
+2. 正常状态逐步推进：CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → COMPLETED；证据不足时按结构化错误指令从状态机允许的当前阶段进入INCONCLUSIVE并结束。
 3. 子Agent完成后只调用 commit_subagent_result；该工具从线程级结果仓库原样提交结构化输出，禁止手工复制JSON。
 4. 工具返回可恢复错误时，根据结构化错误继续流程；禁止围绕同一错误反复尝试。
 5. ScreeningDecision 只使用 save_screening_decision 保存；不得使用通用JSON保存工具。
@@ -20,7 +20,7 @@ PI_PROMPT = """
 15. ScreeningDecision 的三个参数固定为 included_paper_ids、excluded_paper_ids、reasons；三者都是字符串列表。
 16. 委派 research-synthesizer 时必须复制 create_research_project 返回的原始 project_id，并提供研究主题与研究问题；不得复制论文列表、猜测项目ID或自行定义 SynthesisReport JSON。
 17. 委派 evidence-reviewer 时同样必须提供原始 project_id；不得自行定义 ReviewResult JSON。DOI仅保留为论文元数据，Reviewer不做联网DOI验证。
-18. 成功创建项目是所有委派和产物保存的前置条件；第一个业务工具必须是 create_research_project。
+18. 新任务的第一个业务工具必须是 create_research_project。继续提示中明确给出已绑定project_id时禁止创建新项目，先读取已有项目快照。
 19. task 只允许使用 literature-scout、paper-reader、research-synthesizer、evidence-reviewer；禁止调用 general-purpose。
 20. 每个科研任务只能委派一次 literature-scout。达到工具上限或返回部分结果后，必须使用已有结果继续，禁止再次委派检索 Agent。
 21. SearchReport 中的候选论文元数据不能直接保存为PaperCard；必须委派paper-reader并提交其记录结果。
@@ -29,6 +29,8 @@ PI_PROMPT = """
 24. 全部PaperCard保存后，如果advance_project_stage返回insufficient_evidence，立即在SCREENED阶段调用finish_inconclusive；禁止委派research-synthesizer。
 25. 进入REVIEW_PENDING后才能委派evidence-reviewer。审查为PASS才可声称科研项目完成；REVISE必须明确写“本轮执行结束，报告需要修订”，并返回EXTRACTED修订或进入INCONCLUSIVE。
 26. task返回包含_subagent_error的对象时仍然调用commit_subagent_result；提交工具会释放无效结果并告知是否允许重新委派。禁止直接结束整个运行。
+27. literature-scout提交非空候选集后项目会进入SEARCH_REVIEW_PENDING；立即停止本轮执行并明确告知用户通过检索审核API调整或确认候选集。禁止Supervisor自行调用save_screening_decision。
+28. 继续已有SCREENED项目时跳过创建、检索和筛选，从逐篇paper-reader开始执行后续流程。
 """.strip()
 
 
@@ -78,3 +80,17 @@ REVIEWER_PROMPT = """
 verified_evidence_ids只能填写PaperCard findings中的真实evidence_id，禁止填写artifact_id。PASS至少验证一条Evidence。
 DOI字段只用于论文标识和去重。禁止联网核验DOI；集中检查claim、evidence_id、quote、page、section及综合结论之间的对应关系。
 """.strip()
+
+
+def inject_skill(base_prompt: str, skill_name: str, skill_content: str) -> str:
+    """Embed one required Skill in an Agent prompt without granting filesystem tools."""
+    content = skill_content.strip()
+    if not content:
+        raise ValueError(f"Skill content is empty: {skill_name}")
+    return (
+        f"{base_prompt.strip()}\n\n"
+        f"## 已注入的 {skill_name} Skill\n\n"
+        "以下 Skill 全文已经由程序在启动时加载，必须遵循；"
+        "工具权限、结构化输出 Schema、中间件和 Python 状态机仍是最终执行边界。\n\n"
+        f"<skill name=\"{skill_name}\">\n{content}\n</skill>"
+    )

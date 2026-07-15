@@ -102,6 +102,18 @@ class SqliteResearchRepository:
             raise ProjectNotFound(project_id)
         return ResearchProject.model_validate_json(row["payload_json"])
 
+    def list_projects(self, limit: int = 20) -> list[ResearchProject]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM projects ORDER BY updated_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return [
+            ResearchProject.model_validate_json(row["payload_json"])
+            for row in rows
+        ]
+
     def transition(
         self,
         project_id: str,

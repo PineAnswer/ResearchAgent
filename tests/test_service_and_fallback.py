@@ -11,6 +11,25 @@ from research_agent.domain.workflow import InvalidTransition
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 
 
+def _enter_search_review(service, project_id: str, paper_ids: list[str]) -> None:
+    service.save_artifact(
+        project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {"paper_id": paper_id, "title": paper_id, "source": "test"}
+                for paper_id in paper_ids
+            ],
+            "executed_queries": ["query"],
+        },
+    )
+    service.transition(
+        project_id,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+
+
 def test_fallback_creates_traceable_project_without_claiming_results(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     fallback = OfflineFallback(service)
@@ -93,7 +112,7 @@ def test_atomic_commit_rolls_back_when_transition_is_illegal(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
 
-    with pytest.raises(InvalidTransition):
+    with pytest.raises((InvalidTransition, WorkflowPrerequisiteError)):
         service.save_artifact_and_transition(
             project.project_id,
             "ScreeningDecision",
@@ -146,6 +165,7 @@ def test_extracted_requires_a_paper_card_for_every_included_paper(tmp_path) -> N
         ResearchStage.SEARCHED,
         actor="literature-scout",
     )
+    _enter_search_review(service, searched.project_id, ["P1", "P2"])
     _, screened = service.save_artifact_and_transition(
         searched.project_id,
         "ScreeningDecision",
@@ -196,6 +216,7 @@ def test_extracted_rejects_all_empty_findings(tmp_path) -> None:
         ResearchStage.SEARCHED,
         actor="scout",
     )
+    _enter_search_review(service, project.project_id, ["P1"])
     _, project = service.save_artifact_and_transition(
         project.project_id,
         "ScreeningDecision",
@@ -237,6 +258,7 @@ def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) ->
         ResearchStage.SEARCHED,
         actor="scout",
     )
+    _enter_search_review(service, project.project_id, ["P1"])
     _, project = service.save_artifact_and_transition(
         project.project_id,
         "ScreeningDecision",

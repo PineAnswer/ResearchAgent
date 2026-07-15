@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 def utc_now() -> datetime:
@@ -14,6 +14,7 @@ def utc_now() -> datetime:
 class ResearchStage(StrEnum):
     CREATED = "CREATED"
     SEARCHED = "SEARCHED"
+    SEARCH_REVIEW_PENDING = "SEARCH_REVIEW_PENDING"
     SCREENED = "SCREENED"
     EXTRACTED = "EXTRACTED"
     SYNTHESIZED = "SYNTHESIZED"
@@ -50,6 +51,41 @@ class SearchReport(BaseModel):
     search_terms: list[str]
     candidates: list[PaperCandidate]
     selection_notes: list[str] = Field(default_factory=list)
+
+
+class ManualPaperInput(BaseModel):
+    paper_id: str = ""
+    title: str = ""
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    abstract: str = ""
+    doi: str = ""
+    url: HttpUrl | None = None
+    source: str = "user"
+
+    @model_validator(mode="after")
+    def require_identifier(self) -> "ManualPaperInput":
+        if self.doi.strip() or (self.paper_id.strip() and self.title.strip()):
+            return self
+        raise ValueError("Manual paper requires a DOI or both paper_id and title")
+
+
+class SearchFeedback(BaseModel):
+    action: Literal["refine", "accept", "stop"]
+    suggested_queries: list[str] = Field(default_factory=list)
+    added_papers: list[ManualPaperInput] = Field(default_factory=list)
+    excluded_paper_ids: list[str] = Field(default_factory=list)
+    comment: str = ""
+
+
+class CandidateSetSnapshot(BaseModel):
+    candidates: list[PaperCandidate]
+    excluded_paper_ids: list[str] = Field(default_factory=list)
+    executed_queries: list[str] = Field(default_factory=list)
+    search_round: int = Field(default=0, ge=0)
+    max_search_rounds: int = Field(default=3, ge=0)
+    user_comments: list[str] = Field(default_factory=list)
+    search_failures: list[str] = Field(default_factory=list)
 
 
 class ScreeningDecision(BaseModel):

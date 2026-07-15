@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Evidence Research Agent 的本地可视化测试控制台"
+    />
+    <title>Evidence Research Console</title>
+    <link rel="stylesheet" href="/ui-assets/styles.css" />
+    <script src="/ui-assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">E</span>
+        <div>
+          <p class="eyebrow">Evidence Research Agent</p>
+          <h1>文献研究测试台</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="healthBadge" class="health-badge is-checking">
+          <span class="status-dot" aria-hidden="true"></span>
+          正在连接
+        </span>
+        <a class="quiet-link" href="/docs" target="_blank" rel="noreferrer">API 文档</a>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="项目导航">
+        <button id="newProjectToggle" class="primary wide" type="button">
+          <span aria-hidden="true">＋</span> 发起新研究
+        </button>
+
+        <form id="newProjectForm" class="new-project-form" hidden>
+          <label for="topicInput">研究主题</label>
+          <input
+            id="topicInput"
+            name="topic"
+            type="text"
+            placeholder="例如：3D Visual Grounding"
+            autocomplete="off"
+            required
+          />
+
+          <label for="questionInput">研究问题</label>
+          <textarea
+            id="questionInput"
+            name="research_question"
+            rows="4"
+            placeholder="例如：如何提高无人机场景中的 3DVG IoU？"
+            required
+          ></textarea>
+
+          <div class="form-actions">
+            <button class="primary" type="submit">开始检索</button>
+            <button id="cancelNewProject" class="secondary" type="button">取消</button>
+          </div>
+        </form>
+
+        <div class="sidebar-heading">
+          <h2>最近项目</h2>
+          <button id="refreshProjects" class="icon-button" type="button" aria-label="刷新项目列表">
+            ↻
+          </button>
+        </div>
+
+        <nav id="projectList" class="project-list" aria-live="polite">
+          <p class="muted small">正在载入项目…</p>
+        </nav>
+
+        <form id="projectLookupForm" class="project-lookup">
+          <label for="projectIdInput">直接打开项目 ID</label>
+          <div class="input-row">
+            <input
+              id="projectIdInput"
+              type="text"
+              placeholder="RP-20260715-…"
+              autocomplete="off"
+            />
+            <button class="secondary" type="submit">打开</button>
+          </div>
+        </form>
+      </aside>
+
+      <main id="main-content" class="main-content" tabindex="-1">
+        <section id="emptyState" class="empty-state">
+          <div class="empty-symbol" aria-hidden="true">⌁</div>
+          <p class="eyebrow">Human-in-the-loop research</p>
+          <h2>选择一个项目，开始可视化审核</h2>
+          <p>
+            你可以查看候选论文、补充检索方向、手动加入 DOI、排除论文，并在确认后继续精读与证据审查。
+          </p>
+          <button id="emptyNewProject" class="primary" type="button">发起新研究</button>
+        </section>
+
+        <section id="projectView" hidden>
+          <div class="project-hero">
+            <div>
+              <div class="hero-meta">
+                <span id="stageBadge" class="stage-badge">CREATED</span>
+                <button id="copyProjectId" class="project-id" type="button" title="复制项目 ID">
+                  <span id="projectIdLabel"></span>
+                  <span aria-hidden="true">⧉</span>
+                </button>
+              </div>
+              <h2 id="projectTopic"></h2>
+              <p id="projectQuestion" class="project-question"></p>
+            </div>
+            <button id="reloadProject" class="secondary" type="button">刷新状态</button>
+          </div>
+
+          <ol id="stageStepper" class="stage-stepper" aria-label="研究进度"></ol>
+
+          <section id="runPanel" class="panel run-panel" hidden>
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Agent activity</p>
+                <h3>正在执行研究</h3>
+              </div>
+              <span class="loading-orbit" aria-hidden="true"></span>
+            </div>
+            <p id="runStatusText">正在初始化…</p>
+            <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
+          </section>
+
+          <section id="reviewPanel" hidden>
+            <div class="section-intro">
+              <div>
+                <p class="eyebrow">Search review</p>
+                <h3>审核候选论文</h3>
+                <p>勾选保留的论文。取消勾选后，提交反馈或确认时会将其排除。</p>
+              </div>
+              <div class="review-stats" aria-label="候选集统计">
+                <div><strong id="candidateCount">0</strong><span>候选论文</span></div>
+                <div><strong id="selectedCount">0</strong><span>当前保留</span></div>
+                <div><strong id="roundCount">0 / 3</strong><span>补充轮次</span></div>
+              </div>
+            </div>
+
+            <div class="review-toolbar">
+              <label class="search-field" for="candidateFilter">
+                <span aria-hidden="true">⌕</span>
+                <input
+                  id="candidateFilter"
+                  type="search"
+                  placeholder="按标题、作者或 DOI 筛选"
+                />
+              </label>
+              <div class="selection-actions">
+                <button id="selectAll" class="text-button" type="button">全部保留</button>
+                <button id="clearAll" class="text-button" type="button">全部取消</button>
+              </div>
+            </div>
+
+            <div id="candidateGrid" class="candidate-grid"></div>
+
+            <section class="feedback-panel panel">
+              <div class="panel-heading compact">
+                <div>
+                  <p class="eyebrow">Human feedback</p>
+                  <h3>调整检索方向</h3>
+                </div>
+                <span class="optional-label">选填</span>
+              </div>
+
+              <div class="feedback-grid">
+                <label for="querySuggestions">
+                  补充检索词
+                  <span>每行一条，每轮最多 3 条</span>
+                </label>
+                <textarea
+                  id="querySuggestions"
+                  rows="4"
+                  placeholder="UAV LiDAR language guided 3D object localization&#10;aerial point cloud referring expression grounding"
+                ></textarea>
+
+                <label for="manualDois">
+                  手动加入 DOI
+                  <span>可用换行或逗号分隔</span>
+                </label>
+                <textarea
+                  id="manualDois"
+                  rows="3"
+                  placeholder="10.1000/example"
+                ></textarea>
+
+                <label for="feedbackComment">
+                  审核说明
+                  <span>会保存在项目记录中</span>
+                </label>
+                <textarea
+                  id="feedbackComment"
+                  rows="3"
+                  placeholder="说明补充方向或排除原因…"
+                ></textarea>
+              </div>
+
+              <div class="feedback-actions">
+                <button id="stopReview" class="danger-link" type="button">证据不足，结束项目</button>
+                <div>
+                  <button id="refineReview" class="secondary" type="button">更新候选集</button>
+                  <button id="acceptReview" class="primary" type="button">确认当前选择</button>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section id="continuePanel" class="panel continue-panel" hidden>
+            <div>
+              <p class="eyebrow">Ready to continue</p>
+              <h3>候选集已经确认</h3>
+              <p>下一步将逐篇读取论文、提取可追踪证据，并完成综合与独立审查。</p>
+            </div>
+            <button id="continueResearch" class="primary" type="button">继续研究</button>
+          </section>
+
+          <section id="projectDetails" class="details-section" hidden>
+            <div class="section-intro compact-intro">
+              <div>
+                <p class="eyebrow">Project record</p>
+                <h3>项目记录</h3>
+              </div>
+              <div id="artifactSummary" class="artifact-summary"></div>
+            </div>
+            <div class="details-grid">
+              <section class="panel">
+                <h4>状态时间线</h4>
+                <ol id="eventTimeline" class="event-timeline"></ol>
+              </section>
+              <section class="panel">
+                <h4>研究产物</h4>
+                <div id="artifactList" class="artifact-list"></div>
+              </section>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

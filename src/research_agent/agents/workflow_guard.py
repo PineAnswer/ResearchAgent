@@ -90,6 +90,20 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                     "先调用create_research_project，成功后再委派子Agent或操作项目。",
                 )
         if name != "task":
+            if (
+                name in {"save_screening_decision", "finish_inconclusive"}
+                and self.service is not None
+                and self.runtime_state is not None
+            ):
+                project_id = self.runtime_state.project_id(thread_id)
+                if project_id is not None:
+                    project = self.service.get_project(project_id)
+                    if project.stage is ResearchStage.SEARCH_REVIEW_PENDING:
+                        return self._error(
+                            request,
+                            "human_search_review_required",
+                            "当前正在等待用户检索审核；只能通过search-feedback API确认候选集或停止任务。",
+                        )
             return None
 
         args = request.tool_call.get("args", {})
@@ -148,6 +162,12 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         with self._lock:
             self._project_created.add(thread_id)
             self._scout_calls[thread_id] = 0
+
+    def bind_existing_project(self, thread_id: str) -> None:
+        """Authorize a persisted project rebound by the Supervisor for continuation."""
+        with self._lock:
+            self._project_created.add(thread_id)
+            self._scout_calls.setdefault(thread_id, 0)
 
     def wrap_tool_call(
         self,

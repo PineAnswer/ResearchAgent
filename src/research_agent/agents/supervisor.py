@@ -18,13 +18,16 @@ from openai import (
     RateLimitError,
 )
 
-from research_agent.agents.prompts import PI_PROMPT
+from research_agent.agents.prompts import PI_PROMPT, inject_skill
 from research_agent.agents.registry import build_subagent_registry
 from research_agent.agents.runtime_state import ResearchRuntimeState
 from research_agent.agents.serial_tools import SerialToolExecutionMiddleware
 from research_agent.agents.workflow_guard import ResearchWorkflowGuardMiddleware
 from research_agent.application.fallback import OfflineFallback
 from research_agent.application.research_service import ResearchService
+from research_agent.application.research_service import WorkflowPrerequisiteError
+from research_agent.application.search_review import SearchReviewService
+from research_agent.domain.models import ResearchStage
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
@@ -74,6 +77,26 @@ class ResearchSupervisor:
         self.runtime_assets = WorkspaceBootstrapper(self.settings.filesystem_root).prepare()
         self.runtime_state = ResearchRuntimeState()
         self.checkpointer = InMemorySaver()
+        self.literature_tools = build_literature_tools(
+            self.settings.filesystem_root,
+            openalex_api_key=self.settings.openalex_api_key,
+            contact_email=self.settings.openalex_email,
+            max_retries=self.settings.search_max_retries,
+            backoff_seconds=self.settings.search_backoff_seconds,
+            max_retry_wait_seconds=self.settings.search_max_retry_wait_seconds,
+        )
+        self.literature_tools_by_name = {
+            tool.name: tool for tool in self.literature_tools
+        }
+        self.search_review = SearchReviewService(
+            self.service,
+            self.literature_tools_by_name,
+            max_rounds=self.settings.max_search_review_rounds,
+            max_queries_per_round=self.settings.max_suggested_queries_per_round,
+        )
+        self.workflow_guard = ResearchWorkflowGuardMiddleware(
+            self.service, self.runtime_state
+        )
         self.initialization_error: str | None = None
         try:
             self.graph = self._build_graph()
@@ -98,20 +121,16 @@ class ResearchSupervisor:
 
     def _build_graph(self):
         model = self._build_model()
-        project_tools = build_project_tools(self.service, self.runtime_state)
-        literature_tools = build_literature_tools(
-            self.settings.filesystem_root,
-            openalex_api_key=self.settings.openalex_api_key,
-            contact_email=self.settings.openalex_email,
-            max_retries=self.settings.search_max_retries,
-            backoff_seconds=self.settings.search_backoff_seconds,
-            max_retry_wait_seconds=self.settings.search_max_retry_wait_seconds,
+        project_tools = build_project_tools(
+            self.service,
+            self.runtime_state,
+            on_search_committed=self.search_review.begin_review,
         )
-        all_tools = [*project_tools, *literature_tools]
+        all_tools = [*project_tools, *self.literature_tools]
         tools_by_name = {tool.name: tool for tool in all_tools}
         subagents = build_subagent_registry(
             tools_by_name,
-            self.runtime_assets.skill_paths,
+            self.runtime_assets.skill_contents,
             model=model,
             runtime_state=self.runtime_state,
             max_openalex_searches=self.settings.max_openalex_searches,
@@ -133,17 +152,24 @@ class ResearchSupervisor:
         supervisor_tools = [
             tool for tool in all_tools if tool.name not in hidden_supervisor_tools
         ]
+        try:
+            supervisor_prompt = inject_skill(
+                PI_PROMPT,
+                "research-protocol",
+                self.runtime_assets.skill_contents["research-protocol"],
+            )
+        except KeyError as exc:
+            raise ValueError("Missing Supervisor Skill: research-protocol") from exc
 
         return create_deep_agent(
             model=model,
-            system_prompt=PI_PROMPT,
+            system_prompt=supervisor_prompt,
             tools=supervisor_tools,
             middleware=[
                 SerialToolExecutionMiddleware(),
-                ResearchWorkflowGuardMiddleware(self.service, self.runtime_state),
+                self.workflow_guard,
             ],
             subagents=subagents,
-            skills=[self.runtime_assets.skill_paths["research-protocol"]],
             memory=self.runtime_assets.memory_paths,
             backend=FilesystemBackend(
                 root_dir=str(self.settings.filesystem_root),
@@ -159,6 +185,14 @@ class ResearchSupervisor:
             f"研究主题：{topic}\n"
             f"研究问题：{research_question}\n"
             "请创建项目，并按证据驱动科研流程执行。"
+        )
+
+    @staticmethod
+    def build_continue_prompt(project_id: str) -> str:
+        return (
+            f"继续已有科研项目：{project_id}\n"
+            "该项目已经完成人工候选论文审核并处于SCREENED阶段。"
+            "禁止创建新项目或重新检索；先读取该项目快照，然后从逐篇paper-reader开始继续。"
         )
 
     @staticmethod
@@ -281,6 +315,61 @@ class ResearchSupervisor:
         run_logger.finish("completed", result=result)
         return result
 
+    async def acontinue_project(
+        self,
+        project_id: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        """Continue a persisted project after the human accepted its candidate set."""
+        if self.graph is None:
+            raise AgentUnavailableError(
+                self.initialization_error or "Agent graph is unavailable"
+            )
+        project = self.service.get_project(project_id)
+        if project.stage is not ResearchStage.SCREENED:
+            raise WorkflowPrerequisiteError(
+                "Project continuation requires SCREENED after human search review; "
+                f"current stage is {project.stage.value}"
+            )
+        active_thread_id = thread_id or uuid.uuid4().hex
+        self.runtime_state.register_project(active_thread_id, project_id)
+        self.workflow_guard.bind_existing_project(active_thread_id)
+        run_logger = self._new_run_logger(
+            project.topic,
+            project.research_question,
+            active_thread_id,
+            False,
+        )
+        config = self.build_config(active_thread_id)
+        config["callbacks"] = [run_logger]
+        try:
+            result = await self.graph.ainvoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": self.build_continue_prompt(project_id),
+                        }
+                    ]
+                },
+                config=config,
+            )
+            result["project_status"] = self.service.get_project(project_id).model_dump(
+                mode="json"
+            )
+        except Exception as exc:
+            status = {
+                "project_status": self.service.get_project(project_id).model_dump(
+                    mode="json"
+                )
+            }
+            run_logger.finish("error", result=status, error=str(exc))
+            raise AgentExecutionError(exc, project_id) from exc
+        summary = run_logger.finish("completed", result=result)
+        result["run_log_dir"] = str(run_logger.run_dir)
+        result["run_status"] = summary["status"]
+        return result
+
     async def astream(
         self,
         topic: str,
@@ -314,10 +403,19 @@ class ResearchSupervisor:
             )
             raise AgentExecutionError(exc, run_logger.project_id) from exc
         result = {}
-        if run_logger.project_id:
-            result["project_status"] = self.service.get_project(
-                run_logger.project_id
-            ).model_dump(mode="json")
+        active_project_id = run_logger.project_id or self.runtime_state.project_id(
+            active_thread_id
+        )
+        if active_project_id:
+            project_status = self.service.get_project(active_project_id).model_dump(
+                mode="json"
+            )
+            result["project_status"] = project_status
+            if project_status.get("stage") == "SEARCH_REVIEW_PENDING":
+                yield {
+                    "type": "awaiting_input",
+                    "data": self.search_review.get_review(active_project_id),
+                }
         run_logger.finish("completed", result=result)
 
     def invoke_with_fallback(

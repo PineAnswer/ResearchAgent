@@ -6,6 +6,7 @@ from langchain_core.messages import ToolMessage
 from research_agent.agents.workflow_guard import ResearchWorkflowGuardMiddleware
 from research_agent.agents.runtime_state import ResearchRuntimeState
 from research_agent.application.research_service import ResearchService
+from research_agent.domain.models import ResearchStage
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 
 
@@ -91,3 +92,52 @@ def test_workflow_guard_blocks_subagents_in_the_wrong_stage(tmp_path) -> None:
 
     assert isinstance(blocked, ToolMessage)
     assert _error_code(blocked) == "subagent_stage_not_ready"
+
+
+def test_workflow_guard_reserves_pending_search_review_for_user_api(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    state = ResearchRuntimeState()
+    guard = ResearchWorkflowGuardMiddleware(service, state)
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "query",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": "P1", "title": "Paper", "source": "OpenAlex"}
+            ],
+            "selection_notes": [],
+        },
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {"paper_id": "P1", "title": "Paper", "source": "OpenAlex"}
+            ],
+            "executed_queries": ["query"],
+        },
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+    state.register_project("thread-a", project.project_id)
+    guard.bind_existing_project("thread-a")
+
+    blocked = guard.wrap_tool_call(
+        _request(
+            "save_screening_decision",
+            project_id=project.project_id,
+            included_paper_ids=["P1"],
+            excluded_paper_ids=[],
+            reasons=["relevant"],
+        ),
+        lambda _request: "unexpected",
+    )
+
+    assert isinstance(blocked, ToolMessage)
+    assert _error_code(blocked) == "human_search_review_required"

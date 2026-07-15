@@ -1,7 +1,9 @@
 import research_agent.agents.supervisor as supervisor_module
 import research_agent.agents.registry as registry_module
+import pytest
 from langchain.agents.middleware import ModelCallLimitMiddleware
-from research_agent.agents.prompts import PI_PROMPT
+from research_agent.agents.prompts import PI_PROMPT, inject_skill
+from research_agent.agents.registry import build_subagent_registry
 from research_agent.agents.runtime_state import (
     ExecutedSearchTrackingMiddleware,
     PaperFetchGuardMiddleware,
@@ -45,6 +47,14 @@ def test_supervisor_has_atomic_commit_tool_and_explicit_ordering_policy(tmp_path
     assert "必须复制 create_research_project 返回的原始 project_id" in PI_PROMPT
 
 
+def test_skill_injection_rejects_empty_content_and_missing_subagent_skills() -> None:
+    with pytest.raises(ValueError, match="Skill content is empty: test-skill"):
+        inject_skill("base", "test-skill", "  ")
+
+    with pytest.raises(ValueError, match="Missing subagent Skills"):
+        build_subagent_registry({}, {}, model="test-model")
+
+
 def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> None:
     captured: dict = {}
     agent_configs: list[dict] = []
@@ -84,6 +94,9 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert len(captured["middleware"]) == 2
     assert isinstance(captured["middleware"][0], SerialToolExecutionMiddleware)
     assert isinstance(captured["middleware"][1], ResearchWorkflowGuardMiddleware)
+    assert "skills" not in captured
+    assert '<skill name="research-protocol">' in captured["system_prompt"]
+    assert "禁止为了继续流程而跳过前置产物" in captured["system_prompt"]
     configured_subagents = captured["subagents"]
     assert len(configured_subagents) == 4
     assert all(set(agent) == {"name", "description", "runnable"} for agent in configured_subagents)
@@ -93,6 +106,8 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         for config in agent_configs
     )
     reader = next(config for config in agent_configs if config["name"] == "paper-reader")
+    assert '<skill name="paper-reading">' in reader["system_prompt"]
+    assert "摘要证据不能冒充全文实验细节" in reader["system_prompt"]
     assert len(reader["middleware"]) == 4
     assert isinstance(reader["middleware"][0], SerialToolExecutionMiddleware)
     assert isinstance(reader["middleware"][1], ModelCallLimitMiddleware)
@@ -110,6 +125,10 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     scout_captured = next(
         config for config in agent_configs if config["name"] == "literature-scout"
     )
+    assert '<skill name="literature-search">' in scout_captured["system_prompt"]
+    assert "将研究问题拆成主题词、方法词、对象词和限制条件" in scout_captured[
+        "system_prompt"
+    ]
     assert [tool.name for tool in scout_captured["tools"]] == [
         "search_openalex",
         "search_crossref",
@@ -125,12 +144,18 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     synthesizer = next(
         config for config in agent_configs if config["name"] == "research-synthesizer"
     )
+    assert '<skill name="research-synthesis">' in synthesizer["system_prompt"]
+    assert "只有元数据且findings为空的PaperCard不能支撑综合结论" in synthesizer[
+        "system_prompt"
+    ]
     assert [tool.name for tool in synthesizer["tools"]] == [
         "get_active_research_project"
     ]
     reviewer = next(
         config for config in agent_configs if config["name"] == "evidence-reviewer"
     )
+    assert '<skill name="evidence-review">' in reviewer["system_prompt"]
+    assert "研究空白只来自模型推测" in reviewer["system_prompt"]
     assert [tool.name for tool in reviewer["tools"]] == [
         "get_active_research_project"
     ]

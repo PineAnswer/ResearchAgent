@@ -16,6 +16,25 @@ def _tools_by_name(service: ResearchService):
     return {tool.name: tool for tool in build_project_tools(service)}
 
 
+def _enter_search_review(service, project_id: str, paper_ids: list[str]) -> None:
+    service.save_artifact(
+        project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {"paper_id": paper_id, "title": paper_id, "source": "test"}
+                for paper_id in paper_ids
+            ],
+            "executed_queries": ["query"],
+        },
+    )
+    service.transition(
+        project_id,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+
+
 def test_active_project_tool_is_scoped_by_thread_and_takes_no_model_id(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     tools = _tools_by_name(service)
@@ -85,6 +104,7 @@ def test_incomplete_paper_metadata_is_rejected_at_screened_stage(tmp_path) -> No
         ResearchStage.SEARCHED,
         actor="literature-scout",
     )
+    _enter_search_review(service, searched.project_id, ["P1"])
     _, screened = service.save_artifact_and_transition(
         searched.project_id,
         "ScreeningDecision",
@@ -115,7 +135,7 @@ def test_incomplete_paper_metadata_is_rejected_at_screened_stage(tmp_path) -> No
         "findings",
         "limitations",
     ]
-    assert len(service.get_snapshot(project.project_id)["artifacts"]) == 2
+    assert len(service.get_snapshot(project.project_id)["artifacts"]) == 3
 
 
 def test_atomic_commit_returns_recoverable_error_for_malformed_json(tmp_path) -> None:
@@ -216,6 +236,7 @@ def test_advance_stage_returns_recoverable_error_without_paper_cards(tmp_path) -
         ResearchStage.SEARCHED,
         actor="literature-scout",
     )
+    _enter_search_review(service, searched.project_id, [])
     _, screened = service.save_artifact_and_transition(
         searched.project_id,
         "ScreeningDecision",
@@ -298,6 +319,7 @@ def test_structured_results_remain_exact_through_review(tmp_path) -> None:
     tools["commit_subagent_result"].func(
         project_id, "literature-scout", runtime=runtime
     )
+    _enter_search_review(service, project_id, ["P1"])
     tools["save_screening_decision"].func(
         project_id, ["P1"], [], ["P1 is relevant"]
     )
@@ -389,6 +411,7 @@ def test_invalid_synthesis_is_discarded_and_can_be_regenerated(tmp_path) -> None
     tools["commit_subagent_result"].func(
         project_id, "literature-scout", runtime=runtime
     )
+    _enter_search_review(service, project_id, ["P1"])
     tools["save_screening_decision"].func(project_id, ["P1"], [], ["relevant"])
     state.record_result(
         "thread-a",

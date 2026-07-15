@@ -11,6 +11,8 @@ def test_search_settings_are_configurable_from_environment(tmp_path, monkeypatch
     monkeypatch.setenv("RESEARCH_AGENT_SEARCH_MAX_RETRIES", "4")
     monkeypatch.setenv("RESEARCH_AGENT_SEARCH_BACKOFF_SECONDS", "0.5")
     monkeypatch.setenv("RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS", "12")
+    monkeypatch.setenv("RESEARCH_AGENT_MAX_SEARCH_REVIEW_ROUNDS", "4")
+    monkeypatch.setenv("RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND", "2")
 
     settings = Settings.from_env()
 
@@ -22,3 +24,5 @@ def test_search_settings_are_configurable_from_environment(tmp_path, monkeypatch
     assert settings.search_max_retries == 4
     assert settings.search_backoff_seconds == 0.5
     assert settings.search_max_retry_wait_seconds == 12
+    assert settings.max_search_review_rounds == 4
+    assert settings.max_suggested_queries_per_round == 2

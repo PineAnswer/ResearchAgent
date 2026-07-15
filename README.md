@@ -101,7 +101,13 @@ research-agent status RP-20260715-example
 research-agent serve --host 127.0.0.1 --port 8000
 ```
 
-Swagger 页面：<http://127.0.0.1:8000/docs>
+可视化测试台：<http://127.0.0.1:8000/>
+
+测试台支持发起新研究、浏览最近项目、查看候选论文、勾选排除、补充检索词、手动加入 DOI、确认候选集和继续后续研究。所有操作与 API、CLI 共用同一个 SQLite 项目状态；提交中的按钮会锁定，避免浏览器重复发送同一操作。
+
+人工审核的 `action` 只接受 `refine`、`accept` 和 `stop`。论文排除、候选集确认和终止操作当前没有撤销接口；测试台会在提交前显示确认提示。多人同时测试同一项目时仍应避免并发修改。
+
+Swagger API 页面：<http://127.0.0.1:8000/docs>
 
 主要接口：
 
@@ -109,6 +115,11 @@ Swagger 页面：<http://127.0.0.1:8000/docs>
 GET  /health
 POST /api/research/invoke
 POST /api/research/stream
+GET  /api/projects
+GET  /api/projects/{project_id}
+GET  /api/projects/{project_id}/search-review
+POST /api/projects/{project_id}/search-feedback
+POST /api/projects/{project_id}/continue
 ```
 
 请求体示例：
@@ -121,7 +132,44 @@ POST /api/research/stream
 }
 ```
 
-`/api/research/stream` 使用 SSE 返回 `update`、`done`、`fallback` 或 `error` 事件。
+`/api/research/stream` 使用 SSE 返回 `update`、`awaiting_input`、`done`、`fallback` 或 `error` 事件。初次检索得到候选论文后，项目进入 `SEARCH_REVIEW_PENDING` 并停止本轮 Agent 执行。
+
+查询当前候选集：
+
+```text
+GET /api/projects/RP-.../search-review
+```
+
+补充检索词、加入论文或排除论文：
+
+```json
+{
+  "action": "refine",
+  "suggested_queries": ["few-shot remote sensing augmentation limitations"],
+  "added_papers": [{"doi": "10.1000/example"}],
+  "excluded_paper_ids": ["https://openalex.org/W123"],
+  "comment": "补充小样本场景，排除只讨论目标检测的论文。"
+}
+```
+
+确认当前候选集：
+
+```json
+{
+  "action": "accept",
+  "comment": "确认当前候选论文，继续精读。"
+}
+```
+
+确认后调用：
+
+```text
+POST /api/projects/RP-.../continue
+```
+
+服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
+
+`/continue` 只接受 `SCREENED` 项目。`INCONCLUSIVE` 是当前状态机的终态，已有 `PaperCard` 和 Evidence 仍保存在 SQLite，但当前 API 没有从 `EXTRACTED` 重新执行综合的恢复入口。
 
 ### 7. 运行测试
 
@@ -137,6 +185,7 @@ ruff check .
 - OpenAlex、Crossref、开放 PDF 下载与本地 PDF 文本提取。
 - Pydantic 结构化输出及 SQLite 原子产物提交。
 - Python 状态机、Reviewer 门禁和 append-only 状态事件。
+- 初次检索后暂停、候选论文人工增删、DOI 核验、多轮补充检索和跨进程继续。
 - `InMemorySaver` 短期图状态、`ResearchRuntimeState` 子 Agent 交接状态和 `AGENTS.md` 长期规则。
 - 模型或网络不可用时生成可追踪的 `RuntimeFallback`，不伪造文献、证据或结论。
 - CLI 实时进度、完整运行日志、JSON 产物镜像和 Markdown 报告。
@@ -150,15 +199,19 @@ ruff check .
 | `research-synthesizer` | 跨论文比较并识别研究空白 | `get_active_research_project` | `SynthesisReport` | 最多两次工具调用，只能引用已保存 Evidence |
 | `evidence-reviewer` | 审查结论、引文和 Evidence 对应关系 | `get_active_research_project` | `ReviewResult` | 项目最多读取一次；模型最多调用三次 |
 
-四个子 Agent 使用各自的 system prompt 和结构化响应 schema。运行工作区会包含全部 Skill 文件，但窄化子 Agent 没有通用文件系统或 Skill 读取能力；主 Agent 加载 `research-protocol` Skill 约束全流程。
+主 Agent 和四个子 Agent 都在启动时读取并注入各自的完整 Skill：主 Agent 使用 `research-protocol`，四个子 Agent 分别使用 `literature-search`、`paper-reading`、`research-synthesis` 和 `evidence-review`。Skill 全文直接进入对应 system prompt，窄化子 Agent 仍然没有通用文件系统能力；工具权限、中间件、结构化响应 schema 和 Python 状态机继续提供硬边界。
 
-`verify_doi` 保留在工具实现中，当前 Agent 图未将它分配给任何 Agent。Reviewer 依据项目内的 `claim`、`evidence_id`、quote、page 和 section 审查证据对应关系。
+`verify_doi` 未分配给任何 Agent，由 `SearchReviewService` 在用户手动添加 DOI 时调用。Reviewer 依据项目内的 `claim`、`evidence_id`、quote、page 和 section 审查证据对应关系。
 
 ## 状态机
 
 ```text
 CREATED
   → SEARCHED
+  → SEARCH_REVIEW_PENDING
+      ├─ 用户补充查询、加入或排除论文 → 保持等待
+      ├─ 用户确认 → SCREENED
+      └─ 用户停止 → INCONCLUSIVE
   → SCREENED
   → EXTRACTED
   → SYNTHESIZED
@@ -167,11 +220,11 @@ CREATED
       ├─ PASS   → COMPLETED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
-SEARCHED / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED
+SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED
   └─ 证据不足或无法继续 → INCONCLUSIVE
 ```
 
-所有状态变化都经过 `ResearchService → Repository → validate_transition`。只有 `COMPLETED + PASS` 表示科研项目正式完成；程序正常返回但状态尚未闭环时，运行结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
+所有状态变化都经过 `ResearchService → Repository → validate_transition`。只有 `COMPLETED + PASS` 表示科研项目正式完成；等待用户审核时运行结果为 `awaiting_input`，其他未闭环结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
 
 ## 分层架构
 
@@ -204,7 +257,7 @@ src/research_agent/
 ├── skills/                 # 打包的操作规程
 ├── memories/AGENTS.md      # 长期身份和科研约束
 ├── agents/                 # Supervisor、子Agent注册、中间件和Prompt
-├── api/                    # FastAPI 与 SSE
+├── api/                    # FastAPI、SSE 与本地可视化测试台
 ├── cli.py                  # CLI 入口
 └── demo.py                 # 无模型离线验证
 ```
@@ -214,6 +267,7 @@ src/research_agent/
 - [架构与依赖说明](docs/architecture.md)
 - [主 Agent 与子 Agent 交互流程分析](docs/主Agent与子Agent交互流程分析.md)
 - [运行进度、日志与导出产物](docs/runtime-observability.md)
+- [故障诊断与当前限制](docs/troubleshooting.md)
 
 ## 检索与论文读取策略
 
@@ -226,6 +280,8 @@ RESEARCH_AGENT_MAX_PAPER_FETCHES_PER_PAPER=2
 RESEARCH_AGENT_SEARCH_MAX_RETRIES=3
 RESEARCH_AGENT_SEARCH_BACKOFF_SECONDS=1.0
 RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS=30.0
+RESEARCH_AGENT_MAX_SEARCH_REVIEW_ROUNDS=3
+RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND=3
 ```
 
 - OpenAlex/Crossref 遇到 429 时优先遵循 `Retry-After`，否则按指数退避等待。
@@ -258,6 +314,8 @@ SQLite 保存权威业务事实；`outputs/` 是便于人工检查的镜像；`r
 
 Pydantic 校验失败、非法状态迁移和缺少前置产物会返回给 Agent 或调用方处理，不会生成伪科研结果。
 
+连续两份无效子 Agent 结果也会受控进入 `INCONCLUSIVE`。该状态既可能表示证据不足，也可能表示结构化输出或业务校验连续失败；诊断时应读取 `InsufficientEvidence.reason`、`events.jsonl` 中的首个 `artifact.commit_failed` 以及项目快照。当前数值校验会把 `2D`、`3DVG`、`FFL-3DOG` 等术语中的数字识别为数值 token，属于已知限制，详见[《故障诊断与当前限制》](docs/troubleshooting.md)。
+
 ## 测试范围
 
 - 状态迁移、Reviewer 门禁和 `INCONCLUSIVE` 路径。
@@ -265,4 +323,5 @@ Pydantic 校验失败、非法状态迁移和缺少前置产物会返回给 Agen
 - PDF 工作区路径边界、下载缓存及调用次数保护。
 - Supervisor、窄化子 Agent、中间件和运行时状态。
 - 运行日志、最终状态和 Markdown 报告。
-- FastAPI 路由、SSE 和无密钥降级启动。
+- 人工检索审核、查询去重、DOI 加入、论文排除和跨请求续跑。
+- FastAPI 路由、可视化测试台、SSE 和无密钥降级启动。

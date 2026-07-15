@@ -18,6 +18,8 @@ class ResearchRepositoryPort(Protocol):
 
     def get_project(self, project_id: str) -> ResearchProject: ...
 
+    def list_projects(self, limit: int = 20) -> list[ResearchProject]: ...
+
     def transition(
         self,
         project_id: str,
