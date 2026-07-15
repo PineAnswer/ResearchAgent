@@ -1,4 +1,4 @@
-# 、Research Agent
+# Research Agent
 
 基于 Deep Agents、LangChain、LangGraph 和 Pydantic 的科研文献 Agent。系统通过检索、论文阅读、跨论文综合和证据审查生成可追踪的研究产物。
 
@@ -29,7 +29,7 @@ Copy-Item .env.example .env
 RESEARCH_AGENT_MODEL=openai:gpt-4.1-mini
 OPENAI_API_KEY=your-key
 
-# 推荐配置；匿名 OpenAlex 额度较低
+# 选写（匿名 OpenAlex 额度较低）
 OPENALEX_API_KEY=your-openalex-key
 OPENALEX_EMAIL=your-email@example.com
 ```
