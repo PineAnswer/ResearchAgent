@@ -6,7 +6,11 @@
 
 ### 1. 准备环境
 
-需要 Python 3.11 或更高版本。在项目根目录执行：
+需要 Python 3.11 或更高版本。下面两种环境管理方式任选其一。
+
+#### 方式 A：使用 Python venv
+
+在项目根目录执行：
 
 ```powershell
 python -m venv .venv
@@ -15,7 +19,18 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` 会以 editable 模式安装当前项目及开发依赖，因此安装后可以直接使用 `research-agent` 命令。
+#### 方式 B：使用 Conda
+
+```powershell
+conda create -n research-agent python=3.11 pip -y
+conda activate research-agent
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Conda 负责隔离 Python 环境，pip 负责读取 `requirements.txt` 并安装项目。当前文件包含 pip 的 editable 安装语法，因此不要使用 `conda install --file requirements.txt`。
+
+`requirements.txt` 会以 editable 模式安装当前项目及开发依赖。无论使用 venv 还是 Conda，安装后都可以直接使用 `research-agent` 命令。
 
 ### 2. 配置环境变量
 
@@ -29,10 +44,12 @@ Copy-Item .env.example .env
 RESEARCH_AGENT_MODEL=openai:gpt-4.1-mini
 OPENAI_API_KEY=your-key
 
-# 选写（匿名 OpenAlex 额度较低）
+# 可选：留空时使用 OpenAlex 匿名访问
 OPENALEX_API_KEY=your-openalex-key
 OPENALEX_EMAIL=your-email@example.com
 ```
+
+`OPENALEX_API_KEY` 和 `OPENALEX_EMAIL` 均可留空，项目仍可通过 OpenAlex 匿名接口检索文献。匿名访问额度较低，也更容易遇到 HTTP 429；需要频繁检索或更稳定的配额时，建议申请免费的 OpenAlex API Key。`OPENALEX_EMAIL` 仅作为 OpenAlex/Crossref polite usage 的联系信息。
 
 使用 OpenAI 兼容接口时，同时设置：
 
