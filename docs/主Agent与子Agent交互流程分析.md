@@ -1,30 +1,29 @@
 # Research Agent 项目说明
 
-> **项目名称：** ？？？
-> **目前运行方式：**
-
+> **项目名称：** Research Agent
+> **推荐运行方式：** `research-agent serve --host 127.0.0.1 --port 8000`，浏览器访问 <http://127.0.0.1:8000/>
 
 ## 核心架构
 
 
 - 主 Agent 负责创建项目、委派子 Agent、提交产物和推进状态。
-- 4 个专业子 Agent 只调用各自显式授权的窄工具。
-- 子 Agent 的结构化结果先写入线程级 `ResearchRuntimeState`，随后由主 Agent 调用 `commit_subagent_result` 原样提交。
+- 8 个专业子 Agent 只调用各自显式授权的窄工具。
+- 子 Agent 的结构化结果先写入线程级 `ResearchRuntimeState`，随后由主 Agent 调用 `commit_subagent_result` 提交；Scout 的候选元数据由运行时根据原始搜索结果重建。
 - Pydantic 校验、Evidence 引用检查、状态迁移，均由确定性 Python 代码执行。
 
 ## 1. 系统架构总览
 
-请求从 CLI（命令行入口）或 FastAPI（HTTP 接口入口）进入 `ResearchSupervisor`。
+请求从前端、CLI（命令行入口）或 FastAPI（HTTP 接口入口）进入 `ResearchSupervisor`。前端由 FastAPI 同源托管，直接调用同一组 API。
 - Supervisor 指负责统筹整个任务的主 Agent 编排器；
 - Worker 指只处理一个专业阶段的子 Agent。
-`ResearchSupervisor` 创建 Deep Agents 图，并将主 Agent、4 个专业子 Agent、线程级状态、短期检查点、文件系统后端和业务工具组合到同一运行上下文。
+`ResearchSupervisor` 创建 Deep Agents 图，并将主 Agent、8 个专业子 Agent、线程级状态、短期检查点、文件系统后端和业务工具组合到同一运行上下文。
 
 
 | 层级 | 主要组件 | 职责 | 设计思路 |
 |---|---|---|---|
 | 入口 | `cli.py`、`api/app.py` | 接收同步、异步和 SSE 请求；处理降级返回 | CLI 与 API 共用同一编排器，避免两套业务流程产生差异 |
 | 编排 | `ResearchSupervisor`（主 Agent） | 创建项目、委派子 Agent、推进阶段、输出结果 | 集中掌握项目阶段 |
-| 专业（子） Agent | Scout、Reader、Synthesizer、Reviewer | 分别对应：检索、精读、综合、证据审查 | 每个 Agent 只看到完成本职工作所需的工具和 Schema |
+| 专业（子） Agent | Scout、Reader、Synthesizer、Reviewer、Outliner、Writer、Chief Editor、Fact Checker | 对应检索、精读、综合、证据审查和长篇综述生成链路 | 每个 Agent 只看到完成本职工作所需的工具和 Schema |
 | 确定性能力 | 项目工具、文献工具、中间件 | 执行 API、PDF、提交、校验和调用限制 | 把网络请求、文件处理和权限检查交给可测试的 Python 函数 |
 | 业务层 | `ResearchService` | Pydantic 产物验证、Evidence 引用检查、前置条件检查 | 防止仅靠 Prompt 约束数据格式和研究证据 |
 | 持久化 | SQLite、JSON exporter | 保存项目、产物、状态事件和运行快照 | SQLite 保证事务一致性，JSON 便于人工查看和外部使用 |
@@ -131,7 +130,7 @@ Repository / SQLite：保存通过检查的结果
 ### 2.1 状态主线
 
 ```text
-CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → COMPLETED
+CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → OUTLINED → NARRATED → COMPLETED
 ```
 
 上述各 `stage` 表示项目当前完成到哪一步，让数据库能够确定回答“项目现在进行到哪里、已经具备哪些正式产物”。
@@ -146,7 +145,9 @@ CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SY
 | `SYNTHESIZED` | 跨论文综合已完成 | 已保存 `SynthesisReport`，其中引用的 Evidence ID 已通过校验 | 将“单篇证据已经提取”和“跨论文结论已经形成”分开审计 |
 | `REVIEW_PENDING` | 综合报告已提交审查 | `SynthesisReport` 已持久化，项目等待独立 Reviewer 读取 | 给 Reviewer 设置明确入口，防止它在综合报告尚未稳定时提前审查 |
 | `REVIEWED` | 证据审查已完成 | 已保存 `ReviewResult`，Verdict 为 `PASS` 或 `REVISE` | 审查完成不等于项目完成；`REVISE` 仍需返回证据或综合阶段修改 |
-| `COMPLETED` | 项目通过并完成 | 当前 `ReviewResult.verdict == PASS` | 只有通过独立证据审查的报告才能成为最终完成结果 |
+| `OUTLINED` | 综述结构已确定 | `ReviewResult.verdict == PASS` 且已保存 `ReviewOutline` | 固定章节、论文和 Evidence 分配后再逐节写作 |
+| `NARRATED` | 完整综述已整合 | 已保存 `NarrativeReview` | 将正文整合与最后的逐节事实核查分开记录 |
+| `COMPLETED` | 项目流程完成 | 已生成 `NarrativeReview` 和各节 `FactCheckReport` | 完成证据审查、写作和事实核查全链路 |
 | `INCONCLUSIVE` | 流程受控终止 | 已保存 `InsufficientEvidence`，记录证据不足、用户停止或连续结构化结果失败等原因 | 阻止系统在无法安全继续时生成缺乏依据的结论；具体原因需要读取 Artifact 和首个失败事件 |
 
 一条正常成功路径对应的正式产物如下：
@@ -161,7 +162,11 @@ CREATED
   → SynthesisReport                      → SYNTHESIZED
   → 准备审查                             → REVIEW_PENDING
   → ReviewResult(PASS)                   → REVIEWED
-  → PASS 门禁                            → COMPLETED
+  → ReviewOutline                        → OUTLINED
+  → SectionDraft（每节一份）             → OUTLINED
+  → NarrativeReview                      → NARRATED
+  → FactCheckReport（每节一份）          → NARRATED
+  → 全部章节核查结束                     → COMPLETED
 ```
 
 ## 3. 各阶段的工具调用链
@@ -177,6 +182,7 @@ CREATED
 | 3.5 | 逐篇提取可定位证据 | 主 Agent + Reader | `task`、`fetch_paper_text`、`extract_pdf_text`、`commit_subagent_result` | 多个 `PaperCard`，随后进入 `EXTRACTED` |
 | 3.6 | 基于 Evidence 形成跨论文综合 | 主 Agent + Synthesizer | `task`、`get_active_research_project`、`commit_subagent_result` | `SynthesisReport`，阶段为 `SYNTHESIZED` |
 | 3.7 | 独立审查并决定结束方式 | 主 Agent + Reviewer | `advance_project_stage`、`task`、`commit_subagent_result` | `ReviewResult`，随后完成、修订或证据不足终止 |
+| 3.8 | 生成并核查长篇综述 | 主 Agent + 四个写作子 Agent | `task`、`get_active_research_project`、`commit_subagent_result` | `ReviewOutline`、多份 `SectionDraft`、`NarrativeReview` 和多份 `FactCheckReport` |
 
 ### 3.1 创建项目
 
@@ -274,19 +280,20 @@ CREATED
    - 记录实际执行的查询词；
    - 规范化查询意图；
    - 拦截重复查询；
+   - 捕获 OpenAlex/Crossref 的原始论文元数据并存入线程级运行时状态；
    - 返回结构化 `duplicate_search_query` 错误。
 
 6. 文献工具内部处理 HTTP 429、服务端错误、`Retry-After` 和指数退避。
-7. Scout 输出结构化 `SearchReport`。
-8. `recording_runnable` 将结果存入 `ResearchRuntimeState`，并使用真实执行记录覆盖 `search_terms`。
+7. Scout 根据标题和摘要输出候选 ID、`include/exclude/uncertain` 三态决定、理由、覆盖盲区和检索迭代日志。
+8. `recording_runnable` 使用真实执行记录覆盖 `search_terms`，并根据 `candidate_ids` 从捕获的原始结果中重建完整 `candidates`，再将结果存入 `ResearchRuntimeState`。
 9. 主 Agent 调用：`commit_subagent_result(project_id, "literature-scout")`
 
-10. 系统原样读取暂存结果，保存 `SearchReport` 并原子推进：`CREATED → SEARCHED`。
+10. 系统读取已重建的暂存结果，保存 `SearchReport` 并原子推进：`CREATED → SEARCHED`。
 11. 候选非空时，系统保存 `CandidateSetSnapshot` 并进入 `SEARCH_REVIEW_PENDING`；本次 Agent 执行返回 `awaiting_input`。
 
 **设计原因**
 
-这里限制 Scout 只能委派一次，并限制具体检索工具的调用次数，主要用于控制外部 API 成本、匿名额度和重复搜索。`search_terms` 最终由实际工具日志覆盖，可以避免模型在报告中填写并未执行的查询词。
+这里限制 Scout 只能委派一次，并限制具体检索工具的调用次数，主要用于控制外部 API 成本、匿名额度和重复搜索。`search_terms` 最终由实际工具日志覆盖；论文标题、作者、摘要、DOI 等字段直接来自工具原始结果，可减少模型复述完整元数据造成的丢失和格式错误。
 
 用户可以在审核阶段提交新的检索词、手动加入 DOI 或论文元数据、排除候选。系统去重查询和论文，并将每轮反馈持久化。
 
@@ -296,7 +303,12 @@ CREATED
 |---|---|
 | `query` | 原始检索目标 |
 | `search_terms` | 工具实际执行过的查询词 |
-| `candidates` | 去重后的候选论文列表 |
+| `candidates` | 由运行时从原始搜索结果重建的完整候选论文列表 |
+| `candidate_ids` | Scout 初筛后保留的论文 ID |
+| `screening_decisions` | 每篇论文的 `include`、`exclude` 或 `uncertain` 决定 |
+| `screening_reasons` | 排除或待确认论文的简短理由 |
+| `coverage_gaps` | 当前检索覆盖不足的方向 |
+| `search_iteration_log` | 每轮查询、返回数、新增数和策略理由 |
 | `selection_notes` | 检索、去重和候选选择说明 |
 
 ### 3.3 空检索结果
@@ -612,7 +624,7 @@ EXTRACTED → SYNTHESIZED
 > **输入：** 已保存的 `SynthesisReport`、`PaperCard` 和 Evidence。  
 > **执行者：** 主 Agent 委派只读 `evidence-reviewer`。  
 > **输出：** `ReviewResult`。  
-> **状态变化：** `SYNTHESIZED → REVIEW_PENDING → REVIEWED`，随后根据 Verdict 完成、回退修订或证据不足终止。
+> **状态变化：** `SYNTHESIZED → REVIEW_PENDING → REVIEWED`，随后根据 Verdict 进入综述写作、回退修订或证据不足终止。
 
 **调用步骤**
 
@@ -678,8 +690,55 @@ REVIEW_PENDING → REVIEWED
 
 | Verdict | 后续动作 |
 |---|---|
-| `PASS` | `advance_project_stage(COMPLETED)` |
+| `PASS` | 委派 `research-outliner`，进入综述写作链路 |
 | `REVISE` | 回到 `EXTRACTED` 修订，或进入 `INCONCLUSIVE` |
+
+### 3.8 长篇综述写作与事实核查
+
+> **阶段卡片**
+>
+> **目标：** 把已通过证据审查的综合结果扩展为有章节结构、引用链和参考文献的完整综述。
+>
+> **输入：** `PaperCard`、Evidence、`SynthesisReport` 和 `ReviewResult(PASS)`。
+>
+> **执行者：** 主 Agent 依次委派 `research-outliner`、`narrative-writer`、`chief-editor` 和 `fact-checker`。
+>
+> **输出：** `ReviewOutline`、多份 `SectionDraft`、`NarrativeReview` 和多份 `FactCheckReport`。
+>
+> **状态变化：** `REVIEWED → OUTLINED → NARRATED → COMPLETED`。
+
+调用链如下：
+
+```text
+research-outliner
+  → ReviewOutline
+  → commit_subagent_result
+  → OUTLINED
+
+对 ReviewOutline.sections 逐节：
+  narrative-writer(section_id, heading, paper/evidence 分配, key_claims, target_words)
+    → SectionDraft
+    → commit_subagent_result
+    → 保持 OUTLINED
+
+chief-editor
+  → NarrativeReview
+  → commit_subagent_result
+  → NARRATED
+
+对 NarrativeReview.sections 逐节：
+  fact-checker(section_id)
+    → FactCheckReport(PASS/REVISE)
+    → commit_subagent_result
+    → 保持 NARRATED
+
+全部章节核查结束
+  → advance_project_stage(COMPLETED)
+```
+
+`ReviewOutline` 为每节分配论文、Evidence、核心论点和目标字数。`narrative-writer` 每次只写一个 `section_id`，并通过 `transition_from`、`transition_to` 提供章节衔接。`chief-editor` 统一摘要、引言、结论、参考文献和 `evidence_chain`。`fact-checker` 逐条检查数字、因果强度、证据归属和引文支持关系，产物当前用于诊断，不会自动改写 `NarrativeReview`。
+
+当前实现会在全部事实核查任务结束后推进到 `COMPLETED`，即使某节 `FactCheckReport.verdict` 为 `REVISE`。因此调用方应同时检查这些报告，判断是否需要人工修订正文。
 
 ## 4. Agent 与工具权限边界
 
@@ -696,8 +755,12 @@ REVIEW_PENDING → REVIEWED
 | `paper-reader` | `fetch_paper_text`、`extract_pdf_text` | 逐篇委派；全文获取次数限制；公共 URL 与工作区路径校验 | `PaperCard` |
 | `research-synthesizer` | `get_active_research_project` | 总工具调用上限 2；仅在 `EXTRACTED` 委派 | `SynthesisReport` |
 | `evidence-reviewer` | `get_active_research_project` | 只读业务能力；项目快照最多读取一次；仅在 `REVIEW_PENDING` 委派 | `ReviewResult` |
+| `research-outliner` | `get_active_research_project` | 仅在 `REVIEWED` 委派；总工具调用上限 2 | `ReviewOutline` |
+| `narrative-writer` | `get_active_research_project` | 仅在 `OUTLINED` 委派；一次只写一个章节 | `SectionDraft` |
+| `chief-editor` | `get_active_research_project` | 仅在 `OUTLINED` 委派；整合全部分节草稿 | `NarrativeReview` |
+| `fact-checker` | `get_active_research_project` | 仅在 `NARRATED` 委派；按章节核查 | `FactCheckReport` |
 
-四个结构化输出各自对应一个业务阶段：`SearchReport` 是检索报告，`PaperCard` 是单篇论文阅读卡，`SynthesisReport` 是跨论文综合报告，`ReviewResult` 是独立审查结论。把输出类型与 Agent 一一对应，可以让 `commit_subagent_result` 根据 `subagent_type` 选择固定 Schema 和目标阶段。
+八类结构化输出覆盖研究和写作两个阶段。把输出类型与 Agent 一一对应，可以让 `commit_subagent_result` 根据 `subagent_type` 选择固定 Schema、保存方式和目标阶段。
 
 ### 4.2 主 Agent 的框架自动工具
 
@@ -747,7 +810,7 @@ verify_doi
 
 隐藏通用保存工具的原因，是防止主 Agent 跳过专用参数和 Pydantic Schema，直接提交任意 JSON。隐藏检索和 PDF 工具则保证专业操作由对应子 Agent 完成，便于设置独立调用预算和错误处理规则。
 
-## 5. 线程级结果暂存与原样提交
+## 5. 线程级结果暂存与受控提交
 
 `ResearchRuntimeState` 是进程内的线程级临时状态容器。它保存 active project、实际查询词、待提交的子 Agent 结果、拒绝次数和论文获取记录。它与 SQLite 的职责不同：RuntimeState 服务于当前运行中的协调，SQLite 保存跨运行仍需保留的正式业务事实。
 
@@ -777,7 +840,7 @@ verify_doi
 
 使用“暂存后提交”的原因，是让主 Agent 只传递 `project_id` 和 `subagent_type`。正式 payload 由系统从 RuntimeState 直接取得，避免主 Agent 复制 JSON 时遗漏字段、改写 `paper_id`、压缩引文或拼错 Evidence ID。
 
-### 5.1 四类提交动作
+### 5.1 各类提交动作
 
 | 子 Agent 类型 | 保存产物 | 状态变化 |
 |---|---|---|
@@ -786,6 +849,10 @@ verify_doi
 | `paper-reader` | `PaperCard` | 保持 `SCREENED` |
 | `research-synthesizer` | `SynthesisReport` | `EXTRACTED → SYNTHESIZED` |
 | `evidence-reviewer` | `ReviewResult` | `REVIEW_PENDING → REVIEWED` |
+| `research-outliner` | `ReviewOutline` | `REVIEWED → OUTLINED` |
+| `narrative-writer` | `SectionDraft` | 保持 `OUTLINED` |
+| `chief-editor` | `NarrativeReview` | `OUTLINED → NARRATED` |
+| `fact-checker` | `FactCheckReport` | 保持 `NARRATED` |
 
 ### 5.2 提交失败处理
 
@@ -838,6 +905,10 @@ Middleware 是模型调用和工具执行之间的拦截层。`SerialToolExecuti
 | `paper-reader` | `SCREENED` |
 | `research-synthesizer` | `EXTRACTED` |
 | `evidence-reviewer` | `REVIEW_PENDING` |
+| `research-outliner` | `REVIEWED` |
+| `narrative-writer` | `OUTLINED` |
+| `chief-editor` | `OUTLINED` |
+| `fact-checker` | `NARRATED` |
 
 WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责告诉模型正确做法；Guard 负责在模型仍然发出越权调用时返回结构化错误。两层同时存在，可以兼顾模型理解能力和确定性执行边界。
 
@@ -847,20 +918,22 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 
 | 当前阶段 | 允许目标 | 关键前置条件 |
 |---|---|---|
-| `CREATED` | `SEARCHED` | 保存并校验 `SearchReport` |
+| `CREATED` | `SEARCHED`、`INCONCLUSIVE` | 保存并校验 `SearchReport`，或在无法启动可靠检索时受控终止 |
 | `SEARCHED` | `SEARCH_REVIEW_PENDING`、`INCONCLUSIVE` | 保存候选集快照，或零候选时保存证据不足说明 |
 | `SEARCH_REVIEW_PENDING` | `SCREENED`、`INCONCLUSIVE` | 用户确认当前候选集，或通过反馈接口停止 |
 | `SCREENED` | `EXTRACTED`、`INCONCLUSIVE` | 每篇入选论文都有 `PaperCard`；至少一条 Evidence |
 | `EXTRACTED` | `SYNTHESIZED`、`INCONCLUSIVE` | `SynthesisReport` 引用真实 Evidence |
 | `SYNTHESIZED` | `REVIEW_PENDING`、`INCONCLUSIVE` | 无新增产物推进 |
 | `REVIEW_PENDING` | `REVIEWED`、`INCONCLUSIVE` | 结构化 `ReviewResult` |
-| `REVIEWED` | `COMPLETED`、`EXTRACTED`、`INCONCLUSIVE` | PASS 才可完成；REVISE 才可回退 |
+| `REVIEWED` | `OUTLINED`、`COMPLETED`、`EXTRACTED`、`INCONCLUSIVE` | 当前主流程中 PASS 进入 `OUTLINED`；保留原有完成与修订迁移兼容性 |
+| `OUTLINED` | `NARRATED`、`INCONCLUSIVE` | 已保存 `ReviewOutline`；`NarrativeReview` 提交后进入 `NARRATED` |
+| `NARRATED` | `COMPLETED`、`INCONCLUSIVE` | 已保存 `NarrativeReview`；完成逐节事实核查后结束 |
 | `COMPLETED` | 无 | 终止状态 |
 | `INCONCLUSIVE` | 无 | 终止状态 |
 
 涉及新产物的迁移通过 `save_artifact_and_transition` 在同一个 SQLite 事务中完成：先验证 Schema 和迁移规则，再写 Artifact、更新项目阶段并追加 `state_event`。任一步失败都会回滚，可以避免“项目已进入新阶段但对应产物缺失”的不一致状态。
 
-`advance_project_stage(project_id, target_stage, actor)` 只用于不需要同时提交新产物的目标：`EXTRACTED`、`REVIEW_PENDING` 和 `COMPLETED`。`actor` 是写入状态事件的角色名，用于审计是谁推进了阶段。
+`advance_project_stage(project_id, target_stage, actor)` 只用于不需要同时提交新产物的目标：`EXTRACTED`、`REVIEW_PENDING` 和 `COMPLETED`。`OUTLINED` 与 `NARRATED` 分别随 `ReviewOutline`、`NarrativeReview` 原子提交。`actor` 是写入状态事件的角色名，用于审计是谁推进了阶段。
 
 ### 7.1 INCONCLUSIVE 的正常触发路径
 
@@ -878,7 +951,7 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 
 ### 8.1 可视化人工审核入口
 
-启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供本地测试台，支持最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。Swagger 保留在 `/docs`。
+启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供推荐使用的本地前端，支持发起研究、浏览最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。项目产物默认渲染为结构化 HTML，也可切换到 JSON 原文；已支持 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft`、`NarrativeReview` 和 `FactCheckReport` 等专用视图。Swagger 保留在 `/docs`。
 
 排除、`accept` 和 `stop` 当前没有撤销接口；多人同时测试同一项目时也应避免并发提交。前端会锁定单个浏览器中的提交按钮并显示确认提示，这无法替代服务端幂等或项目级运行锁。
 
@@ -890,6 +963,7 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 literature-scout → paper-reader
 paper-reader → research-synthesizer
 research-synthesizer → evidence-reviewer
+research-outliner → narrative-writer → chief-editor → fact-checker
 ```
 
 实际数据传递路径统一经过：
@@ -911,7 +985,7 @@ research-synthesizer → evidence-reviewer
 - `research-synthesizer` → `research-synthesis`；
 - `evidence-reviewer` → `evidence-review`。
 
-4 个子 Agent 同时依赖：
+前四个研究子 Agent 同时依赖：
 
 - 各自的 system prompt；
 - 已注入的完整角色 Skill；
@@ -921,7 +995,7 @@ research-synthesizer → evidence-reviewer
 
 主 Agent 也会把 `research-protocol` Skill 全文直接注入 system prompt。
 
-直接注入使每个角色都能遵循独立 Skill，同时无需为读取 Skill 向窄化子 Agent 开放通用文件系统能力。工具权限、中间件、JSON Schema 和 Python 状态机仍提供确定性约束。
+四个综述写作子 Agent 当前使用 `prompts.py` 中的专用 system prompt，没有对应的独立 Skill 文件。所有角色都无需为读取指令开放通用文件系统能力；工具权限、中间件、JSON Schema 和 Python 状态机继续提供确定性约束。
 
 ### 8.4 确定性边界
 
@@ -941,12 +1015,12 @@ Prompt / research-protocol
 | 文件 | 关键符号 | 用途 |
 |---|---|---|
 | `src/research_agent/agents/supervisor.py` | `ResearchSupervisor` | Supervisor 初始化、主图构建、入口方法、日志和降级策略 |
-| `src/research_agent/agents/registry.py` | `build_subagent_registry` | 4 个子 Agent 的工具、结构化输出和调用限制 |
+| `src/research_agent/agents/registry.py` | `build_subagent_registry` | 8 个子 Agent 的工具、结构化输出和调用限制 |
 | `src/research_agent/agents/prompts.py` | `MAIN_SYSTEM_PROMPT`、角色 Prompt | 主 Agent 与各子 Agent 的行为约束 |
 | `src/research_agent/agents/runtime_state.py` | `ResearchRuntimeState`、`recording_runnable` | 线程级暂存、查询记录、全文获取守卫和结构化响应记录 |
 | `src/research_agent/agents/workflow_guard.py` | `ResearchWorkflowGuardMiddleware` | 首工具、阶段、委派类型和 Scout 次数限制 |
 | `src/research_agent/agents/serial_tools.py` | `SerialToolExecutionMiddleware` | 单工具调用和串行执行 |
-| `src/research_agent/tools/project_tools.py` | `build_project_tools` | 项目工具、Evidence 目录、原样提交、阶段推进和 `INCONCLUSIVE` |
+| `src/research_agent/tools/project_tools.py` | `build_project_tools` | 项目工具、Evidence 目录、受控提交、阶段推进和 `INCONCLUSIVE` |
 | `src/research_agent/tools/literature_tools.py` | `build_literature_tools` | OpenAlex、Crossref、PDF 缓存、PDF 解析和 DOI 工具 |
 | `src/research_agent/application/research_service.py` | `ResearchService` | 产物校验、Evidence 校验和阶段前置条件 |
 | `src/research_agent/application/search_review.py` | `SearchReviewService` | 人工反馈、补充检索、候选合并与确认 |
@@ -971,9 +1045,9 @@ Prompt / research-protocol
 当前实现已经形成清晰的 Agent 权限隔离和确定性状态边界：
 
 1. 主 Agent 只承担编排职责和有限业务写入。
-2. 专业能力通过 4 个窄化子 Agent 隔离。
+2. 专业能力通过 8 个窄化子 Agent 隔离。
 3. 所有模型和工具调用强制串行。
-4. 正式结构化结果通过线程级暂存原样提交。
+4. 正式结构化结果通过线程级暂存和受控提交进入业务层；Scout 候选元数据由运行时重建。
 5. 业务校验和状态推进由 Python 代码控制。
 6. 证据不足、用户停止或连续结构化结果失败会受控进入 `INCONCLUSIVE`，具体原因保存在 Artifact 与运行事件中。
 

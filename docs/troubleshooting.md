@@ -50,7 +50,7 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 ## 4. `structured_response_missing`
 
-子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport` 或 `ReviewResult`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
+子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft`、`NarrativeReview` 或 `FactCheckReport`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
 
 ```json
 {
@@ -92,7 +92,11 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 - `SEARCH_REVIEW_PENDING`：继续提交人工反馈。
 - `SCREENED`：可以调用 `/continue`，从逐篇精读开始。
 - `REVIEWED + REVISE`：状态机允许返回 `EXTRACTED` 修订。
+- `OUTLINED`：提纲已保存，可能正在逐节生成 `SectionDraft` 或等待 `chief-editor`。
+- `NARRATED`：完整 `NarrativeReview` 已保存，可能正在逐节生成 `FactCheckReport`。
 - `COMPLETED`、`INCONCLUSIVE`：终态，当前 API 不支持重新打开。
+
+当前主流程在所有章节事实核查任务结束后进入 `COMPLETED`；`FactCheckReport.verdict=REVISE` 会作为诊断产物保留，尚未自动触发正文改写或阻止完成。验收长篇综述时应同时查看最新 `NarrativeReview` 和全部 `FactCheckReport`。
 
 如果项目在综合阶段因格式或校验故障进入 `INCONCLUSIVE`，已保存的 `PaperCard` 和 Evidence 仍保留在 SQLite，从数据和设计上可以复用。当前 `/continue` 只接受 `SCREENED`，系统也没有从 `EXTRACTED` 重新执行综合或重新打开 `INCONCLUSIVE` 的恢复用例，因此现有产品路径无法自动复用这些产物；直接调用 `/continue` 会返回阶段冲突。
 

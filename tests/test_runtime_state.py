@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from research_agent.agents.runtime_state import (
     PaperFetchGuardMiddleware,
@@ -11,11 +11,15 @@ from research_agent.agents.runtime_state import (
 
 
 class FakeStructuredAgent:
-    def __init__(self, payload):
+    def __init__(self, payload, messages=None):
         self.payload = payload
+        self.messages = messages
 
     def invoke(self, inputs, config=None):
-        return {"messages": inputs["messages"], "structured_response": self.payload}
+        return {
+            "messages": self.messages or inputs["messages"],
+            "structured_response": self.payload,
+        }
 
     async def ainvoke(self, inputs, config=None):
         return self.invoke(inputs, config)
@@ -41,6 +45,127 @@ def test_scout_result_uses_only_executed_search_terms() -> None:
 
     result = state.pending_result("thread-a", "literature-scout")
     assert result["search_terms"] == ["actually executed"]
+
+
+def test_scout_result_fills_missing_query_from_executed_search_terms() -> None:
+    state = ResearchRuntimeState()
+    state.record_search("thread-a", "large language model anomaly detection")
+    agent = FakeStructuredAgent(
+        {
+            "candidate_ids": [],
+            "screening_decisions": {},
+            "screening_reasons": {},
+            "coverage_gaps": [],
+            "search_iteration_log": [],
+            "selection_notes": [],
+        }
+    )
+    runnable = recording_runnable(agent, "literature-scout", state)
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="search")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    result = state.pending_result("thread-a", "literature-scout")
+    assert result["query"] == "large language model anomaly detection"
+
+
+def test_scout_candidate_ids_match_openalex_urls_and_bare_ids() -> None:
+    state = ResearchRuntimeState()
+    state.record_search("thread-a", "query")
+    state.store_search_results(
+        "thread-a",
+        json.dumps(
+            [
+                {
+                    "paper_id": "https://openalex.org/W4409797280",
+                    "title": "Included",
+                    "source": "OpenAlex",
+                },
+                {
+                    "paper_id": "https://openalex.org/W4409797281",
+                    "title": "Excluded",
+                    "source": "OpenAlex",
+                },
+            ]
+        ),
+    )
+    agent = FakeStructuredAgent(
+        {
+            "query": "query",
+            "candidate_ids": ["W4409797280"],
+            "screening_decisions": {"W4409797280": "include"},
+            "screening_reasons": {},
+            "coverage_gaps": [],
+            "search_iteration_log": [],
+            "selection_notes": [],
+        }
+    )
+    runnable = recording_runnable(agent, "literature-scout", state)
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="search")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    result = state.pending_result("thread-a", "literature-scout")
+    assert [item["paper_id"] for item in result["candidates"]] == [
+        "https://openalex.org/W4409797280"
+    ]
+
+
+def test_scout_temporary_candidate_ids_are_mapped_to_real_search_results() -> None:
+    state = ResearchRuntimeState()
+    state.record_search("thread-a", "query")
+    state.store_search_results(
+        "thread-a",
+        json.dumps(
+            [
+                {
+                    "paper_id": "https://openalex.org/W4409797280",
+                    "title": "First",
+                    "doi": "https://doi.org/10.1109/first",
+                    "source": "OpenAlex",
+                },
+                {
+                    "paper_id": "10.1000/second",
+                    "title": "Second",
+                    "doi": "10.1000/second",
+                    "source": "Crossref",
+                },
+            ]
+        ),
+    )
+    agent = FakeStructuredAgent(
+        {
+            "query": "query",
+            "candidate_ids": ["P001", "P002"],
+            "screening_decisions": {"P001": "include", "P002": "exclude"},
+            "screening_reasons": {"P001": "relevant", "P002": "off topic"},
+            "coverage_gaps": [],
+            "search_iteration_log": [],
+            "selection_notes": [],
+        }
+    )
+    runnable = recording_runnable(agent, "literature-scout", state)
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="search")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    result = state.pending_result("thread-a", "literature-scout")
+    assert result["candidate_ids"] == ["W4409797280", "10.1000/second"]
+    assert [item["title"] for item in result["candidates"]] == ["First", "Second"]
+    assert result["screening_decisions"] == {
+        "W4409797280": "include",
+        "10.1000/second": "exclude",
+    }
+    assert result["screening_reasons"] == {
+        "W4409797280": "relevant",
+        "10.1000/second": "off topic",
+    }
 
 
 def test_reader_result_keeps_the_supervisor_supplied_paper_id() -> None:
@@ -149,6 +274,102 @@ def test_missing_structured_response_becomes_recoverable_result() -> None:
     assert pending["_subagent_error"] == "structured_response_missing"
     assert pending["_paper_id"] == "https://openalex.org/W9"
     assert result["structured_response"] == pending
+
+
+def test_missing_structured_response_recovers_schema_tool_call_payload() -> None:
+    state = ResearchRuntimeState()
+    payload = {
+        "topic": "topic",
+        "consensus": [{"statement": "finding", "evidence_ids": ["P1:E1"]}],
+        "conflicts": [],
+        "method_comparison": [],
+        "gaps": [],
+    }
+    agent = FakeStructuredAgent(
+        None,
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "SynthesisReport",
+                        "args": payload,
+                        "id": "call-schema",
+                    }
+                ],
+            )
+        ],
+    )
+    runnable = recording_runnable(agent, "research-synthesizer", state)
+
+    result = runnable.invoke(
+        {"messages": [HumanMessage(content="synthesize")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    pending = state.pending_result("thread-a", "research-synthesizer")
+    assert pending == payload
+    assert result["structured_response"] == payload
+
+
+def test_missing_structured_response_rejects_project_snapshot_payload() -> None:
+    state = ResearchRuntimeState()
+    snapshot = {
+        "project": {"project_id": "RP-test", "stage": "OUTLINED"},
+        "artifacts": [],
+        "events": [],
+    }
+    agent = FakeStructuredAgent(
+        None,
+        messages=[
+            ToolMessage(
+                content=json.dumps(snapshot),
+                tool_call_id="call-project",
+                name="get_active_research_project",
+            )
+        ],
+    )
+    runnable = recording_runnable(agent, "chief-editor", state)
+
+    result = runnable.invoke(
+        {"messages": [HumanMessage(content="edit")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    pending = state.pending_result("thread-a", "chief-editor")
+    assert pending["_subagent_error"] == "structured_response_missing"
+    assert result["structured_response"] == pending
+
+
+def test_missing_structured_response_recovers_narrative_review_payload() -> None:
+    state = ResearchRuntimeState()
+    payload = {
+        "title": "Review",
+        "abstract": "Summary.",
+        "sections": [
+            {
+                "section_id": "sec-1",
+                "heading": "Intro",
+                "content": "Body",
+                "cited_evidence": ["P1:E1"],
+            }
+        ],
+        "references": [{"paper_id": "P1", "text": "Author. Title."}],
+        "writing_style": "academic-survey",
+        "word_count": 10,
+        "evidence_chain": {"P1:E1": ["sec-1"]},
+    }
+    agent = FakeStructuredAgent(None, messages=[AIMessage(content=json.dumps(payload))])
+    runnable = recording_runnable(agent, "chief-editor", state)
+
+    result = runnable.invoke(
+        {"messages": [HumanMessage(content="edit")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    pending = state.pending_result("thread-a", "chief-editor")
+    assert pending == payload
+    assert result["structured_response"] == payload
 
 
 def test_paper_fetch_attempts_can_reset_for_a_fresh_subagent() -> None:

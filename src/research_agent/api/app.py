@@ -76,6 +76,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request.topic,
                 request.research_question,
                 request.thread_id,
+                min_papers=request.min_papers,
+                max_papers=request.max_papers,
+                max_search_rounds=request.max_search_rounds,
             )
             return ApiEnvelope(data=_json_safe(result))
         except Exception as exc:
@@ -97,6 +100,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.topic,
                     request.research_question,
                     request.thread_id,
+                    min_papers=request.min_papers,
+                    max_papers=request.max_papers,
+                    max_search_rounds=request.max_search_rounds,
                 ):
                     payload = json.dumps(_json_safe(event), ensure_ascii=False)
                     event_name = (

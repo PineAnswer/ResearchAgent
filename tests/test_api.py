@@ -86,7 +86,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     index, styles, script, projects, snapshot, missing = asyncio.run(exercise_api())
 
     assert index.status_code == 200
-    assert "文献研究测试台" in index.text
+    assert "文献研究工作台" in index.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
     assert script.status_code == 200
@@ -132,9 +132,14 @@ def test_search_review_api_can_show_accept_and_continue_project(
     supervisor.search_review.begin_review(project.project_id)
 
     class FakeGraph:
+        inputs = None
+
         async def ainvoke(self, inputs, config):
-            del inputs, config
+            del config
+            self.inputs = inputs
             return {"messages": []}
+
+    fake_graph = FakeGraph()
 
     async def exercise_api():
         transport = httpx.ASGITransport(app=app)
@@ -146,7 +151,7 @@ def test_search_review_api_can_show_accept_and_continue_project(
                 f"/api/projects/{project.project_id}/search-feedback",
                 json={"action": "accept", "comment": "Keep P1."},
             )
-            supervisor.graph = FakeGraph()
+            supervisor.graph = fake_graph
             continued = await client.post(
                 f"/api/projects/{project.project_id}/continue",
                 json={},
@@ -161,3 +166,7 @@ def test_search_review_api_can_show_accept_and_continue_project(
     assert accepted.json()["data"]["ready_to_continue"] is True
     assert continued.status_code == 200
     assert continued.json()["data"]["project_status"]["stage"] == "SCREENED"
+    prompt = fake_graph.inputs["messages"][0]["content"]
+    assert "screened_context" in prompt
+    assert '"included_paper_ids": [\n    "P1"\n  ]' in prompt
+    assert "不要为了寻找 ScreeningDecision 去读取或 grep 完整大快照" in prompt

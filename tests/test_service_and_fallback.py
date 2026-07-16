@@ -201,6 +201,127 @@ def test_extracted_requires_a_paper_card_for_every_included_paper(tmp_path) -> N
     assert service.get_project(project.project_id).stage is ResearchStage.SCREENED
 
 
+def test_openalex_url_and_bare_id_match_for_screened_paper_cards(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    full_id = "https://openalex.org/W4409797280"
+    bare_id = "W4409797280"
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "query",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": full_id, "title": "Paper", "source": "OpenAlex"}
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    _enter_search_review(service, project.project_id, [full_id])
+    screening, screened = service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": [full_id],
+            "excluded_paper_ids": [],
+            "reasons": ["relevant"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+
+    assert screening.payload["included_paper_ids"] == [bare_id]
+
+    service.save_artifact(
+        screened.project_id,
+        "PaperCard",
+        {
+            "paper_id": bare_id,
+            "title": "Paper",
+            "research_question": "question",
+            "methods": [],
+            "datasets": [],
+            "findings": [
+                {
+                    "evidence_id": "E1",
+                    "paper_id": full_id,
+                    "claim": "claim",
+                    "quote": "quote",
+                    "page": None,
+                    "section": "abstract",
+                }
+            ],
+            "limitations": [],
+        },
+    )
+    extracted = service.transition(
+        screened.project_id,
+        ResearchStage.EXTRACTED,
+        actor="paper-reader",
+    )
+
+    assert extracted.stage is ResearchStage.EXTRACTED
+
+
+def test_screening_context_returns_small_included_paper_metadata(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    full_id = "https://openalex.org/W4409797280"
+    bare_id = "W4409797280"
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "query",
+            "search_terms": ["query"],
+            "candidates": [
+                {
+                    "paper_id": full_id,
+                    "title": "Large Language Models Empowered Online Log Anomaly Detection",
+                    "abstract": "LLM log anomaly detection in AIOps.",
+                    "doi": "https://doi.org/10.1109/example",
+                    "url": "https://doi.org/10.1109/example",
+                    "source": "OpenAlex",
+                },
+                {"paper_id": "W0", "title": "Other", "source": "OpenAlex"},
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    _enter_search_review(service, project.project_id, [full_id, "W0"])
+    screening, _ = service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": [bare_id],
+            "excluded_paper_ids": ["W0"],
+            "reasons": ["relevant"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+
+    context = service.screening_context(project.project_id)
+
+    assert context["screening_artifact_id"] == screening.artifact_id
+    assert context["included_paper_ids"] == [bare_id]
+    assert context["included_papers"] == [
+        {
+            "paper_id": bare_id,
+            "title": "Large Language Models Empowered Online Log Anomaly Detection",
+            "abstract": "LLM log anomaly detection in AIOps.",
+            "doi": "https://doi.org/10.1109/example",
+            "url": "https://doi.org/10.1109/example",
+            "authors": [],
+            "year": None,
+            "source": "OpenAlex",
+        }
+    ]
+
+
 def test_extracted_rejects_all_empty_findings(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
@@ -246,6 +367,89 @@ def test_extracted_rejects_all_empty_findings(tmp_path) -> None:
         service.transition(project.project_id, ResearchStage.EXTRACTED, actor="reader")
 
     assert service.get_project(project.project_id).stage is ResearchStage.SCREENED
+
+
+def test_paper_card_normalizes_simple_evidence_ids_before_synthesis(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {"query": "q", "search_terms": ["q"], "candidates": [], "selection_notes": []},
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    _enter_search_review(service, project.project_id, ["P1", "P2"])
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": ["P1", "P2"],
+            "excluded_paper_ids": [],
+            "reasons": ["both relevant"],
+        },
+        ResearchStage.SCREENED,
+        actor="supervisor",
+    )
+    for paper_id in ("P1", "P2"):
+        service.save_artifact(
+            project.project_id,
+            "PaperCard",
+            {
+                "paper_id": paper_id,
+                "title": paper_id,
+                "research_question": "question",
+                "methods": ["experiment"],
+                "datasets": [],
+                "findings": [
+                    {
+                        "evidence_id": "E1",
+                        "paper_id": f"{paper_id}:E1",
+                        "claim": f"{paper_id} finding",
+                        "quote": f"{paper_id} evidence text.",
+                        "page": 1,
+                    }
+                ],
+                "limitations": [],
+            },
+        )
+
+    snapshot = service.get_snapshot(project.project_id)
+    evidence_ids = [
+        finding["evidence_id"]
+        for artifact in snapshot["artifacts"]
+        if artifact["kind"] == "PaperCard"
+        for finding in artifact["payload"]["findings"]
+    ]
+    finding_paper_ids = [
+        finding["paper_id"]
+        for artifact in snapshot["artifacts"]
+        if artifact["kind"] == "PaperCard"
+        for finding in artifact["payload"]["findings"]
+    ]
+
+    assert evidence_ids == ["P1:E1", "P2:E1"]
+    assert finding_paper_ids == ["P1", "P2"]
+
+    project = service.transition(project.project_id, ResearchStage.EXTRACTED, actor="reader")
+    artifact, project = service.save_artifact_and_transition(
+        project.project_id,
+        "SynthesisReport",
+        {
+            "topic": "topic",
+            "consensus": [
+                {"statement": "both findings", "evidence_ids": ["P1:E1", "P2:E1"]}
+            ],
+            "conflicts": [],
+            "method_comparison": [],
+            "gaps": [],
+        },
+        ResearchStage.SYNTHESIZED,
+        actor="synthesizer",
+    )
+
+    assert project.stage is ResearchStage.SYNTHESIZED
+    assert artifact.payload["consensus"][0]["evidence_ids"] == ["P1:E1", "P2:E1"]
 
 
 def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) -> None:

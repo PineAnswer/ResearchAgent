@@ -13,7 +13,7 @@ class InvalidTransition(ValueError):
 
 
 ALLOWED_TRANSITIONS: dict[ResearchStage, set[ResearchStage]] = {
-    ResearchStage.CREATED: {ResearchStage.SEARCHED},
+    ResearchStage.CREATED: {ResearchStage.SEARCHED, ResearchStage.INCONCLUSIVE},
     ResearchStage.SEARCHED: {
         ResearchStage.SEARCH_REVIEW_PENDING,
         ResearchStage.INCONCLUSIVE,
@@ -28,7 +28,16 @@ ALLOWED_TRANSITIONS: dict[ResearchStage, set[ResearchStage]] = {
     ResearchStage.REVIEW_PENDING: {ResearchStage.REVIEWED, ResearchStage.INCONCLUSIVE},
     ResearchStage.REVIEWED: {
         ResearchStage.COMPLETED,
+        ResearchStage.OUTLINED,
         ResearchStage.EXTRACTED,
+        ResearchStage.INCONCLUSIVE,
+    },
+    ResearchStage.OUTLINED: {
+        ResearchStage.NARRATED,
+        ResearchStage.INCONCLUSIVE,
+    },
+    ResearchStage.NARRATED: {
+        ResearchStage.COMPLETED,
         ResearchStage.INCONCLUSIVE,
     },
     ResearchStage.COMPLETED: set(),

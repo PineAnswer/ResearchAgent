@@ -288,7 +288,11 @@ def test_commit_subagent_result_preserves_exact_structured_payload(tmp_path) -> 
         )
     )
 
-    assert result["artifact"]["payload"] == payload
+    # Pydantic fills defaults for new lightweight-search fields
+    assert result["artifact"]["payload"]["query"] == payload["query"]
+    assert result["artifact"]["payload"]["search_terms"] == payload["search_terms"]
+    assert result["artifact"]["payload"]["candidates"] == payload["candidates"]
+    assert result["artifact"]["payload"]["selection_notes"] == payload["selection_notes"]
     assert result["project"]["stage"] == "SEARCHED"
     assert state.pending_result("thread-a", "literature-scout") is None
 

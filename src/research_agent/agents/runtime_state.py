@@ -12,6 +12,8 @@ from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+from research_agent.application.paper_ids import normalize_paper_id
+
 
 def thread_id_from_config(config: RunnableConfig | dict[str, Any] | None) -> str:
     configurable = (config or {}).get("configurable", {})
@@ -24,6 +26,29 @@ def _json_payload(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("Subagent structured_response must be a JSON object")
     return deepcopy(value)
+
+
+SUBAGENT_SCHEMA_TOOLS = {
+    "literature-scout": "SearchReport",
+    "paper-reader": "PaperCard",
+    "research-synthesizer": "SynthesisReport",
+    "evidence-reviewer": "ReviewResult",
+    "research-outliner": "ReviewOutline",
+    "narrative-writer": "SectionDraft",
+    "chief-editor": "NarrativeReview",
+    "fact-checker": "FactCheckReport",
+}
+
+SUBAGENT_REQUIRED_KEYS = {
+    "literature-scout": {"candidate_ids", "screening_decisions"},
+    "paper-reader": {"paper_id", "title", "research_question", "findings"},
+    "research-synthesizer": {"topic", "consensus", "conflicts", "method_comparison", "gaps"},
+    "evidence-reviewer": {"verdict", "fatal_issues", "suggestions", "verified_evidence_ids"},
+    "research-outliner": {"title", "narrative_arc", "sections"},
+    "narrative-writer": {"section_id", "heading", "content", "cited_evidence"},
+    "chief-editor": {"title", "abstract", "sections", "references"},
+    "fact-checker": {"section_id", "verdict", "issues"},
+}
 
 
 def _task_text(inputs: Any) -> str:
@@ -48,6 +73,70 @@ def _expected_paper_id(inputs: Any) -> str | None:
     for pattern in patterns:
         if match := re.search(pattern, text, flags=re.IGNORECASE):
             return match.group(1).strip()
+    return None
+
+
+def _message_content(message: Any) -> Any:
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    return content
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _tool_call_args(call: Any) -> tuple[str, Any]:
+    if isinstance(call, dict):
+        return str(call.get("name", "")), call.get("args")
+    name = str(getattr(call, "name", ""))
+    args = getattr(call, "args", None)
+    return name, args
+
+
+def _looks_like_expected_payload(payload: Any, subagent_type: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    required = SUBAGENT_REQUIRED_KEYS.get(subagent_type)
+    if required is None:
+        return True
+    if {"project", "artifacts", "events"} & set(payload):
+        return False
+    return required.issubset(payload)
+
+
+def _fallback_structured_payload(result: dict[str, Any], subagent_type: str) -> dict[str, Any] | None:
+    expected_tool = SUBAGENT_SCHEMA_TOOLS.get(subagent_type)
+    messages = result.get("messages", [])
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls is None and isinstance(message, dict):
+            tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                name, args = _tool_call_args(call)
+                if expected_tool is not None and name == expected_tool:
+                    parsed = deepcopy(args) if isinstance(args, dict) else (
+                        _extract_json_object(args) if isinstance(args, str) else None
+                    )
+                    if _looks_like_expected_payload(parsed, subagent_type):
+                        return parsed
+        content = _message_content(message)
+        if isinstance(content, str) and content.strip():
+            parsed = _extract_json_object(content)
+            if _looks_like_expected_payload(parsed, subagent_type):
+                return parsed
     return None
 
 
@@ -76,6 +165,46 @@ def _paper_key(paper_id: str, doi: str) -> str:
     return paper_id.casefold().strip() or "unknown-paper"
 
 
+def _candidate_identity(candidate: dict[str, Any]) -> str:
+    return normalize_paper_id(candidate.get("paper_id") or candidate.get("doi") or "")
+
+
+def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for candidate in candidates:
+        identity = _candidate_identity(candidate)
+        if not identity:
+            identity = f"title:{str(candidate.get('title', '')).casefold().strip()}"
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(candidate)
+    return deduped
+
+
+def _temporary_candidate_ids(candidate_ids: list[Any]) -> bool:
+    if not candidate_ids:
+        return False
+    return all(
+        re.fullmatch(r"P\d{1,4}", str(item).strip(), flags=re.IGNORECASE)
+        for item in candidate_ids
+    )
+
+
+def _remap_screening_dict(
+    value: Any,
+    id_map: dict[str, str],
+) -> Any:
+    if not isinstance(value, dict):
+        return value
+    remapped: dict[str, Any] = {}
+    for key, item in value.items():
+        mapped = id_map.get(str(key).strip(), str(key))
+        remapped[mapped] = item
+    return remapped
+
+
 class ResearchRuntimeState:
     """Thread-scoped project, search, and structured subagent state."""
 
@@ -84,6 +213,7 @@ class ResearchRuntimeState:
         self._project_ids: dict[str, str] = {}
         self._search_terms: dict[str, list[str]] = {}
         self._search_keys: dict[str, set[str]] = {}
+        self._raw_search_results: dict[str, list[dict]] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
@@ -93,6 +223,7 @@ class ResearchRuntimeState:
             self._project_ids[thread_id] = project_id
             self._search_terms[thread_id] = []
             self._search_keys[thread_id] = set()
+            self._raw_search_results[thread_id] = []
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
             for key in [item for item in self._rejections if item[0] == thread_id]:
@@ -121,6 +252,45 @@ class ResearchRuntimeState:
     def search_terms(self, thread_id: str) -> list[str]:
         with self._lock:
             return list(self._search_terms.get(thread_id, []))
+
+    def store_search_results(self, thread_id: str, results_json: str) -> None:
+        """Persist raw search tool output so the LLM does not need to
+        reproduce full paper metadata in its structured_response."""
+        import json as _json
+
+        try:
+            parsed = _json.loads(results_json)
+        except (_json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(parsed, list):
+            return
+        candidates = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            candidates.append(
+                {
+                    "paper_id": str(item.get("paper_id", "")),
+                    "title": str(item.get("title", "")),
+                    "authors": (
+                        list(item.get("authors", []))
+                        if isinstance(item.get("authors"), list)
+                        else []
+                    ),
+                    "year": item.get("year"),
+                    "abstract": str(item.get("abstract", "")),
+                    "doi": item.get("doi"),
+                    "url": item.get("url"),
+                    "source": str(item.get("source", "")),
+                }
+            )
+        with self._lock:
+            stored = self._raw_search_results.setdefault(thread_id, [])
+            stored.extend(candidates)
+
+    def get_search_results(self, thread_id: str) -> list[dict]:
+        with self._lock:
+            return list(self._raw_search_results.get(thread_id, []))
 
     def record_result(self, thread_id: str, subagent_type: str, payload: Any) -> None:
         with self._lock:
@@ -220,13 +390,27 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
             status="error",
         )
 
+    def _capture_result(self, request: ToolCallRequest, result: Any) -> None:
+        name = str(request.tool_call.get("name", ""))
+        if name not in {"search_openalex", "search_crossref"}:
+            return
+        content = getattr(result, "content", result)
+        if isinstance(content, str):
+            self.state.store_search_results(
+                thread_id_from_config(request.runtime.config), content
+            )
+
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Any],
     ) -> Any:
         blocked = self._reserve(request)
-        return blocked if blocked is not None else handler(request)
+        if blocked is not None:
+            return blocked
+        result = handler(request)
+        self._capture_result(request, result)
+        return result
 
     async def awrap_tool_call(
         self,
@@ -234,7 +418,11 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
         blocked = self._reserve(request)
-        return blocked if blocked is not None else await handler(request)
+        if blocked is not None:
+            return blocked
+        result = await handler(request)
+        self._capture_result(request, result)
+        return result
 
 
 class PaperFetchGuardMiddleware(AgentMiddleware):
@@ -296,20 +484,55 @@ def recording_runnable(agent: Any, subagent_type: str, state: ResearchRuntimeSta
         thread_id = thread_id_from_config(config)
         structured_response = result.get("structured_response")
         if structured_response is None:
-            payload = {
-                "_subagent_error": "structured_response_missing",
-                "_instruction": (
-                    "模型没有返回可解析的结构化对象；请提交该失败结果，"
-                    "由系统释放后重新委派一次。"
-                ),
-            }
-            if expected_id := _expected_paper_id(inputs):
-                payload["_paper_id"] = expected_id
+            fallback = _fallback_structured_payload(result, subagent_type)
+            if fallback is None:
+                payload = {
+                    "_subagent_error": "structured_response_missing",
+                    "_instruction": (
+                        "模型没有返回可解析的结构化对象；请提交该失败结果，"
+                        "由系统释放后重新委派一次。"
+                    ),
+                }
+                if expected_id := _expected_paper_id(inputs):
+                    payload["_paper_id"] = expected_id
+            else:
+                payload = _json_payload(fallback)
             result = {**result, "structured_response": payload}
         else:
             payload = _json_payload(structured_response)
         if subagent_type == "literature-scout":
-            payload["search_terms"] = state.search_terms(thread_id)
+            search_terms = state.search_terms(thread_id)
+            payload["search_terms"] = search_terms
+            if not str(payload.get("query", "")).strip():
+                payload["query"] = " | ".join(search_terms) if search_terms else "literature search"
+            raw_results = _dedupe_candidates(state.get_search_results(thread_id))
+            submitted_ids = list(payload.get("candidate_ids", []))
+            candidate_ids = {normalize_paper_id(item) for item in submitted_ids}
+            matched = [
+                candidate
+                for candidate in raw_results
+                if _candidate_identity(candidate) in candidate_ids
+            ]
+            if candidate_ids and matched:
+                payload["candidates"] = matched
+            elif raw_results and _temporary_candidate_ids(submitted_ids):
+                selected = raw_results[: len(submitted_ids)]
+                id_map = {
+                    str(old_id).strip(): _candidate_identity(candidate)
+                    for old_id, candidate in zip(submitted_ids, selected, strict=False)
+                }
+                payload["candidate_ids"] = [
+                    id_map.get(str(item).strip(), str(item)) for item in submitted_ids
+                ]
+                payload["screening_decisions"] = _remap_screening_dict(
+                    payload.get("screening_decisions"), id_map
+                )
+                payload["screening_reasons"] = _remap_screening_dict(
+                    payload.get("screening_reasons"), id_map
+                )
+                payload["candidates"] = selected
+            elif raw_results:
+                payload["candidates"] = raw_results
         elif subagent_type == "paper-reader":
             if expected_id := _expected_paper_id(inputs):
                 payload["paper_id"] = expected_id

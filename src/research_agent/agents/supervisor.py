@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -88,6 +89,7 @@ class ResearchSupervisor:
         self.literature_tools_by_name = {
             tool.name: tool for tool in self.literature_tools
         }
+        self._search_review_options_by_thread: dict[str, dict[str, int]] = {}
         self.search_review = SearchReviewService(
             self.service,
             self.literature_tools_by_name,
@@ -119,12 +121,46 @@ class ResearchSupervisor:
             base_url=self.settings.base_url,
         )
 
+    @staticmethod
+    def _search_review_options(
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
+    ) -> dict[str, int]:
+        options: dict[str, int] = {}
+        if min_papers is not None:
+            options["min_papers"] = min_papers
+        if max_papers is not None:
+            options["max_papers"] = max_papers
+        if max_search_rounds is not None:
+            options["max_search_rounds"] = max_search_rounds
+        return options
+
+    def _register_search_review_options(
+        self,
+        thread_id: str,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
+    ) -> None:
+        options = self._search_review_options(
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+        )
+        if options:
+            self._search_review_options_by_thread[thread_id] = options
+
+    def _begin_search_review(self, project_id: str, thread_id: str) -> dict[str, Any]:
+        options = self._search_review_options_by_thread.get(thread_id, {})
+        return self.search_review.begin_review(project_id, **options)
+
     def _build_graph(self):
         model = self._build_model()
         project_tools = build_project_tools(
             self.service,
             self.runtime_state,
-            on_search_committed=self.search_review.begin_review,
+            on_search_committed=self._begin_search_review,
         )
         all_tools = [*project_tools, *self.literature_tools]
         tools_by_name = {tool.name: tool for tool in all_tools}
@@ -180,19 +216,62 @@ class ResearchSupervisor:
         )
 
     @staticmethod
-    def build_prompt(topic: str, research_question: str) -> str:
+    def build_prompt(
+        topic: str,
+        research_question: str,
+        *,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
+    ) -> str:
+        limits: list[str] = []
+        if min_papers is not None:
+            limits.append(f"- 精读篇数下限：{min_papers}")
+        if max_papers is not None:
+            limits.append(f"- 精读篇数上限：{max_papers}")
+        if max_search_rounds is not None:
+            limits.append(f"- 系统检索-筛选迭代轮数上限：{max_search_rounds}")
+        limit_text = ""
+        if limits:
+            limit_text = (
+                "\n用户在前端设置了检索审核限制：\n"
+                + "\n".join(limits)
+                + "\n委派 literature-scout 时必须把这些限制传入任务描述。"
+                " literature-scout 应在单次子任务内自动执行：检索→标题摘要级筛选→"
+                "总结覆盖盲区/筛选意见→据此改写下一轮检索词；达到轮数上限、"
+                "入选论文数满足上下限且覆盖盲区可接受，或工具上限触发后，才返回最终 SearchReport。"
+                " 不要在每一轮后等待用户反馈。"
+            )
         return (
             f"研究主题：{topic}\n"
             f"研究问题：{research_question}\n"
+            f"{limit_text}\n"
             "请创建项目，并按证据驱动科研流程执行。"
         )
 
     @staticmethod
-    def build_continue_prompt(project_id: str) -> str:
+    def build_continue_prompt(
+        project_id: str,
+        screening_context: dict[str, Any] | None = None,
+    ) -> str:
+        context_text = ""
+        if screening_context is not None:
+            context_text = (
+                "\n\n系统已从数据库预读并验证最新 ScreeningDecision。"
+                "以下 screened_context 是继续阶段的权威输入；不要为了寻找"
+                " ScreeningDecision 去读取或 grep 完整大快照。\n"
+                "screened_context:\n"
+                f"{json.dumps(screening_context, ensure_ascii=False, indent=2)}"
+            )
         return (
             f"继续已有科研项目：{project_id}\n"
             "该项目已经完成人工候选论文审核并处于SCREENED阶段。"
-            "禁止创建新项目或重新检索；先读取该项目快照，然后从逐篇paper-reader开始继续。"
+            "禁止创建新项目或重新检索；直接从逐篇paper-reader开始继续。"
+            "Continue from the latest ScreeningDecision only. "
+            "Dispatch paper-reader only for included_paper_ids from screened_context. "
+            "Ignore SearchReport/CandidateSetSnapshot candidates that are not included. "
+            "If no included papers are available, finish with InsufficientEvidence."
+            f"{context_text}"
         )
 
     @staticmethod
@@ -220,15 +299,28 @@ class ResearchSupervisor:
         research_question: str,
         thread_id: str,
         run_logger: ResearchRunLogger,
+        search_review_options: dict[str, int] | None = None,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
             )
+        search_review_options = search_review_options or {}
         config = self.build_config(thread_id)
         config["callbacks"] = [run_logger]
         result = self.graph.invoke(
-            {"messages": [{"role": "user", "content": self.build_prompt(topic, research_question)}]},
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": self.build_prompt(
+                            topic,
+                            research_question,
+                            **search_review_options,
+                        ),
+                    }
+                ]
+            },
             config=config,
         )
         if run_logger.project_id:
@@ -253,8 +345,17 @@ class ResearchSupervisor:
         research_question: str,
         thread_id: str | None = None,
         show_progress: bool = False,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
+        search_review_options = self._search_review_options(
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+        )
+        self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(
             topic,
             research_question,
@@ -267,6 +368,7 @@ class ResearchSupervisor:
                 research_question,
                 active_thread_id,
                 run_logger,
+                search_review_options,
             )
         except Exception as exc:
             run_logger.finish(
@@ -275,6 +377,8 @@ class ResearchSupervisor:
                 error=str(exc),
             )
             raise AgentExecutionError(exc, run_logger.project_id) from exc
+        finally:
+            self._search_review_options_by_thread.pop(active_thread_id, None)
         run_logger.finish("completed", result=result)
         return result
 
@@ -283,12 +387,21 @@ class ResearchSupervisor:
         topic: str,
         research_question: str,
         thread_id: str | None = None,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
             )
         active_thread_id = thread_id or uuid.uuid4().hex
+        search_review_options = self._search_review_options(
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+        )
+        self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
         config = self.build_config(active_thread_id)
         config["callbacks"] = [run_logger]
@@ -296,7 +409,14 @@ class ResearchSupervisor:
             result = await self.graph.ainvoke(
                 {
                     "messages": [
-                        {"role": "user", "content": self.build_prompt(topic, research_question)}
+                        {
+                            "role": "user",
+                            "content": self.build_prompt(
+                                topic,
+                                research_question,
+                                **search_review_options,
+                            ),
+                        }
                     ]
                 },
                 config=config,
@@ -312,6 +432,8 @@ class ResearchSupervisor:
                 error=str(exc),
             )
             raise AgentExecutionError(exc, run_logger.project_id) from exc
+        finally:
+            self._search_review_options_by_thread.pop(active_thread_id, None)
         run_logger.finish("completed", result=result)
         return result
 
@@ -331,6 +453,7 @@ class ResearchSupervisor:
                 "Project continuation requires SCREENED after human search review; "
                 f"current stage is {project.stage.value}"
             )
+        screening_context = self.service.screening_context(project_id)
         active_thread_id = thread_id or uuid.uuid4().hex
         self.runtime_state.register_project(active_thread_id, project_id)
         self.workflow_guard.bind_existing_project(active_thread_id)
@@ -348,7 +471,10 @@ class ResearchSupervisor:
                     "messages": [
                         {
                             "role": "user",
-                            "content": self.build_continue_prompt(project_id),
+                            "content": self.build_continue_prompt(
+                                project_id,
+                                screening_context,
+                            ),
                         }
                     ]
                 },
@@ -375,12 +501,21 @@ class ResearchSupervisor:
         topic: str,
         research_question: str,
         thread_id: str | None = None,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
             )
         active_thread_id = thread_id or uuid.uuid4().hex
+        search_review_options = self._search_review_options(
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+        )
+        self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
         config = self.build_config(active_thread_id)
         config["callbacks"] = [run_logger]
@@ -388,7 +523,14 @@ class ResearchSupervisor:
             async for event in self.graph.astream(
                 {
                     "messages": [
-                        {"role": "user", "content": self.build_prompt(topic, research_question)}
+                        {
+                            "role": "user",
+                            "content": self.build_prompt(
+                                topic,
+                                research_question,
+                                **search_review_options,
+                            ),
+                        }
                     ]
                 },
                 config=config,
@@ -402,6 +544,8 @@ class ResearchSupervisor:
                 error=str(exc),
             )
             raise AgentExecutionError(exc, run_logger.project_id) from exc
+        finally:
+            self._search_review_options_by_thread.pop(active_thread_id, None)
         result = {}
         active_project_id = run_logger.project_id or self.runtime_state.project_id(
             active_thread_id

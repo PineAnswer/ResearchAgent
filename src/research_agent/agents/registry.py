@@ -8,6 +8,10 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from research_agent.agents.prompts import (
+    CHIEF_EDITOR_PROMPT,
+    FACT_CHECKER_PROMPT,
+    NARRATIVE_WRITER_PROMPT,
+    OUTLINER_PROMPT,
     READER_PROMPT,
     REVIEWER_PROMPT,
     SCOUT_PROMPT,
@@ -21,7 +25,16 @@ from research_agent.agents.runtime_state import (
     recording_runnable,
 )
 from research_agent.agents.serial_tools import SerialToolExecutionMiddleware
-from research_agent.domain.models import PaperCard, ReviewResult, SearchReport, SynthesisReport
+from research_agent.domain.models import (
+    FactCheckReport,
+    NarrativeReview,
+    PaperCard,
+    ReviewOutline,
+    ReviewResult,
+    SearchReport,
+    SectionDraft,
+    SynthesisReport,
+)
 
 
 def _bounded_middleware(tool_call_limit: int) -> list:
@@ -133,6 +146,39 @@ def build_subagent_registry(
                     exit_behavior="end",
                 ),
             ],
+        ),
+        # ── DeepSynthesis narration subagents ─────────────────────
+        (
+            "research-outliner",
+            "读取全部论文卡片和证据，设计文献综述的章节大纲。",
+            OUTLINER_PROMPT,
+            [tools_by_name["get_active_research_project"]],
+            ReviewOutline,
+            _bounded_middleware(2),
+        ),
+        (
+            "narrative-writer",
+            "根据提纲和指定的 section_id 撰写一节连贯的文献综述正文。",
+            NARRATIVE_WRITER_PROMPT,
+            [tools_by_name["get_active_research_project"]],
+            SectionDraft,
+            _bounded_middleware(2),
+        ),
+        (
+            "chief-editor",
+            "将所有 SectionDraft 整合为完整的 NarrativeReview，含引言、总结和参考文献。",
+            CHIEF_EDITOR_PROMPT,
+            [tools_by_name["get_active_research_project"]],
+            NarrativeReview,
+            _bounded_middleware(2),
+        ),
+        (
+            "fact-checker",
+            "核查综述中每条证据引用是否被原始证据支持，输出 FactCheckReport。",
+            FACT_CHECKER_PROMPT,
+            [tools_by_name["get_active_research_project"]],
+            FactCheckReport,
+            _bounded_middleware(2),
         ),
     ]
 

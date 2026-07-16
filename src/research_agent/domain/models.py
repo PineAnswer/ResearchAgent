@@ -20,6 +20,8 @@ class ResearchStage(StrEnum):
     SYNTHESIZED = "SYNTHESIZED"
     REVIEW_PENDING = "REVIEW_PENDING"
     REVIEWED = "REVIEWED"
+    OUTLINED = "OUTLINED"
+    NARRATED = "NARRATED"
     COMPLETED = "COMPLETED"
     INCONCLUSIVE = "INCONCLUSIVE"
 
@@ -49,7 +51,12 @@ class PaperCandidate(BaseModel):
 class SearchReport(BaseModel):
     query: str
     search_terms: list[str]
-    candidates: list[PaperCandidate]
+    candidates: list[PaperCandidate] = Field(default_factory=list)
+    candidate_ids: list[str] = Field(default_factory=list)
+    screening_decisions: dict[str, str] = Field(default_factory=dict)
+    screening_reasons: dict[str, str] = Field(default_factory=dict)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    search_iteration_log: list[dict] = Field(default_factory=list)
     selection_notes: list[str] = Field(default_factory=list)
 
 
@@ -76,6 +83,9 @@ class SearchFeedback(BaseModel):
     added_papers: list[ManualPaperInput] = Field(default_factory=list)
     excluded_paper_ids: list[str] = Field(default_factory=list)
     comment: str = ""
+    min_papers: int | None = Field(default=None, ge=1)
+    max_papers: int | None = Field(default=None, ge=1)
+    max_search_rounds: int | None = Field(default=None, ge=0)
 
 
 class CandidateSetSnapshot(BaseModel):
@@ -84,6 +94,14 @@ class CandidateSetSnapshot(BaseModel):
     executed_queries: list[str] = Field(default_factory=list)
     search_round: int = Field(default=0, ge=0)
     max_search_rounds: int = Field(default=3, ge=0)
+    min_papers: int = Field(default=1, ge=1)
+    max_papers: int = Field(default=8, ge=1)
+    agent_included_paper_ids: list[str] = Field(default_factory=list)
+    agent_excluded_paper_ids: list[str] = Field(default_factory=list)
+    agent_uncertain_paper_ids: list[str] = Field(default_factory=list)
+    agent_screening_reasons: dict[str, str] = Field(default_factory=dict)
+    agent_approved: bool = False
+    agent_review_note: str = ""
     user_comments: list[str] = Field(default_factory=list)
     search_failures: list[str] = Field(default_factory=list)
 
@@ -176,3 +194,68 @@ class ArtifactRecord(BaseModel):
     kind: str
     payload: dict[str, Any]
     created_at: datetime = Field(default_factory=utc_now)
+
+
+# ── DeepSynthesis: narrative review models ──────────────────────────
+
+
+class SectionBrief(BaseModel):
+    section_id: str
+    heading: str
+    assigned_paper_ids: list[str] = Field(default_factory=list)
+    assigned_evidence_ids: list[str] = Field(default_factory=list)
+    key_claims: list[str] = Field(default_factory=list)
+    target_words: int = 300
+
+
+class ReviewOutline(BaseModel):
+    title: str
+    narrative_arc: str
+    sections: list[SectionBrief]
+    writing_style: str = "academic-survey"
+
+
+class SectionDraft(BaseModel):
+    section_id: str
+    heading: str
+    content: str
+    cited_evidence: list[str] = Field(default_factory=list)
+    transition_from: str = ""
+    transition_to: str = ""
+
+
+class NarrativeSection(BaseModel):
+    section_id: str
+    heading: str
+    content: str
+    subsections: list[NarrativeSection] = Field(default_factory=list)
+    cited_evidence: list[str] = Field(default_factory=list)
+
+
+class Citation(BaseModel):
+    paper_id: str
+    text: str
+    bibtex: str = ""
+
+
+class NarrativeReview(BaseModel):
+    title: str
+    abstract: str
+    sections: list[NarrativeSection]
+    references: list[Citation]
+    writing_style: str = "academic-survey"
+    word_count: int = 0
+    evidence_chain: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class FactCheckIssue(BaseModel):
+    claim: str
+    evidence_id: str
+    problem: str
+    correction: str = ""
+
+
+class FactCheckReport(BaseModel):
+    section_id: str
+    verdict: Literal["PASS", "REVISE"]
+    issues: list[FactCheckIssue] = Field(default_factory=list)

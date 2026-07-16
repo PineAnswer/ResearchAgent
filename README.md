@@ -1,6 +1,6 @@
 # Research Agent
 
-基于 Deep Agents、LangChain、LangGraph 和 Pydantic 的科研文献 Agent。系统通过检索、论文阅读、跨论文综合和证据审查生成可追踪的研究产物。
+基于 Deep Agents、LangChain、LangGraph 和 Pydantic 的科研文献 Agent。系统通过检索、人工候选审核、论文阅读、跨论文综合、证据审查和长篇综述写作生成可追踪的研究产物。
 
 ## 使用方法
 
@@ -61,15 +61,27 @@ RESEARCH_AGENT_BASE_URL=https://your-provider.example/v1
 
 完整配置项及默认值见 [.env.example](.env.example)。
 
-### 3. 先运行离线演示
+### 3. 推荐：启动前端版
 
 ```powershell
-research-agent demo
+research-agent serve --host 127.0.0.1 --port 8000
 ```
 
-离线演示不调用模型或外部检索 API，用于验证 SQLite、产物保存和状态机门禁是否正常。
+浏览器打开 <http://127.0.0.1:8000/>。前端与 FastAPI 同源提供，无需安装 Node.js 或执行单独的前端构建命令。
 
-### 4. 运行科研 Agent
+推荐从前端开始使用：
+
+1. 填写研究主题、研究问题、系统检索-筛选迭代轮数，以及精读篇数下限/上限后发起研究。
+2. 系统在单次 `literature-scout` 子任务内自动执行多轮“检索 → 标题摘要级筛选 → 生成覆盖盲区/筛选意见 → 根据意见改写下一轮检索词”。达到迭代轮数、工具预算或候选规模条件后，项目进入 `SEARCH_REVIEW_PENDING`。
+3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
+4. 确认候选集后，前端会直接进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作、总编整合和事实核查。
+5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
+
+前端提交时会锁定按钮，降低重复发送风险。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口；多人测试时应避免同时修改同一项目。
+
+Swagger API 页面：<http://127.0.0.1:8000/docs>
+
+### 4. 可选：使用命令行运行
 
 ```powershell
 research-agent run "小样本遥感图像分类" `
@@ -87,7 +99,17 @@ CLI 每次执行都会启动新进程，因此 `InMemorySaver` 不会跨两次 C
 
 运行过程中会实时显示模型调用、工具选择、检索结果、论文处理序号、阶段变化和降级信息。结束后会打印运行日志目录。
 
-### 5. 查询已保存项目
+CLI 适合自动化调用和观察终端实时日志。初次检索得到候选论文后仍会停在 `SEARCH_REVIEW_PENDING`，候选集调整和确认建议在前端完成。
+
+### 5. 可选：运行离线演示
+
+```powershell
+research-agent demo
+```
+
+离线演示不调用模型或外部检索 API，用于验证 SQLite、产物保存和状态机门禁是否正常。
+
+### 6. 查询已保存项目
 
 ```powershell
 research-agent status RP-20260715-example
@@ -95,19 +117,13 @@ research-agent status RP-20260715-example
 
 请将示例 ID 替换为创建项目时返回的真实 `project_id`。
 
-### 6. 启动 HTTP API
+### 7. HTTP API
 
 ```powershell
 research-agent serve --host 127.0.0.1 --port 8000
 ```
 
-可视化测试台：<http://127.0.0.1:8000/>
-
-测试台支持发起新研究、浏览最近项目、查看候选论文、勾选排除、补充检索词、手动加入 DOI、确认候选集和继续后续研究。所有操作与 API、CLI 共用同一个 SQLite 项目状态；提交中的按钮会锁定，避免浏览器重复发送同一操作。
-
-人工审核的 `action` 只接受 `refine`、`accept` 和 `stop`。论文排除、候选集确认和终止操作当前没有撤销接口；测试台会在提交前显示确认提示。多人同时测试同一项目时仍应避免并发修改。
-
-Swagger API 页面：<http://127.0.0.1:8000/docs>
+前端、API 和 CLI 共用同一个 SQLite 项目状态。人工审核的 `action` 只接受 `refine`、`accept` 和 `stop`。
 
 主要接口：
 
@@ -140,7 +156,7 @@ POST /api/projects/{project_id}/continue
 GET /api/projects/RP-.../search-review
 ```
 
-补充检索词、加入论文或排除论文：
+补充检索词、加入论文、调整篇数/轮数限制或排除论文：
 
 ```json
 {
@@ -148,6 +164,9 @@ GET /api/projects/RP-.../search-review
   "suggested_queries": ["few-shot remote sensing augmentation limitations"],
   "added_papers": [{"doi": "10.1000/example"}],
   "excluded_paper_ids": ["https://openalex.org/W123"],
+  "min_papers": 2,
+  "max_papers": 6,
+  "max_search_rounds": 3,
   "comment": "补充小样本场景，排除只讨论目标检测的论文。"
 }
 ```
@@ -157,21 +176,24 @@ GET /api/projects/RP-.../search-review
 ```json
 {
   "action": "accept",
+  "min_papers": 2,
+  "max_papers": 6,
+  "max_search_rounds": 3,
   "comment": "确认当前候选论文，继续精读。"
 }
 ```
 
-确认后调用：
+确认后，前端会自动调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
 
 ```text
 POST /api/projects/RP-.../continue
 ```
 
-服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
+服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
 
 `/continue` 只接受 `SCREENED` 项目。`INCONCLUSIVE` 是当前状态机的终态，已有 `PaperCard` 和 Evidence 仍保存在 SQLite，但当前 API 没有从 `EXTRACTED` 重新执行综合的恢复入口。
 
-### 7. 运行测试
+### 8. 运行测试
 
 ```powershell
 pytest -q
@@ -181,25 +203,29 @@ ruff check .
 ## 核心能力
 
 - `research-supervisor` 统一接收 CLI 和 API 请求并控制科研状态主线。
-- 四个窄工具子 Agent 分别执行检索、单篇阅读、综合和证据审查。
+- 八个窄工具子 Agent 覆盖检索、单篇阅读、综合、证据审查、提纲设计、分节写作、总编整合和事实核查。
 - OpenAlex、Crossref、开放 PDF 下载与本地 PDF 文本提取。
 - Pydantic 结构化输出及 SQLite 原子产物提交。
 - Python 状态机、Reviewer 门禁和 append-only 状态事件。
 - 初次检索后暂停、候选论文人工增删、DOI 核验、多轮补充检索和跨进程继续。
 - `InMemorySaver` 短期图状态、`ResearchRuntimeState` 子 Agent 交接状态和 `AGENTS.md` 长期规则。
 - 模型或网络不可用时生成可追踪的 `RuntimeFallback`，不伪造文献、证据或结论。
-- CLI 实时进度、完整运行日志、JSON 产物镜像和 Markdown 报告。
+- 前端 HTML/JSON 双视图、CLI 实时进度、完整运行日志、JSON 产物镜像和 Markdown 报告。
 
-## 四个子 Agent
+## 八个子 Agent
 
 | Agent | 职责 | 实际可用 Tool | 结构化输出 | 运行保护 |
 |---|---|---|---|---|
-| `literature-scout` | 检索、去重和候选筛选 | `search_openalex`；可选 `search_crossref` | `SearchReport` | 串行执行；检索次数受配置限制；每个项目只委派一次 |
+| `literature-scout` | 设计检索策略、标题摘要级初筛和覆盖分析 | `search_openalex`；可选 `search_crossref` | `SearchReport` | 系统捕获工具原始结果并重建完整 `candidates`；检索次数受配置限制；每个项目只委派一次 |
 | `paper-reader` | 获取开放全文或使用摘要提取单篇证据 | `fetch_paper_text`、`extract_pdf_text` | `PaperCard` | 全文请求受限；本地 PDF 最多解析一次；模型最多调用四次 |
 | `research-synthesizer` | 跨论文比较并识别研究空白 | `get_active_research_project` | `SynthesisReport` | 最多两次工具调用，只能引用已保存 Evidence |
 | `evidence-reviewer` | 审查结论、引文和 Evidence 对应关系 | `get_active_research_project` | `ReviewResult` | 项目最多读取一次；模型最多调用三次 |
+| `research-outliner` | 根据论文卡片、综合结果和证据设计综述章节 | `get_active_research_project` | `ReviewOutline` | 仅在 `REVIEWED` 委派；最多两次工具调用 |
+| `narrative-writer` | 按提纲逐节撰写连贯正文 | `get_active_research_project` | `SectionDraft` | 每次只写一个 `section_id`；草稿逐份保存 |
+| `chief-editor` | 整合分节草稿、摘要、引言、结论和参考文献 | `get_active_research_project` | `NarrativeReview` | 仅在 `OUTLINED` 委派；提交后进入 `NARRATED` |
+| `fact-checker` | 按节核查正文论断和 Evidence 是否一致 | `get_active_research_project` | `FactCheckReport` | 仅在 `NARRATED` 委派；报告只诊断、不直接改正文 |
 
-主 Agent 和四个子 Agent 都在启动时读取并注入各自的完整 Skill：主 Agent 使用 `research-protocol`，四个子 Agent 分别使用 `literature-search`、`paper-reading`、`research-synthesis` 和 `evidence-review`。Skill 全文直接进入对应 system prompt，窄化子 Agent 仍然没有通用文件系统能力；工具权限、中间件、结构化响应 schema 和 Python 状态机继续提供硬边界。
+主 Agent 使用完整的 `research-protocol` Skill。检索、阅读、综合和证据审查四个子 Agent 分别注入 `literature-search`、`paper-reading`、`research-synthesis` 和 `evidence-review` Skill；四个综述写作子 Agent 使用各自的专用 system prompt。所有子 Agent 都只获得表中列出的业务工具，并受结构化响应 schema、中间件和 Python 状态机约束。
 
 `verify_doi` 未分配给任何 Agent，由 `SearchReviewService` 在用户手动添加 DOI 时调用。Reviewer 依据项目内的 `claim`、`evidence_id`、quote、page 和 section 审查证据对应关系。
 
@@ -217,14 +243,14 @@ CREATED
   → SYNTHESIZED
   → REVIEW_PENDING
   → REVIEWED
-      ├─ PASS   → COMPLETED
+      ├─ PASS   → OUTLINED → NARRATED → COMPLETED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
-SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED
+CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED / NARRATED
   └─ 证据不足或无法继续 → INCONCLUSIVE
 ```
 
-所有状态变化都经过 `ResearchService → Repository → validate_transition`。只有 `COMPLETED + PASS` 表示科研项目正式完成；等待用户审核时运行结果为 `awaiting_input`，其他未闭环结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
+`ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`，`NarrativeReview` 提交后进入 `NARRATED`；各节 `FactCheckReport` 保存完成后，主 Agent 才推进到 `COMPLETED`。所有状态变化都经过 `ResearchService → Repository → validate_transition`。等待用户审核时运行结果为 `awaiting_input`，其他未闭环结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
 
 ## 分层架构
 
@@ -233,7 +259,7 @@ CLI / FastAPI
       ↓
 ResearchSupervisor
       ├─ 主 Agent + research-protocol Skill
-      └─ 四个窄化子 Agent
+      └─ 八个窄化子 Agent
               ↓
        LangChain Tools
               ↓
@@ -285,6 +311,7 @@ RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND=3
 ```
 
 - OpenAlex/Crossref 遇到 429 时优先遵循 `Retry-After`，否则按指数退避等待。
+- 搜索中间件保存 OpenAlex/Crossref 的原始返回；Scout 只生成候选 ID、三态筛选决定、理由、覆盖盲区和迭代日志，运行时据此重建完整 `SearchReport.candidates`。
 - 搜索达到上限或部分请求失败时，Scout 使用已经取得的真实结果生成 `SearchReport`。
 - `fetch_paper_text` 成功时直接返回带页码文本并缓存 PDF，无需再调用 `extract_pdf_text`。
 - `extract_pdf_text` 只解析任务明确提供且已经存在于工作区的本地 PDF。
