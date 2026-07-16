@@ -88,6 +88,11 @@ class ResearchService:
     def list_projects(self, limit: int = 20):
         return self.repository.list_projects(limit)
 
+    def delete_project(self, project_id: str) -> None:
+        self.repository.delete_project(project_id)
+        if self.exporter is not None:
+            self.exporter.delete_project(project_id)
+
     def get_snapshot(self, project_id: str) -> dict[str, Any]:
         return {
             "project": self.repository.get_project(project_id).model_dump(mode="json"),

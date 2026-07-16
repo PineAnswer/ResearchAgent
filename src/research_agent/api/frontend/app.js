@@ -75,6 +75,7 @@ const elements = {
   projectQuestion: byId("projectQuestion"),
   copyProjectId: byId("copyProjectId"),
   reloadProject: byId("reloadProject"),
+  deleteProject: byId("deleteProject"),
   stageStepper: byId("stageStepper"),
   projectSummary: byId("projectSummary"),
   nextActionTitle: byId("nextActionTitle"),
@@ -208,6 +209,7 @@ function setBusy(busy) {
     elements.acceptReview,
     elements.stopReview,
     elements.reloadProject,
+    elements.deleteProject,
   ].forEach((button) => {
     button.disabled = busy;
   });
@@ -283,6 +285,43 @@ async function loadProjects() {
     renderProjectList();
   } catch (error) {
     elements.projectList.textContent = `项目载入失败：${error.message}`;
+  }
+}
+
+function clearProjectView() {
+  state.projectId = null;
+  state.project = null;
+  state.snapshot = null;
+  state.review = null;
+  state.candidates = [];
+  state.selectedIds = new Set();
+  elements.projectView.hidden = true;
+  elements.emptyState.hidden = false;
+  elements.projectIdInput.value = "";
+  window.history.replaceState({}, "", window.location.pathname);
+  renderProjectList();
+}
+
+async function deleteCurrentProject() {
+  if (!state.projectId || state.busy) return;
+  const projectId = state.projectId;
+  const topic = state.project?.topic || "未命名研究";
+  const confirmed = window.confirm(
+    `确定永久删除“${topic}”吗？\n\n项目、研究产物和状态记录都会被删除，此操作无法撤销。`,
+  );
+  if (!confirmed) return;
+
+  setBusy(true);
+  try {
+    await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    state.projects = state.projects.filter((project) => project.project_id !== projectId);
+    clearProjectView();
+    await loadProjects();
+    notify("研究项目已删除");
+  } catch (error) {
+    notify(`删除失败：${error.message}`, true);
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -1559,6 +1598,7 @@ elements.projectLookupForm.addEventListener("submit", (event) => {
   loadProject(elements.projectIdInput.value.trim());
 });
 elements.reloadProject.addEventListener("click", () => loadProject(state.projectId));
+elements.deleteProject.addEventListener("click", deleteCurrentProject);
 elements.copyProjectId.addEventListener("click", async () => {
   if (!state.projectId) return;
   try {

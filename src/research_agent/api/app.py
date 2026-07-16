@@ -150,6 +150,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
         return ApiEnvelope(data=_json_safe(snapshot))
 
+    @app.delete(
+        "/api/projects/{project_id}",
+        response_model=ApiEnvelope,
+    )
+    async def delete_project(project_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(supervisor.service.delete_project, project_id)
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        return ApiEnvelope(
+            message="project_deleted",
+            data={"project_id": project_id},
+        )
+
     @app.get(
         "/api/projects/{project_id}/search-review",
         response_model=ApiEnvelope,

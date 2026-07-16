@@ -220,6 +220,7 @@ button:disabled {
 
 .primary,
 .secondary,
+.danger,
 .danger-link,
 .text-button,
 .icon-button,
@@ -228,7 +229,8 @@ button:disabled {
 }
 
 .primary,
-.secondary {
+.secondary,
+.danger {
   min-height: 42px;
   padding: 10px 16px;
   border-radius: 11px;
@@ -255,6 +257,18 @@ button:disabled {
 .secondary:hover:not(:disabled) {
   color: var(--accent-dark);
   border-color: var(--accent);
+}
+
+.danger {
+  color: var(--red);
+  background: var(--surface);
+  border: 1px solid #dfaaa5;
+}
+
+.danger:hover:not(:disabled) {
+  color: white;
+  background: var(--red);
+  border-color: var(--red);
 }
 
 .wide {
@@ -450,6 +464,12 @@ textarea:focus {
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 26px;
+}
+
+.project-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
 }
 
 .hero-meta {
@@ -1706,6 +1726,12 @@ textarea:focus {
 
   .project-hero .secondary,
   .continue-panel .primary {
+    width: 100%;
+  }
+
+  .project-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
   }
 

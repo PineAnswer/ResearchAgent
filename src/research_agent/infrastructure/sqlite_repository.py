@@ -114,6 +114,25 @@ class SqliteResearchRepository:
             for row in rows
         ]
 
+    def delete_project(self, project_id: str) -> None:
+        """Delete one project and all of its database-owned records atomically."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if row is None:
+                raise ProjectNotFound(project_id)
+            connection.execute(
+                "DELETE FROM state_events WHERE project_id = ?", (project_id,)
+            )
+            connection.execute(
+                "DELETE FROM artifacts WHERE project_id = ?", (project_id,)
+            )
+            connection.execute(
+                "DELETE FROM projects WHERE project_id = ?", (project_id,)
+            )
+
     def transition(
         self,
         project_id: str,

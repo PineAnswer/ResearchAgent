@@ -1,5 +1,10 @@
+import pytest
+
 from research_agent.domain.models import ResearchStage, ReviewResult, ReviewVerdict
-from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
+from research_agent.infrastructure.sqlite_repository import (
+    ProjectNotFound,
+    SqliteResearchRepository,
+)
 
 
 def test_repository_persists_project_events_and_artifacts(tmp_path) -> None:
@@ -41,3 +46,23 @@ def test_full_reviewed_flow(tmp_path) -> None:
 
     assert project.stage is ResearchStage.COMPLETED
     assert len(repository.list_events(project.project_id)) == 8
+
+
+def test_delete_project_removes_project_artifacts_and_events(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    project = repository.create_project("topic", "question")
+    repository.save_artifact(project.project_id, "SearchReport", {"candidates": []})
+    repository.transition(
+        project.project_id,
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+
+    repository.delete_project(project.project_id)
+
+    with pytest.raises(ProjectNotFound):
+        repository.get_project(project.project_id)
+    assert repository.list_artifacts(project.project_id) == []
+    assert repository.list_events(project.project_id) == []
+    with pytest.raises(ProjectNotFound):
+        repository.delete_project(project.project_id)

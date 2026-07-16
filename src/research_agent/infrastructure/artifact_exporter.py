@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -41,3 +42,9 @@ class JsonArtifactExporter:
         self._write_json(project_root / "snapshot.json", snapshot)
         self._write_json(project_root / "project.json", snapshot["project"])
         self._write_json(project_root / "state-events.json", snapshot["events"])
+
+    def delete_project(self, project_id: str) -> None:
+        project_root = (self.output_root / project_id).resolve()
+        if project_root.parent != self.output_root:
+            raise ValueError("project_id resolves outside the output directory")
+        shutil.rmtree(project_root, ignore_errors=True)
