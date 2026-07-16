@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -9,6 +10,7 @@ from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from research_agent.agents.runtime_state import ResearchRuntimeState
+from research_agent.application.paper_ids import normalize_paper_id
 from research_agent.application.research_service import ResearchService
 from research_agent.domain.models import ResearchStage
 
@@ -21,6 +23,10 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "paper-reader",
         "research-synthesizer",
         "evidence-reviewer",
+        "research-outliner",
+        "narrative-writer",
+        "chief-editor",
+        "fact-checker",
     }
     project_scoped_tools = {
         "get_research_project",
@@ -37,6 +43,10 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "paper-reader": ResearchStage.SCREENED,
         "research-synthesizer": ResearchStage.EXTRACTED,
         "evidence-reviewer": ResearchStage.REVIEW_PENDING,
+        "research-outliner": ResearchStage.REVIEWED,
+        "narrative-writer": ResearchStage.OUTLINED,
+        "chief-editor": ResearchStage.OUTLINED,
+        "fact-checker": ResearchStage.NARRATED,
     }
 
     def __init__(
@@ -145,6 +155,26 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                     f"{subagent_type}已连续生成两份无效结果；停止重试并调用"
                     "finish_inconclusive保存失败原因。",
                 )
+        if (
+            subagent_type == "paper-reader"
+            and self.service is not None
+            and self.runtime_state is not None
+        ):
+            project_id = self.runtime_state.project_id(thread_id)
+            if project_id is not None:
+                blocked = self._reject_reader_outside_screening_decision(
+                    request, project_id
+                )
+                if blocked is not None:
+                    return blocked
+        if subagent_type == "paper-reader":
+            blocked = self._reject_conflicting_reader_description(request)
+            if blocked is not None:
+                return blocked
+        if subagent_type == "research-synthesizer":
+            blocked = self._reject_conflicting_synthesizer_description(request)
+            if blocked is not None:
+                return blocked
         if subagent_type == "literature-scout":
             with self._lock:
                 count = self._scout_calls.get(thread_id, 0)
@@ -155,6 +185,112 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                         "每个科研任务只允许委派一次literature-scout；使用首次返回结果继续流程。",
                     )
                 self._scout_calls[thread_id] = count + 1
+        return None
+
+    @staticmethod
+    def _extract_reader_paper_id(description: str) -> str | None:
+        patterns = (
+            r"(?:paper_id|paper id|论文ID|论文id)\s*[:：]\s*([A-Za-z0-9_.:/-]+)",
+            r"https?://openalex\.org/(W\d+)",
+            r"\b(W\d{6,})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, description, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).rstrip(".,;，。；)")
+        return None
+
+    def _reject_reader_outside_screening_decision(
+        self, request: ToolCallRequest, project_id: str
+    ) -> ToolMessage | None:
+        if self.service is None:
+            return None
+        args = request.tool_call.get("args", {})
+        description = str(args.get("description", ""))
+        paper_id = self._extract_reader_paper_id(description)
+        if not paper_id:
+            return None
+        screenings = self.service.repository.list_artifacts(
+            project_id, "ScreeningDecision"
+        )
+        if not screenings:
+            return None
+        normalized_paper_id = normalize_paper_id(paper_id)
+        included = {
+            normalize_paper_id(item)
+            for item in screenings[-1].payload.get("included_paper_ids", [])
+        }
+        if normalized_paper_id in included:
+            return None
+        return self._error(
+            request,
+            "paper_reader_not_in_screening_decision",
+            (
+                "paper-reader can only read papers included by the latest "
+                f"ScreeningDecision. {paper_id!r} is not included; allowed IDs: "
+                f"{', '.join(sorted(included)) or '(none)'}."
+            ),
+        )
+
+    def _reject_conflicting_synthesizer_description(
+        self, request: ToolCallRequest
+    ) -> ToolMessage | None:
+        args = request.tool_call.get("args", {})
+        description = str(args.get("description", ""))
+        if not description:
+            return None
+        normalized = description.casefold()
+        if "get_research_project" in normalized:
+            return self._error(
+                request,
+                "synthesizer_description_uses_unavailable_project_tool",
+                "research-synthesizer只能调用无参数get_active_research_project；"
+                "重新委派时只提供project_id、主题和研究问题。",
+            )
+        schema_markers = (
+            "json schema",
+            "```json",
+            "supporting_evidence",
+            "evidence_for",
+            "evidence_against",
+            "recommendations",
+        )
+        if any(marker in normalized for marker in schema_markers):
+            return self._error(
+                request,
+                "synthesizer_description_defines_schema",
+                "research-synthesizer任务描述不能自定义SynthesisReport JSON字段；"
+                "它已绑定官方结构化输出。重新委派时只提供project_id、主题和研究问题。",
+            )
+        return None
+
+    def _reject_conflicting_reader_description(
+        self, request: ToolCallRequest
+    ) -> ToolMessage | None:
+        args = request.tool_call.get("args", {})
+        description = str(args.get("description", ""))
+        if not description:
+            return None
+        normalized = re.sub(r"\s+", "", description).lower()
+        forbidden_patterns = (
+            "不要包含paper_id",
+            "不含paper_id",
+            "不要包含paperid",
+            "不含paperid",
+            "使用简单格式",
+            "简单格式如",
+            "简单的字符串",
+            "simpleformat",
+        )
+        mentions_evidence = "evidence_id" in normalized or "evidenceid" in normalized
+        if mentions_evidence and any(pattern in normalized for pattern in forbidden_patterns):
+            return self._error(
+                request,
+                "paper_reader_description_conflicts_with_evidence_id_policy",
+                "paper-reader任务描述不能要求使用简单E1/E2或禁止paper_id前缀；"
+                "重新委派时只传论文元数据，不要自定义PaperCard JSON字段。"
+                "Evidence ID由paper-reader按paper_id:E序号生成。",
+            )
         return None
 
     def _mark_project_created(self, request: ToolCallRequest) -> None:

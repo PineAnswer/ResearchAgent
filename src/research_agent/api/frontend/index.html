@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Evidence Research Agent 的本地可视化测试控制台"
+      content="Evidence Research Agent 的本地文献研究工作台"
     />
-    <title>Evidence Research Console</title>
+    <title>文献研究工作台</title>
     <link rel="stylesheet" href="/ui-assets/styles.css" />
     <script src="/ui-assets/app.js" defer></script>
   </head>
@@ -19,7 +19,7 @@
         <span class="brand-mark" aria-hidden="true">E</span>
         <div>
           <p class="eyebrow">Evidence Research Agent</p>
-          <h1>文献研究测试台</h1>
+          <h1>文献研究工作台</h1>
         </div>
       </div>
       <div class="topbar-actions">
@@ -38,27 +38,36 @@
         </button>
 
         <form id="newProjectForm" class="new-project-form" hidden>
-          <label for="topicInput">研究主题</label>
+          <label for="topicInput">你想研究什么主题？</label>
           <input
             id="topicInput"
             name="topic"
             type="text"
-            placeholder="例如：3D Visual Grounding"
+            placeholder="例如：智能运维 AIOps"
             autocomplete="off"
             required
           />
 
-          <label for="questionInput">研究问题</label>
+          <label for="questionInput">你希望回答的具体问题</label>
           <textarea
             id="questionInput"
             name="research_question"
             rows="4"
-            placeholder="例如：如何提高无人机场景中的 3DVG IoU？"
+            placeholder="例如：利用大模型和小模型进行异常检测有哪些研究？"
             required
           ></textarea>
 
+          <label for="initialMinPapers">至少精读几篇论文</label>
+          <input id="initialMinPapers" type="number" min="1" value="2" />
+
+          <label for="initialMaxPapers">最多精读几篇论文</label>
+          <input id="initialMaxPapers" type="number" min="1" value="6" />
+
+          <label for="initialMaxSearchRounds">自动检索优化轮数</label>
+          <input id="initialMaxSearchRounds" type="number" min="1" value="3" />
+
           <div class="form-actions">
-            <button class="primary" type="submit">开始检索</button>
+            <button class="primary" type="submit">开始研究</button>
             <button id="cancelNewProject" class="secondary" type="button">取消</button>
           </div>
         </form>
@@ -91,10 +100,10 @@
       <main id="main-content" class="main-content" tabindex="-1">
         <section id="emptyState" class="empty-state">
           <div class="empty-symbol" aria-hidden="true">⌁</div>
-          <p class="eyebrow">Human-in-the-loop research</p>
-          <h2>选择一个项目，开始可视化审核</h2>
+          <p class="eyebrow">人机协作研究流程</p>
+          <h2>把研究问题交给 Agent，最后拿到可追踪证据的文献综述</h2>
           <p>
-            你可以查看候选论文、补充检索方向、手动加入 DOI、排除论文，并在确认后继续精读与证据审查。
+            系统会先自动检索和初筛论文，再请你确认候选集；之后自动精读、综合、审查并生成最终综述。
           </p>
           <button id="emptyNewProject" class="primary" type="button">发起新研究</button>
         </section>
@@ -117,10 +126,20 @@
 
           <ol id="stageStepper" class="stage-stepper" aria-label="研究进度"></ol>
 
+          <section id="projectSummary" class="project-summary" hidden>
+            <div class="summary-main panel">
+              <p class="eyebrow">当前状态</p>
+              <h3 id="nextActionTitle">准备开始</h3>
+              <p id="nextActionText">选择或创建一个研究项目后，这里会显示下一步。</p>
+            </div>
+            <div id="resultHighlights" class="summary-cards" aria-label="项目关键指标"></div>
+            <section id="primaryOutcome" class="primary-outcome panel" hidden></section>
+          </section>
+
           <section id="runPanel" class="panel run-panel" hidden>
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Agent activity</p>
+                <p class="eyebrow">研究执行中</p>
                 <h3>正在执行研究</h3>
               </div>
               <span class="loading-orbit" aria-hidden="true"></span>
@@ -132,9 +151,9 @@
           <section id="reviewPanel" hidden>
             <div class="section-intro">
               <div>
-                <p class="eyebrow">Search review</p>
+                <p class="eyebrow">候选论文审核</p>
                 <h3>审核候选论文</h3>
-                <p>勾选保留的论文。取消勾选后，提交反馈或确认时会将其排除。</p>
+                <p>勾选你愿意让 Agent 精读的论文。确认后将直接进入证据提取和综述生成。</p>
               </div>
               <div class="review-stats" aria-label="候选集统计">
                 <div><strong id="candidateCount">0</strong><span>候选论文</span></div>
@@ -163,15 +182,33 @@
             <section class="feedback-panel panel">
               <div class="panel-heading compact">
                 <div>
-                  <p class="eyebrow">Human feedback</p>
-                  <h3>调整检索方向</h3>
+                  <p class="eyebrow">你的反馈</p>
+                  <h3>调整候选集或补充检索</h3>
                 </div>
                 <span class="optional-label">选填</span>
               </div>
 
               <div class="feedback-grid">
+                <label for="minPapers">
+                  精读篇数下限
+                  <span>确认候选集时会校验</span>
+                </label>
+                <input id="minPapers" type="number" min="1" value="1" />
+
+                <label for="maxPapers">
+                  精读篇数上限
+                  <span>用于限制最终入选规模</span>
+                </label>
+                <input id="maxPapers" type="number" min="1" value="8" />
+
+                <label for="maxSearchRounds">
+                  还能补充检索几轮
+                  <span>达到上限后不能再补充检索</span>
+                </label>
+                <input id="maxSearchRounds" type="number" min="0" value="3" />
+
                 <label for="querySuggestions">
-                  补充检索词
+                  希望补搜的方向
                   <span>每行一条，每轮最多 3 条</span>
                 </label>
                 <textarea
@@ -181,7 +218,7 @@
                 ></textarea>
 
                 <label for="manualDois">
-                  手动加入 DOI
+                  手动加入论文 DOI
                   <span>可用换行或逗号分隔</span>
                 </label>
                 <textarea
@@ -213,7 +250,7 @@
 
           <section id="continuePanel" class="panel continue-panel" hidden>
             <div>
-              <p class="eyebrow">Ready to continue</p>
+              <p class="eyebrow">候选集已确认</p>
               <h3>候选集已经确认</h3>
               <p>下一步将逐篇读取论文、提取可追踪证据，并完成综合与独立审查。</p>
             </div>
@@ -223,18 +260,18 @@
           <section id="projectDetails" class="details-section" hidden>
             <div class="section-intro compact-intro">
               <div>
-                <p class="eyebrow">Project record</p>
-                <h3>项目记录</h3>
+                <p class="eyebrow">过程与高级信息</p>
+                <h3>研究过程记录</h3>
               </div>
               <div id="artifactSummary" class="artifact-summary"></div>
             </div>
             <div class="details-grid">
               <section class="panel">
-                <h4>状态时间线</h4>
+                <h4>研究进度</h4>
                 <ol id="eventTimeline" class="event-timeline"></ol>
               </section>
               <section class="panel">
-                <h4>研究产物</h4>
+                <h4>产物明细（高级）</h4>
                 <div id="artifactList" class="artifact-list"></div>
               </section>
             </div>

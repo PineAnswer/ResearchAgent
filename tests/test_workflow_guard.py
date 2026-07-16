@@ -77,6 +77,56 @@ def test_workflow_guard_allows_only_one_scout_per_thread() -> None:
     assert _error_code(second) == "literature_scout_limit_reached"
 
 
+def test_workflow_guard_rejects_conflicting_paper_reader_evidence_policy() -> None:
+    guard = ResearchWorkflowGuardMiddleware()
+    guard.wrap_tool_call(_request("create_research_project"), lambda _request: "created")
+
+    blocked = guard.wrap_tool_call(
+        _request(
+            "task",
+            subagent_type="paper-reader",
+            description=(
+                "精读论文。PaperCard格式要求：evidence_id使用简单格式如E1、E2，"
+                "不要包含paper_id前缀。"
+            ),
+        ),
+        lambda _request: "unexpected",
+    )
+
+    assert isinstance(blocked, ToolMessage)
+    assert _error_code(blocked) == "paper_reader_description_conflicts_with_evidence_id_policy"
+
+
+def test_workflow_guard_rejects_conflicting_synthesizer_schema_description() -> None:
+    guard = ResearchWorkflowGuardMiddleware()
+    guard.wrap_tool_call(_request("create_research_project"), lambda _request: "created")
+
+    blocked_schema = guard.wrap_tool_call(
+        _request(
+            "task",
+            subagent_type="research-synthesizer",
+            description=(
+                "生成SynthesisReport。你必须输出JSON Schema："
+                '{"consensus":[{"claim":"x","supporting_evidence":["P1:E1"]}]}'
+            ),
+        ),
+        lambda _request: "unexpected",
+    )
+    blocked_tool = guard.wrap_tool_call(
+        _request(
+            "task",
+            subagent_type="research-synthesizer",
+            description="请通过 get_research_project 获取当前运行状态和相关产物。",
+        ),
+        lambda _request: "unexpected",
+    )
+
+    assert isinstance(blocked_schema, ToolMessage)
+    assert _error_code(blocked_schema) == "synthesizer_description_defines_schema"
+    assert isinstance(blocked_tool, ToolMessage)
+    assert _error_code(blocked_tool) == "synthesizer_description_uses_unavailable_project_tool"
+
+
 def test_workflow_guard_blocks_subagents_in_the_wrong_stage(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     state = ResearchRuntimeState()
@@ -92,6 +142,91 @@ def test_workflow_guard_blocks_subagents_in_the_wrong_stage(tmp_path) -> None:
 
     assert isinstance(blocked, ToolMessage)
     assert _error_code(blocked) == "subagent_stage_not_ready"
+
+
+def test_workflow_guard_blocks_paper_reader_outside_screening_decision(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    state = ResearchRuntimeState()
+    guard = ResearchWorkflowGuardMiddleware(service, state)
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "query",
+            "search_terms": ["query"],
+            "candidates": [
+                {
+                    "paper_id": "https://openalex.org/W4409797280",
+                    "title": "Included",
+                    "source": "OpenAlex",
+                },
+                {
+                    "paper_id": "https://openalex.org/W4409797281",
+                    "title": "Excluded",
+                    "source": "OpenAlex",
+                },
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {
+                    "paper_id": "https://openalex.org/W4409797280",
+                    "title": "Included",
+                    "source": "OpenAlex",
+                },
+                {
+                    "paper_id": "https://openalex.org/W4409797281",
+                    "title": "Excluded",
+                    "source": "OpenAlex",
+                },
+            ],
+            "excluded_paper_ids": ["https://openalex.org/W4409797281"],
+            "executed_queries": ["query"],
+        },
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": ["https://openalex.org/W4409797280"],
+            "excluded_paper_ids": ["https://openalex.org/W4409797281"],
+            "reasons": ["ok"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+    state.register_project("thread-a", project.project_id)
+    guard.bind_existing_project("thread-a")
+
+    blocked = guard.wrap_tool_call(
+        _request(
+            "task",
+            subagent_type="paper-reader",
+            description="Read W4409797281",
+        ),
+        lambda _request: "unexpected",
+    )
+    allowed = guard.wrap_tool_call(
+        _request(
+            "task",
+            subagent_type="paper-reader",
+            description="paper_id: W4409797280",
+        ),
+        lambda _request: "ok",
+    )
+
+    assert isinstance(blocked, ToolMessage)
+    assert _error_code(blocked) == "paper_reader_not_in_screening_decision"
+    assert allowed == "ok"
 
 
 def test_workflow_guard_reserves_pending_search_review_for_user_api(tmp_path) -> None:

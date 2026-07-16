@@ -21,7 +21,7 @@ from research_agent.infrastructure.sqlite_repository import ProjectNotFound
 def build_project_tools(
     service: ResearchService,
     runtime_state: ResearchRuntimeState | None = None,
-    on_search_committed: Callable[[str], dict[str, Any]] | None = None,
+    on_search_committed: Callable[[str, str], dict[str, Any]] | None = None,
 ):
     from langchain_core.tools import tool
 
@@ -192,7 +192,7 @@ def build_project_tools(
                     actor="literature-scout",
                 )
                 if payload.get("candidates") and on_search_committed is not None:
-                    search_review = on_search_committed(project_id)
+                    search_review = on_search_committed(project_id, thread_id)
                     project = service.get_project(project_id)
             elif subagent_type == "paper-reader":
                 artifact = service.save_artifact(project_id, "PaperCard", payload)
@@ -215,6 +215,28 @@ def build_project_tools(
                     actor="evidence-reviewer",
                     review=review,
                 )
+            elif subagent_type == "research-outliner":
+                artifact, project = service.save_artifact_and_transition(
+                    project_id,
+                    "ReviewOutline",
+                    payload,
+                    ResearchStage.OUTLINED,
+                    actor="research-outliner",
+                )
+            elif subagent_type == "narrative-writer":
+                artifact = service.save_artifact(project_id, "SectionDraft", payload)
+                project = service.get_project(project_id)
+            elif subagent_type == "chief-editor":
+                artifact, project = service.save_artifact_and_transition(
+                    project_id,
+                    "NarrativeReview",
+                    payload,
+                    ResearchStage.NARRATED,
+                    actor="chief-editor",
+                )
+            elif subagent_type == "fact-checker":
+                artifact = service.save_artifact(project_id, "FactCheckReport", payload)
+                project = service.get_project(project_id)
             else:
                 raise ValueError(f"Unsupported subagent_type: {subagent_type}")
         except (

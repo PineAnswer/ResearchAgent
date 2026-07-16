@@ -9,11 +9,35 @@ const STAGES = [
   ["SYNTHESIZED", "综合"],
   ["REVIEW_PENDING", "等待审查"],
   ["REVIEWED", "审查完成"],
+  ["OUTLINED", "提纲设计"],
+  ["NARRATED", "综述已生成"],
   ["COMPLETED", "完成"],
 ];
 
 const STAGE_LABELS = Object.fromEntries(STAGES);
 STAGE_LABELS.INCONCLUSIVE = "证据不足";
+STAGE_LABELS.OUTLINED = "提纲设计";
+STAGE_LABELS.NARRATED = "综述已生成";
+
+const ARTIFACT_LABELS = {
+  SearchReport: "检索结果",
+  SupplementalSearchReport: "补充检索结果",
+  CandidateSetSnapshot: "候选集快照",
+  SearchFeedback: "反馈与补搜",
+  ScreeningDecision: "入选论文",
+  PaperCard: "论文精读卡",
+  SynthesisReport: "综合结论",
+  ReviewResult: "证据审查",
+  ReviewOutline: "综述提纲",
+  SectionDraft: "章节草稿",
+  NarrativeReview: "最终综述",
+  FactCheckReport: "事实核查",
+  InsufficientEvidence: "停止原因",
+};
+
+function artifactLabel(kind) {
+  return ARTIFACT_LABELS[kind] || kind;
+}
 
 const state = {
   projects: [],
@@ -40,6 +64,9 @@ const elements = {
   refreshProjects: byId("refreshProjects"),
   projectLookupForm: byId("projectLookupForm"),
   projectIdInput: byId("projectIdInput"),
+  initialMinPapers: byId("initialMinPapers"),
+  initialMaxPapers: byId("initialMaxPapers"),
+  initialMaxSearchRounds: byId("initialMaxSearchRounds"),
   emptyState: byId("emptyState"),
   projectView: byId("projectView"),
   stageBadge: byId("stageBadge"),
@@ -49,6 +76,11 @@ const elements = {
   copyProjectId: byId("copyProjectId"),
   reloadProject: byId("reloadProject"),
   stageStepper: byId("stageStepper"),
+  projectSummary: byId("projectSummary"),
+  nextActionTitle: byId("nextActionTitle"),
+  nextActionText: byId("nextActionText"),
+  resultHighlights: byId("resultHighlights"),
+  primaryOutcome: byId("primaryOutcome"),
   runPanel: byId("runPanel"),
   runStatusText: byId("runStatusText"),
   activityLog: byId("activityLog"),
@@ -60,6 +92,9 @@ const elements = {
   candidateGrid: byId("candidateGrid"),
   selectAll: byId("selectAll"),
   clearAll: byId("clearAll"),
+  minPapers: byId("minPapers"),
+  maxPapers: byId("maxPapers"),
+  maxSearchRounds: byId("maxSearchRounds"),
   querySuggestions: byId("querySuggestions"),
   manualDois: byId("manualDois"),
   feedbackComment: byId("feedbackComment"),
@@ -77,6 +112,26 @@ const elements = {
 
 function candidateId(candidate) {
   return candidate.paper_id || candidate.doi || `title:${candidate.title || ""}`;
+}
+
+function normalizePaperId(value) {
+  const raw = String(value || "").trim().replace(/[.,;，。；)]+$/, "");
+  const match = raw.match(/(?:https?:\/\/)?(?:api\.)?openalex\.org\/(?:works\/)?(W\d+)/i);
+  return match ? match[1].toUpperCase() : raw;
+}
+
+function numberInputValue(element, fallback) {
+  const parsed = Number.parseInt(element?.value || "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function agentDecisionFor(snapshot, id) {
+  if (!snapshot) return null;
+  const normalizedId = normalizePaperId(id);
+  if ((snapshot.agent_included_paper_ids || []).some((item) => normalizePaperId(item) === normalizedId)) return "include";
+  if ((snapshot.agent_excluded_paper_ids || []).some((item) => normalizePaperId(item) === normalizedId)) return "exclude";
+  if ((snapshot.agent_uncertain_paper_ids || []).some((item) => normalizePaperId(item) === normalizedId)) return "uncertain";
+  return null;
 }
 
 function formatDate(value) {
@@ -256,9 +311,9 @@ function renderProjectHeader(project) {
   elements.projectIdLabel.textContent = project.project_id;
   elements.projectTopic.textContent = project.topic || "未命名研究";
   elements.projectQuestion.textContent = project.research_question || "";
-  elements.stageBadge.textContent = project.stage;
+  elements.stageBadge.textContent = STAGE_LABELS[project.stage] || project.stage;
   elements.stageBadge.className = "stage-badge";
-  if (["COMPLETED", "REVIEWED"].includes(project.stage)) {
+  if (["COMPLETED", "REVIEWED", "NARRATED"].includes(project.stage)) {
     elements.stageBadge.classList.add("is-done");
   }
   if (project.stage === "INCONCLUSIVE") {
@@ -268,11 +323,626 @@ function renderProjectHeader(project) {
   renderProjectList();
 }
 
+// ── Artifact HTML renderers ──────────────────────────────────────────
+
+function renderSearchReportHTML(payload) {
+  const parts = [];
+  if (payload.query) {
+    parts.push(h('div', {cls:'aw-row'}, [h('span',{cls:'aw-label'},'检索主题'), h('code',{},payload.query)]));
+  }
+  const terms = payload.search_terms || [];
+  if (terms.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'执行查询'),
+      h('ul',{cls:'aw-tags'}, terms.map(t => h('li',{cls:'aw-tag'},t)))
+    ]));
+  }
+  const candidates = payload.candidates || [];
+  parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'候选论文'), h('span',{cls:'aw-badge'},`${candidates.length} 篇`)]));
+  const decisions = payload.screening_decisions || {};
+  const dk = Object.keys(decisions);
+  if (dk.length) {
+    const inc = dk.filter(k => decisions[k]==='include').length;
+    const exc = dk.filter(k => decisions[k]==='exclude').length;
+    const unc = dk.filter(k => decisions[k]==='uncertain').length;
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'初筛结果'),
+      h('div',{cls:'aw-inline'}, [
+        h('span',{cls:'aw-pill inc'},`纳入 ${inc}`),
+        h('span',{cls:'aw-pill exc'},`排除 ${exc}`),
+        h('span',{cls:'aw-pill unc'},`待定 ${unc}`),
+      ])
+    ]));
+  }
+  const reasons = payload.screening_reasons || {};
+  const rk = Object.keys(reasons);
+  if (rk.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'筛选理由'),
+      h('ul',{cls:'aw-reasons'}, rk.slice(0,12).map(id => h('li',{}, [h('code',{},id), h('span',{},reasons[id])])))
+    ]));
+  }
+  const gaps = payload.coverage_gaps || [];
+  if (gaps.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'覆盖盲区'),
+      h('ul',{cls:'aw-list'}, gaps.map(g => h('li',{},g)))
+    ]));
+  }
+  const log = payload.search_iteration_log || [];
+  if (log.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'检索迭代'),
+      h('div',{}, log.map((entry,i) => h('div',{cls:'aw-iter'}, [
+        h('span',{cls:'aw-iter-idx'},`#${i+1}`),
+        h('code',{},entry.query||''),
+        h('span',{cls:'aw-iter-meta'},`命中 ${entry.count||0} 篇` + (entry.rationale ? ` — ${entry.rationale}` : ''))
+      ])))
+    ]));
+  }
+  const notes = payload.selection_notes || [];
+  if (notes.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'筛选说明'),
+      h('ul',{cls:'aw-list'}, notes.map(n => h('li',{},n)))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderPaperCardHTML(payload) {
+  const parts = [];
+  if (payload.title) {
+    parts.push(h('h4',{cls:'aw-card-title'},payload.title));
+  }
+  if (payload.research_question) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'研究问题'), h('span',{},payload.research_question)]));
+  }
+  const methods = payload.methods || [];
+  if (methods.length) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'方法'), h('ul',{cls:'aw-tags'}, methods.map(m => h('li',{cls:'aw-tag'},m)))]));
+  }
+  const datasets = payload.datasets || [];
+  if (datasets.length) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'数据集'), h('ul',{cls:'aw-tags'}, datasets.map(d => h('li',{cls:'aw-tag'},d)))]));
+  }
+  const findings = payload.findings || [];
+  if (findings.length) {
+    const rows = findings.map(f => h('tr',{}, [
+      h('td',{cls:'aw-ev-id'},h('code',{},f.evidence_id||'')),
+      h('td',{},f.claim||''),
+      h('td',{cls:'aw-ev-quote'},h('q',{},(f.quote||'').slice(0,200) + ((f.quote||'').length>200?'…':''))),
+      h('td',{cls:'aw-ev-src'},[f.section||'', f.page ? ` p.${f.page}` : ''].filter(Boolean).join(' ')),
+    ]));
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`证据（${findings.length} 条）`),
+      h('div',{cls:'aw-table-wrap'}, h('table',{cls:'aw-table'}, [
+        h('thead',{}, h('tr',{}, [h('th',{},'ID'), h('th',{},'结论'), h('th',{},'原文'), h('th',{},'出处')])),
+        h('tbody',{}, rows),
+      ]))
+    ]));
+  }
+  const limitations = payload.limitations || [];
+  if (limitations.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'局限'),
+      h('ul',{cls:'aw-list'}, limitations.map(l => h('li',{},l)))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderSynthesisReportHTML(payload) {
+  const parts = [];
+  if (payload.topic) {
+    parts.push(h('h4',{cls:'aw-card-title'},payload.topic));
+  }
+  const sections = [
+    ['共识结论', 'consensus'],
+    ['冲突与争议', 'conflicts'],
+    ['方法比较', 'method_comparison'],
+  ];
+  sections.forEach(([label, key]) => {
+    const items = payload[key] || [];
+    if (!items.length) return;
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`${label}（${items.length}）`),
+      h('ol',{cls:'aw-claims'}, items.map(c => h('li',{}, [
+        h('p',{},c.statement||''),
+        h('div',{cls:'aw-ev-refs'}, (c.evidence_ids||[]).map(eid => h('code',{cls:'aw-ev-ref'},eid))),
+      ])))
+    ]));
+  });
+  const gaps = payload.gaps || [];
+  if (gaps.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`研究空白（${gaps.length}）`),
+      h('div',{}, gaps.map(g => h('div',{cls:'aw-gap'}, [
+        h('div',{cls:'aw-gap-head'}, [
+          h('span',{cls:'aw-conf',cla:`conf-${(g.confidence||'low').toLowerCase()}`},g.confidence||'LOW'),
+          h('p',{},g.description||''),
+        ]),
+        h('p',{cls:'aw-gap-hypo'},h('em',{},`假设: ${g.proposed_hypothesis||''}`)),
+        h('div',{cls:'aw-ev-refs'}, [
+          h('span',{cls:'muted'},'支持: '),
+          ...(g.supporting_paper_ids||[]).map(pid => h('code',{cls:'aw-ev-ref'},pid)),
+          ...(g.conflicting_paper_ids||[]).length ? [h('span',{cls:'muted'},' 冲突: '), ...(g.conflicting_paper_ids||[]).map(pid => h('code',{cls:'aw-ev-ref warn'},pid))] : [],
+        ]),
+      ])))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderReviewResultHTML(payload) {
+  const parts = [];
+  const verdict = payload.verdict || '';
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'审查结论'),
+    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '✅ 通过' : '⚠️ 需修订'),
+  ]));
+  const fatal = payload.fatal_issues || [];
+  if (fatal.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'严重问题'),
+      h('ul',{cls:'aw-list issues'}, fatal.map(f => h('li',{},f)))
+    ]));
+  }
+  const suggestions = payload.suggestions || [];
+  if (suggestions.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'修订建议'),
+      h('ol',{cls:'aw-list'}, suggestions.map(s => h('li',{},s)))
+    ]));
+  }
+  const verified = payload.verified_evidence_ids || [];
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},`已验证证据（${verified.length}）`),
+    verified.length ? h('div',{cls:'aw-inline'}, verified.map(eid => h('code',{cls:'aw-ev-ref ok'},eid))) : h('span',{cls:'muted'},'无'),
+  ]));
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderScreeningDecisionHTML(payload) {
+  const parts = [];
+  const included = payload.included_paper_ids || [];
+  const excluded = payload.excluded_paper_ids || [];
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'筛选结果'),
+    h('div',{cls:'aw-inline'}, [
+      h('span',{cls:'aw-pill inc'},`纳入 ${included.length} 篇`),
+      h('span',{cls:'aw-pill exc'},`排除 ${excluded.length} 篇`),
+    ])
+  ]));
+  if (included.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'纳入论文'),
+      h('div',{cls:'aw-inline'}, included.map(id => h('code',{cls:'aw-ev-ref'},id)))
+    ]));
+  }
+  const reasons = payload.reasons || [];
+  if (reasons.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'筛选理由'),
+      h('ul',{cls:'aw-list'}, reasons.map(r => h('li',{},r)))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderCandidateSetSnapshotHTML(payload) {
+  const parts = [];
+  const candidates = payload.candidates || [];
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'候选集'),
+    h('div',{cls:'aw-inline'}, [
+      h('span',{cls:'aw-badge'},`${candidates.length} 篇候选`),
+      h('span',{cls:'aw-badge'},`${(payload.excluded_paper_ids||[]).length} 篇已排除`),
+    ])
+  ]));
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'检索轮次'),
+    h('span',{},`第 ${payload.search_round||0} / ${payload.max_search_rounds||3} 轮`)
+  ]));
+  const queries = payload.executed_queries || [];
+  if (queries.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'已执行查询'),
+      h('ul',{cls:'aw-list'}, queries.map(q => h('li',{},q)))
+    ]));
+  }
+  const comments = payload.user_comments || [];
+  if (comments.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'用户备注'),
+      h('ul',{cls:'aw-list'}, comments.map(c => h('li',{},c)))
+    ]));
+  }
+  const failures = payload.search_failures || [];
+  if (failures.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label warn'},'检索失败'),
+      h('ul',{cls:'aw-list issues'}, failures.map(f => h('li',{},f)))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderInsufficientEvidenceHTML(payload) {
+  const parts = [];
+  if (payload.reason) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'原因'), h('p',{cls:'aw-text'},payload.reason)]));
+  }
+  const queries = payload.queries_attempted || [];
+  if (queries.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'尝试的查询'),
+      h('ul',{cls:'aw-list'}, queries.map(q => h('li',{},q)))
+    ]));
+  }
+  const failures = payload.search_failures || [];
+  if (failures.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label warn'},'失败'),
+      h('ul',{cls:'aw-list issues'}, failures.map(f => h('li',{},f)))
+    ]));
+  }
+  if (payload.recommendation) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'建议'), h('p',{cls:'aw-text'},payload.recommendation)]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderSearchFeedbackHTML(payload) {
+  const parts = [];
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'操作'),
+    h('span',{cls:'aw-badge'},payload.action||'')
+  ]));
+  const queries = payload.suggested_queries || [];
+  if (queries.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'补充查询'),
+      h('ul',{cls:'aw-tags'}, queries.map(q => h('li',{cls:'aw-tag'},q)))
+    ]));
+  }
+  const added = payload.added_papers || [];
+  if (added.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`手动加入（${added.length} 篇）`),
+      h('ul',{cls:'aw-list'}, added.map(p => h('li',{},p.doi||p.paper_id||p.title||'未知')))
+    ]));
+  }
+  if (payload.comment) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'备注'), h('p',{cls:'aw-text'},payload.comment)]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderReviewOutlineHTML(payload) {
+  const parts = [];
+  if (payload.title) {
+    parts.push(h('h4',{cls:'aw-card-title'},payload.title));
+  }
+  if (payload.narrative_arc) {
+    parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'叙事线'), h('p',{cls:'aw-text'},payload.narrative_arc)]));
+  }
+  const sections = payload.sections || [];
+  if (sections.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`章节（${sections.length}）`),
+      h('ol',{cls:'aw-outline'}, sections.map((s,i) => h('li',{}, [
+        h('strong',{},`${s.heading||s.section_id||''}`),
+        h('div',{cls:'aw-outline-meta'}, [
+          h('span',{},`目标 ${s.target_words||300} 词`),
+          h('span',{},`${(s.assigned_paper_ids||[]).length} 篇论文`),
+          h('span',{},`${(s.assigned_evidence_ids||[]).length} 条证据`),
+        ]),
+        (s.key_claims||[]).length ? h('ul',{cls:'aw-list'}, s.key_claims.map(c => h('li',{},c))) : null,
+      ])))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderSectionDraftHTML(payload) {
+  const parts = [];
+  if (payload.heading) {
+    parts.push(h('h4',{cls:'aw-card-title'},payload.heading));
+  }
+  if (payload.transition_from) {
+    parts.push(h('div',{cls:'aw-transition'}, [h('span',{cls:'aw-label'},'接上文'), h('p',{},payload.transition_from)]));
+  }
+  if (payload.content) {
+    parts.push(h('div',{cls:'aw-content'}, payload.content.split('\n\n').map(p =>
+      h('p',{cls:'aw-para'}, p)
+    )));
+  }
+  if (payload.transition_to) {
+    parts.push(h('div',{cls:'aw-transition'}, [h('span',{cls:'aw-label'},'启下文'), h('p',{},payload.transition_to)]));
+  }
+  const cited = payload.cited_evidence || [];
+  if (cited.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},'引用证据'),
+      h('div',{cls:'aw-inline'}, cited.map(eid => h('code',{cls:'aw-ev-ref'},eid)))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderNarrativeReviewHTML(payload) {
+  const parts = [];
+  // Title + abstract
+  if (payload.title) {
+    parts.push(h('h3',{cls:'aw-review-title'},payload.title));
+  }
+  if (payload.abstract) {
+    parts.push(h('div',{cls:'aw-abstract'}, [
+      h('strong',{},'摘要'),
+      h('p',{},payload.abstract),
+    ]));
+  }
+  // Meta
+  parts.push(h('div',{cls:'aw-review-meta'}, [
+    h('span',{},`${payload.writing_style||'academic-survey'}`),
+    h('span',{},`约 ${payload.word_count||0} 词`),
+    h('span',{},`${(payload.references||[]).length} 篇参考文献`),
+  ]));
+  // Sections with TOC
+  const sections = payload.sections || [];
+  if (sections.length > 1) {
+    parts.push(h('div',{cls:'aw-toc'}, [
+      h('strong',{},'目录'),
+      h('ol',{}, sections.map(s => h('li',{}, h('a',{href:`#aw-${s.section_id||''}`},s.heading||'')))),
+    ]));
+  }
+  // Section bodies
+  sections.forEach(s => {
+    const cited = (s.cited_evidence||[]);
+    parts.push(h('div',{cls:'aw-section', id:`aw-${s.section_id||''}`}, [
+      h('h4',{cls:'aw-section-heading'},s.heading||''),
+      h('div',{cls:'aw-content'}, (s.content||'').split('\n\n').map(p =>
+        h('p',{cls:'aw-para'}, p)
+      )),
+      cited.length ? h('div',{cls:'aw-cited'}, [
+        h('span',{cls:'muted'},'引用: '),
+        ...cited.map(eid => h('code',{cls:'aw-ev-ref'},eid)),
+      ]) : null,
+      // Subsections
+      ...(s.subsections||[]).map(sub => h('div',{cls:'aw-subsection'}, [
+        h('h5',{},sub.heading||''),
+        h('div',{cls:'aw-content'}, (sub.content||'').split('\n\n').map(p => h('p',{cls:'aw-para'},p))),
+      ])),
+    ]));
+  });
+  // References
+  const refs = payload.references || [];
+  if (refs.length) {
+    parts.push(h('div',{cls:'aw-refs'}, [
+      h('h4',{cls:'aw-section-heading'},'参考文献'),
+      h('ol',{cls:'aw-ref-list'}, refs.map((r,i) => h('li',{id:`ref-${i+1}`}, [
+        h('span',{cls:'aw-ref-text'},r.text||r.paper_id||''),
+        r.bibtex ? h('details',{cls:'aw-bibtex'}, [
+          h('summary',{},'BibTeX'),
+          h('pre',{},r.bibtex),
+        ]) : null,
+      ]))),
+    ]));
+  }
+  return h('div',{cls:'artifact-html narrative-review'}, parts);
+}
+
+function renderFactCheckReportHTML(payload) {
+  const parts = [];
+  const verdict = payload.verdict || '';
+  parts.push(h('div',{cls:'aw-row'}, [
+    h('span',{cls:'aw-label'},'核查结论'),
+    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '✅ 通过' : '⚠️ 需修订'),
+  ]));
+  parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'章节'), h('code',{},payload.section_id||'')]));
+  const issues = payload.issues || [];
+  if (issues.length) {
+    parts.push(h('div',{cls:'aw-row'}, [
+      h('span',{cls:'aw-label'},`问题（${issues.length}）`),
+      h('div',{}, issues.map(iss => h('div',{cls:'aw-fc-issue'}, [
+        h('p',{cls:'aw-fc-claim'}, h('q',{}, iss.claim||'')),
+        h('div',{cls:'aw-fc-meta'}, [
+          h('code',{cls:'aw-ev-ref warn'}, iss.evidence_id||''),
+          h('span',{cls:'aw-pill exc'}, iss.problem||''),
+        ]),
+        iss.correction ? h('p',{cls:'aw-fc-fix'}, `建议: ${iss.correction}`) : null,
+      ])))
+    ]));
+  }
+  return h('div',{cls:'artifact-html'}, parts);
+}
+
+function renderGenericArtifactHTML(payload) {
+  return h('div',{cls:'artifact-html'}, [
+    h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'内容'), h('pre',{cls:'aw-pre'}, JSON.stringify(payload, null, 2))])
+  ]);
+}
+
+const ARTIFACT_HTML_RENDERERS = {
+  SearchReport: renderSearchReportHTML,
+  SupplementalSearchReport: renderSearchReportHTML,
+  PaperCard: renderPaperCardHTML,
+  SynthesisReport: renderSynthesisReportHTML,
+  ReviewResult: renderReviewResultHTML,
+  ScreeningDecision: renderScreeningDecisionHTML,
+  CandidateSetSnapshot: renderCandidateSetSnapshotHTML,
+  InsufficientEvidence: renderInsufficientEvidenceHTML,
+  SearchFeedback: renderSearchFeedbackHTML,
+  ReviewOutline: renderReviewOutlineHTML,
+  SectionDraft: renderSectionDraftHTML,
+  NarrativeReview: renderNarrativeReviewHTML,
+  FactCheckReport: renderFactCheckReportHTML,
+};
+
+// ── Tiny DOM builder ────────────────────────────────────────────────
+
+function h(tag, attrs, children) {
+  const el = document.createElement(tag);
+  if (attrs) {
+    Object.entries(attrs).forEach(([k, v]) => {
+      if (k === 'cls') { el.className = v; return; }
+      if (k === 'for') { el.setAttribute('for', v); return; }
+      if (k.startsWith('on')) { el.addEventListener(k.slice(2).toLowerCase(), v); return; }
+      el.setAttribute(k, v);
+    });
+  }
+  if (children) {
+    (Array.isArray(children) ? children : [children]).forEach(c => {
+      if (c == null) return;
+      el.append(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+  }
+  return el;
+}
+
+const USER_STAGE_GUIDANCE = {
+  CREATED: ["准备检索", "Agent 正在准备研究项目，下一步会开始查找相关论文。"],
+  SEARCHED: ["已找到候选论文", "系统已完成初步检索，正在生成可供你审核的候选集。"],
+  SEARCH_REVIEW_PENDING: ["请审核候选论文", "勾选需要精读的论文；你也可以补充检索词或手动加入 DOI。"],
+  SCREENED: ["可以开始精读", "候选集已经确认，点击继续研究后将逐篇读取论文并提取证据。"],
+  EXTRACTED: ["证据已提取", "论文精读已经完成，下一步会综合比较证据。"],
+  SYNTHESIZED: ["综合完成", "系统已经形成共识、冲突和研究空白，等待独立审查。"],
+  REVIEW_PENDING: ["等待证据审查", "系统将检查综合结论是否都有证据支撑。"],
+  REVIEWED: ["证据审查通过", "证据链已经通过审查，下一步生成文献综述大纲。"],
+  OUTLINED: ["大纲已生成", "系统已规划章节结构，下一步逐节撰写正文。"],
+  NARRATED: ["综述已生成", "完整综述已经生成，接下来进行事实核查。"],
+  COMPLETED: ["研究已完成", "最终综述已生成并完成事实核查，可查看下方成果。"],
+  INCONCLUSIVE: ["研究已停止", "系统认为证据不足或流程遇到阻断，请查看原因和建议。"],
+};
+
+function artifactsOf(snapshot, kind) {
+  return (snapshot?.artifacts || []).filter((artifact) => artifact.kind === kind);
+}
+
+function latestArtifact(snapshot, kind) {
+  const matches = artifactsOf(snapshot, kind);
+  return matches[matches.length - 1] || null;
+}
+
+function countFindings(snapshot) {
+  return artifactsOf(snapshot, "PaperCard").reduce(
+    (total, artifact) => total + (artifact.payload?.findings || []).length,
+    0,
+  );
+}
+
+function factCheckSummary(snapshot) {
+  const reports = artifactsOf(snapshot, "FactCheckReport");
+  const revise = reports.filter((artifact) => artifact.payload?.verdict === "REVISE");
+  const issues = reports.reduce(
+    (total, artifact) => total + (artifact.payload?.issues || []).length,
+    0,
+  );
+  return { reports: reports.length, revise: revise.length, issues };
+}
+
+function metricCard(label, value, hint = "") {
+  return h("div", { cls: "summary-card" }, [
+    h("strong", {}, String(value)),
+    h("span", {}, label),
+    hint ? h("small", {}, hint) : null,
+  ]);
+}
+
+function renderOutcome(snapshot) {
+  const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
+  const insufficient = latestArtifact(snapshot, "InsufficientEvidence")?.payload;
+  const facts = factCheckSummary(snapshot);
+  elements.primaryOutcome.replaceChildren();
+
+  if (narrative) {
+    elements.primaryOutcome.hidden = false;
+    elements.primaryOutcome.append(
+      h("div", { cls: "outcome-header" }, [
+        h("div", {}, [
+          h("p", { cls: "eyebrow" }, "最终成果"),
+          h("h3", {}, narrative.title || "文献综述已生成"),
+        ]),
+        h("span", { cls: "outcome-badge" }, `${narrative.sections?.length || 0} 章`),
+      ]),
+      narrative.abstract
+        ? h("p", { cls: "outcome-abstract" }, narrative.abstract)
+        : h("p", { cls: "outcome-abstract muted" }, "综述已生成，摘要暂未填写。"),
+    );
+    if (facts.issues) {
+      elements.primaryOutcome.append(
+        h(
+          "p",
+          { cls: "quality-note" },
+          `事实核查发现 ${facts.issues} 条可改进点，主要用于修订引用粒度和措辞。`,
+        ),
+      );
+    }
+    return;
+  }
+
+  if (insufficient) {
+    elements.primaryOutcome.hidden = false;
+    elements.primaryOutcome.append(
+      h("div", { cls: "outcome-header" }, [
+        h("div", {}, [
+          h("p", { cls: "eyebrow" }, "停止原因"),
+          h("h3", {}, "当前研究未形成最终综述"),
+        ]),
+        h("span", { cls: "outcome-badge is-warning" }, "需处理"),
+      ]),
+      h("p", { cls: "outcome-abstract" }, insufficient.reason || "证据不足。"),
+      insufficient.recommendation
+        ? h("p", { cls: "quality-note" }, insufficient.recommendation)
+        : null,
+    );
+    return;
+  }
+
+  elements.primaryOutcome.hidden = true;
+}
+
+function renderProjectSummary(snapshot) {
+  const project = snapshot?.project;
+  if (!project) {
+    elements.projectSummary.hidden = true;
+    return;
+  }
+  elements.projectSummary.hidden = false;
+
+  const [title, text] = USER_STAGE_GUIDANCE[project.stage] || [
+    STAGE_LABELS[project.stage] || project.stage,
+    "项目正在推进中。",
+  ];
+  elements.nextActionTitle.textContent = title;
+  elements.nextActionText.textContent = text;
+
+  const latestCandidateSet = latestArtifact(snapshot, "CandidateSetSnapshot")?.payload;
+  const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
+  const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
+  const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
+  const facts = factCheckSummary(snapshot);
+  elements.resultHighlights.replaceChildren(
+    metricCard("候选论文", latestCandidateSet?.candidates?.length || latestSearch?.candidates?.length || 0, "当前可审核范围"),
+    metricCard("入选精读", latestScreening?.included_paper_ids?.length || 0, "你确认的论文"),
+    metricCard("证据摘录", countFindings(snapshot), "可追踪 evidence"),
+    metricCard("综述章节", narrative?.sections?.length || 0, facts.revise ? `${facts.revise} 章需修订` : "最终正文"),
+  );
+
+  renderOutcome(snapshot);
+}
+
+// ── Main render ─────────────────────────────────────────────────────
+
 function renderDetails(snapshot) {
   state.snapshot = snapshot;
   const artifacts = snapshot?.artifacts || [];
   const events = snapshot?.events || [];
   elements.projectDetails.hidden = false;
+
+  // Init view mode
+  if (!state.artifactViewMode) state.artifactViewMode = 'html';
 
   const counts = new Map();
   artifacts.forEach((artifact) => {
@@ -282,7 +952,7 @@ function renderDetails(snapshot) {
   counts.forEach((count, kind) => {
     const chip = document.createElement("span");
     chip.className = "artifact-chip";
-    chip.textContent = `${kind} × ${count}`;
+    chip.textContent = `${artifactLabel(kind)} × ${count}`;
     elements.artifactSummary.append(chip);
   });
 
@@ -305,7 +975,25 @@ function renderDetails(snapshot) {
     });
   }
 
+  // ── Artifact list with toggle ──
   elements.artifactList.replaceChildren();
+
+  // Toggle bar
+  const toggleBar = h('div', {cls:'artifact-toggle-bar'}, [
+    h('span',{cls:'toggle-label'},'查看方式'),
+    h('button',{
+      cls:`toggle-btn ${state.artifactViewMode==='json'?'is-active':''}`,
+      'data-mode':'json',
+      onClick: (e) => switchArtifactView('json')
+    }, '原始数据'),
+    h('button',{
+      cls:`toggle-btn ${state.artifactViewMode==='html'?'is-active':''}`,
+      'data-mode':'html',
+      onClick: (e) => switchArtifactView('html')
+    }, '可读摘要'),
+  ]);
+  elements.artifactList.append(toggleBar);
+
   if (!artifacts.length) {
     const empty = document.createElement("p");
     empty.className = "muted small";
@@ -317,17 +1005,49 @@ function renderDetails(snapshot) {
       details.className = "artifact-item";
       const summary = document.createElement("summary");
       const kind = document.createElement("span");
-      kind.textContent = artifact.kind;
+      kind.textContent = artifactLabel(artifact.kind);
       const time = document.createElement("span");
       time.className = "muted";
       time.textContent = formatDate(artifact.created_at);
       summary.append(kind, time);
+
+      // JSON view
       const pre = document.createElement("pre");
+      pre.className = "artifact-json";
       pre.textContent = JSON.stringify(artifact.payload, null, 2);
-      details.append(summary, pre);
+
+      // HTML view
+      const renderer = ARTIFACT_HTML_RENDERERS[artifact.kind] || renderGenericArtifactHTML;
+      const htmlView = renderer(artifact.payload);
+
+      // Apply current view mode
+      if (state.artifactViewMode === 'json') {
+        pre.style.display = '';
+        htmlView.style.display = 'none';
+      } else {
+        pre.style.display = 'none';
+        htmlView.style.display = '';
+      }
+
+      details.append(summary, pre, htmlView);
       elements.artifactList.append(details);
     });
   }
+}
+
+function switchArtifactView(mode) {
+  state.artifactViewMode = mode;
+  // Update toggle buttons
+  document.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.classList.toggle('is-active', btn.dataset.mode === mode);
+  });
+  // Toggle all artifact view panes
+  document.querySelectorAll('.artifact-json').forEach(el => {
+    el.style.display = mode === 'json' ? '' : 'none';
+  });
+  document.querySelectorAll('.artifact-html').forEach(el => {
+    el.style.display = mode === 'html' ? '' : 'none';
+  });
 }
 
 function renderStagePanels(project) {
@@ -351,6 +1071,7 @@ async function loadProject(projectId, quiet = false, force = false) {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const snapshot = payload.data;
     renderProjectHeader(snapshot.project);
+    renderProjectSummary(snapshot);
     renderStagePanels(snapshot.project);
     renderDetails(snapshot);
     elements.runPanel.hidden = true;
@@ -395,6 +1116,9 @@ function renderCandidateCards() {
 
   visible.forEach((candidate) => {
     const id = candidateId(candidate);
+    const snapshot = state.review?.candidate_set;
+    const agentDecision = agentDecisionFor(snapshot, id);
+    const agentReason = snapshot?.agent_screening_reasons?.[id];
     const selected = state.selectedIds.has(id);
     const card = document.createElement("article");
     card.className = "candidate-card";
@@ -426,12 +1150,22 @@ function renderCandidateCards() {
     const year = document.createElement("span");
     year.textContent = candidate.year || "年份未知";
     meta.append(source, year);
+    if (agentDecision) {
+      const badge = document.createElement("span");
+      badge.className = "candidate-source";
+      badge.textContent = `Agent: ${agentDecision}`;
+      meta.append(badge);
+    }
 
     const authors = document.createElement("p");
     authors.className = "candidate-authors";
     authors.textContent = (candidate.authors || []).length
       ? candidate.authors.join("、")
       : "作者信息暂缺";
+
+    const reason = document.createElement("p");
+    reason.className = "candidate-authors";
+    reason.textContent = agentReason ? `筛选意见：${agentReason}` : "";
 
     const abstract = document.createElement("p");
     abstract.className = "candidate-abstract";
@@ -452,7 +1186,9 @@ function renderCandidateCards() {
       identifiers.append(link);
     }
 
-    card.append(head, meta, authors, abstract, identifiers);
+    card.append(head, meta, authors);
+    if (agentReason) card.append(reason);
+    card.append(abstract, identifiers);
     elements.candidateGrid.append(card);
   });
 }
@@ -467,8 +1203,26 @@ function updateReviewStats() {
 function renderReview(review) {
   state.review = review;
   state.candidates = review.candidate_set?.candidates || [];
-  state.selectedIds = new Set(state.candidates.map(candidateId));
+  const snapshot = review.candidate_set || {};
+  const agentIncluded = new Set(
+    (snapshot.agent_included_paper_ids || []).map(normalizePaperId),
+  );
+  state.selectedIds = agentIncluded.size
+    ? new Set(
+        state.candidates
+          .map(candidateId)
+          .filter((id) => agentIncluded.has(normalizePaperId(id))),
+      )
+    : new Set(state.candidates.map(candidateId));
+  elements.minPapers.value = snapshot.min_papers ?? 1;
+  elements.maxPapers.value = snapshot.max_papers ?? 8;
+  elements.maxSearchRounds.value = snapshot.max_search_rounds ?? 3;
   renderProjectHeader(review.project);
+  renderProjectSummary({
+    project: review.project,
+    artifacts: [...(state.snapshot?.artifacts || []), { kind: "CandidateSetSnapshot", payload: snapshot }],
+    events: state.snapshot?.events || [],
+  });
   elements.reviewPanel.hidden = false;
   elements.continuePanel.hidden = true;
   renderCandidateCards();
@@ -487,6 +1241,9 @@ function feedbackBody(action) {
     added_papers: dois.map((doi) => ({ doi })),
     excluded_paper_ids: exclusions,
     comment: elements.feedbackComment.value.trim(),
+    min_papers: numberInputValue(elements.minPapers, 1),
+    max_papers: numberInputValue(elements.maxPapers, 8),
+    max_search_rounds: numberInputValue(elements.maxSearchRounds, 3),
   };
 }
 
@@ -497,11 +1254,21 @@ async function submitFeedback(action) {
     notify("每轮最多提交 3 条补充检索词", true);
     return;
   }
+  if (body.min_papers > body.max_papers) {
+    notify("精读篇数下限不能大于上限", true);
+    return;
+  }
   if (action === "refine") {
+    const snapshot = state.review?.candidate_set || {};
+    const controlsChanged =
+      body.min_papers !== (snapshot.min_papers ?? 1) ||
+      body.max_papers !== (snapshot.max_papers ?? 8) ||
+      body.max_search_rounds !== (snapshot.max_search_rounds ?? 3);
     const hasChange =
       body.suggested_queries.length ||
       body.added_papers.length ||
       body.excluded_paper_ids.length ||
+      controlsChanged ||
       body.comment;
     if (!hasChange) {
       notify("请先填写检索建议、DOI、排除论文或审核说明", true);
@@ -518,13 +1285,18 @@ async function submitFeedback(action) {
   }
 
   if (action === "accept") {
-    if (!state.selectedIds.size && !body.added_papers.length) {
+    const acceptedCount = state.selectedIds.size + body.added_papers.length;
+    if (!acceptedCount) {
       notify("至少保留或加入一篇论文后才能确认", true);
+      return;
+    }
+    if (acceptedCount < body.min_papers || acceptedCount > body.max_papers) {
+      notify(`当前保留 ${acceptedCount} 篇，需位于 ${body.min_papers}-${body.max_papers} 篇之间`, true);
       return;
     }
     if (
       !window.confirm(
-        `确认保留 ${state.selectedIds.size + body.added_papers.length} 篇论文并结束人工审核？`,
+        `确认保留 ${acceptedCount} 篇论文并结束人工审核？`,
       )
     ) {
       return;
@@ -557,6 +1329,19 @@ async function submitFeedback(action) {
           : "候选集已更新",
         failures.length > 0,
       );
+    } else if (action === "accept" && result.ready_to_continue) {
+      elements.reviewPanel.hidden = true;
+      elements.runPanel.hidden = false;
+      elements.activityLog.replaceChildren();
+      addActivity("候选集已确认，正在直接进入论文精读");
+      await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
+        method: "POST",
+        body: "{}",
+      });
+      addActivity("后续研究执行结束，正在刷新项目状态");
+      await loadProjects();
+      await loadProject(state.projectId, true, true);
+      notify("候选集已确认，并已完成本轮后续研究");
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -607,6 +1392,11 @@ async function handleStreamEvent(eventName, payload) {
   if (project) {
     state.projectId = project.project_id;
     renderProjectHeader(project);
+    renderProjectSummary({
+      project,
+      artifacts: state.snapshot?.artifacts || [],
+      events: state.snapshot?.events || [],
+    });
   }
   if (eventName === "awaiting_input" && payload?.data) {
     renderReview(payload.data);
@@ -617,7 +1407,7 @@ async function handleStreamEvent(eventName, payload) {
   }
 }
 
-async function startResearch(topic, question) {
+async function startResearch(topic, question, reviewLimits = {}) {
   state.projectId = null;
   state.snapshot = null;
   state.review = null;
@@ -628,20 +1418,27 @@ async function startResearch(topic, question) {
   elements.projectDetails.hidden = true;
   elements.runPanel.hidden = false;
   elements.activityLog.replaceChildren();
-  renderProjectHeader({
+  const pendingProject = {
     project_id: "正在创建项目…",
     topic,
     research_question: question,
     stage: "CREATED",
-  });
+  };
+  renderProjectHeader(pendingProject);
+  renderProjectSummary({ project: pendingProject, artifacts: [], events: [] });
   addActivity("正在创建项目并准备检索");
+  if (reviewLimits.max_search_rounds) {
+    addActivity(
+      `系统将自动执行最多 ${reviewLimits.max_search_rounds} 轮检索-筛选，再交给你最终手筛`,
+    );
+  }
   setBusy(true);
 
   try {
     const response = await fetch("/api/research/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, research_question: question }),
+      body: JSON.stringify({ topic, research_question: question, ...reviewLimits }),
     });
     if (!response.ok) {
       let payload = null;
@@ -744,8 +1541,17 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
   const topic = byId("topicInput").value.trim();
   const question = byId("questionInput").value.trim();
   if (!topic || !question) return;
+  const reviewLimits = {
+    min_papers: numberInputValue(elements.initialMinPapers, 2),
+    max_papers: numberInputValue(elements.initialMaxPapers, 6),
+    max_search_rounds: numberInputValue(elements.initialMaxSearchRounds, 3),
+  };
+  if (reviewLimits.min_papers > reviewLimits.max_papers) {
+    notify("精读篇数下限不能大于上限", true);
+    return;
+  }
   toggleNewProject(false);
-  await startResearch(topic, question);
+  await startResearch(topic, question, reviewLimits);
 });
 elements.refreshProjects.addEventListener("click", loadProjects);
 elements.projectLookupForm.addEventListener("submit", (event) => {

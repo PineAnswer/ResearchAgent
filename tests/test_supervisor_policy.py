@@ -98,9 +98,9 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert '<skill name="research-protocol">' in captured["system_prompt"]
     assert "禁止为了继续流程而跳过前置产物" in captured["system_prompt"]
     configured_subagents = captured["subagents"]
-    assert len(configured_subagents) == 4
+    assert len(configured_subagents) == 8
     assert all(set(agent) == {"name", "description", "runnable"} for agent in configured_subagents)
-    assert len(agent_configs) == 4
+    assert len(agent_configs) == 8
     assert all(
         isinstance(config["middleware"][0], SerialToolExecutionMiddleware)
         for config in agent_configs

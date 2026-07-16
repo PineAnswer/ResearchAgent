@@ -66,6 +66,8 @@ def _review_service(tmp_path, *, max_rounds: int = 3):
             "candidates": [
                 {"paper_id": "P1", "title": "Existing", "source": "OpenAlex"}
             ],
+            "screening_decisions": {"P1": "include"},
+            "screening_reasons": {"P1": "Matches the research question."},
             "selection_notes": [],
         },
         ResearchStage.SEARCHED,
@@ -83,6 +85,8 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     assert result["awaiting_input"] is True
     assert result["project"]["stage"] == "SEARCH_REVIEW_PENDING"
     assert result["candidate_set"]["candidates"][0]["paper_id"] == "P1"
+    assert result["candidate_set"]["agent_included_paper_ids"] == ["P1"]
+    assert result["candidate_set"]["agent_approved"] is True
     assert service.get_snapshot(project_id)["artifacts"][-1]["kind"] == (
         "CandidateSetSnapshot"
     )
@@ -155,6 +159,58 @@ def test_verified_doi_can_be_added_and_user_can_accept(tmp_path) -> None:
     assert service.get_project(project_id).stage is ResearchStage.SCREENED
 
 
+def test_openalex_url_candidates_are_screened_as_bare_ids(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+    )
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": [
+                {
+                    "paper_id": "https://openalex.org/W4409797280",
+                    "title": "OpenAlex paper",
+                    "source": "OpenAlex",
+                }
+            ],
+            "screening_decisions": {"https://openalex.org/W4409797280": "include"},
+            "screening_reasons": {
+                "https://openalex.org/W4409797280": "Relevant."
+            },
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    review.begin_review(project.project_id)
+
+    result = review.apply_feedback(
+        project.project_id,
+        SearchFeedback(action="accept"),
+    )
+
+    assert result["candidate_set"]["agent_included_paper_ids"] == ["W4409797280"]
+    assert result["screening"]["payload"]["included_paper_ids"] == ["W4409797280"]
+
+
+def test_feedback_controls_candidate_count_bounds(tmp_path) -> None:
+    _service, review, project_id = _review_service(tmp_path)
+
+    with pytest.raises(WorkflowPrerequisiteError, match="between 2 and 3"):
+        review.apply_feedback(
+            project_id,
+            SearchFeedback(action="accept", min_papers=2, max_papers=3),
+        )
+
+
 def test_search_round_limit_and_stop_are_enforced(tmp_path) -> None:
     service, review, project_id = _review_service(tmp_path, max_rounds=1)
     review.apply_feedback(
@@ -191,7 +247,9 @@ def test_scout_commit_callback_opens_review_and_consumes_result(tmp_path) -> Non
         for item in build_project_tools(
             service,
             state,
-            on_search_committed=review.begin_review,
+            on_search_committed=lambda project_id, _thread_id: review.begin_review(
+                project_id
+            ),
         )
     }
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})

@@ -4,16 +4,21 @@ import re
 from typing import Any
 
 from research_agent.application.artifact_normalization import normalize_artifact_payload
+from research_agent.application.paper_ids import normalize_paper_id, same_paper_id
 from research_agent.application.ports import ArtifactExporterPort, ResearchRepositoryPort
 from research_agent.domain.models import (
     CandidateSetSnapshot,
+    FactCheckReport,
     InsufficientEvidence,
+    NarrativeReview,
     PaperCard,
     ResearchStage,
+    ReviewOutline,
     ReviewResult,
     ScreeningDecision,
     SearchReport,
     SearchFeedback,
+    SectionDraft,
     SynthesisReport,
 )
 
@@ -36,6 +41,10 @@ ARTIFACT_SCHEMAS = {
     "SynthesisReport": SynthesisReport,
     "ReviewResult": ReviewResult,
     "InsufficientEvidence": InsufficientEvidence,
+    "ReviewOutline": ReviewOutline,
+    "SectionDraft": SectionDraft,
+    "NarrativeReview": NarrativeReview,
+    "FactCheckReport": FactCheckReport,
 }
 
 SYSTEM_ARTIFACTS = {"RuntimeFallback", "ScreeningLog"}
@@ -47,6 +56,8 @@ REQUIRED_ARTIFACTS = {
     ResearchStage.EXTRACTED: "PaperCard",
     ResearchStage.SYNTHESIZED: "SynthesisReport",
     ResearchStage.REVIEWED: "ReviewResult",
+    ResearchStage.OUTLINED: "ReviewOutline",
+    ResearchStage.NARRATED: "NarrativeReview",
     ResearchStage.INCONCLUSIVE: "InsufficientEvidence",
 }
 
@@ -89,17 +100,74 @@ class ResearchService:
             ],
         }
 
+    def screening_context(self, project_id: str) -> dict[str, Any]:
+        """Return the small, authoritative context needed to continue from SCREENED."""
+        artifacts = self.repository.list_artifacts(project_id)
+        screenings = [item for item in artifacts if item.kind == "ScreeningDecision"]
+        if not screenings:
+            raise WorkflowPrerequisiteError(
+                "Project continuation requires a ScreeningDecision artifact"
+            )
+        screening = screenings[-1]
+        included_ids = [
+            normalize_paper_id(item)
+            for item in screening.payload.get("included_paper_ids", [])
+        ]
+        if not included_ids:
+            raise WorkflowPrerequisiteError(
+                "Project continuation requires ScreeningDecision.included_paper_ids"
+            )
+
+        candidates: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            if artifact.kind not in {"CandidateSetSnapshot", "SearchReport"}:
+                continue
+            for candidate in artifact.payload.get("candidates", []):
+                if isinstance(candidate, dict):
+                    candidates.append(candidate)
+
+        included_papers: list[dict[str, Any]] = []
+        for paper_id in included_ids:
+            matches = [
+                candidate
+                for candidate in candidates
+                if same_paper_id(self._candidate_id(candidate), paper_id)
+            ]
+            match = max(
+                matches,
+                key=lambda candidate: sum(
+                    bool(candidate.get(field))
+                    for field in ("title", "abstract", "doi", "url", "authors", "year")
+                ),
+                default=None,
+            )
+            if match is None:
+                raise WorkflowPrerequisiteError(
+                    "ScreeningDecision includes papers missing from candidate metadata: "
+                    + paper_id
+                )
+            normalized = dict(match)
+            normalized["paper_id"] = normalize_paper_id(str(normalized.get("paper_id", "")))
+            included_papers.append(normalized)
+
+        return {
+            "screening_artifact_id": screening.artifact_id,
+            "included_paper_ids": included_ids,
+            "included_papers": included_papers,
+            "screening_reasons": screening.payload.get("reasons", []),
+        }
+
     @staticmethod
     def _latest_paper_cards(artifacts) -> dict[str, dict[str, Any]]:
         cards: dict[str, dict[str, Any]] = {}
         for item in artifacts:
             if item.kind == "PaperCard":
-                cards[str(item.payload.get("paper_id", ""))] = item.payload
+                cards[normalize_paper_id(item.payload.get("paper_id", ""))] = item.payload
         return cards
 
     @staticmethod
     def _candidate_id(candidate: dict[str, Any]) -> str:
-        return str(
+        return normalize_paper_id(
             candidate.get("paper_id")
             or candidate.get("doi")
             or f"title:{candidate.get('title', '')}"
@@ -116,8 +184,12 @@ class ResearchService:
             cls._candidate_id(candidate)
             for candidate in snapshots[-1].payload.get("candidates", [])
         }
-        included = [str(item) for item in payload.get("included_paper_ids", [])]
-        excluded = [str(item) for item in payload.get("excluded_paper_ids", [])]
+        included = [
+            normalize_paper_id(item) for item in payload.get("included_paper_ids", [])
+        ]
+        excluded = [
+            normalize_paper_id(item) for item in payload.get("excluded_paper_ids", [])
+        ]
         if len(included) != len(set(included)):
             raise WorkflowPrerequisiteError("ScreeningDecision includes duplicate paper IDs")
         overlap = sorted(set(included) & set(excluded))
@@ -227,7 +299,7 @@ class ResearchService:
             mismatched = [
                 item["evidence_id"]
                 for item in payload["findings"]
-                if item["paper_id"] != payload["paper_id"]
+                if not same_paper_id(item["paper_id"], payload["paper_id"])
             ]
             if mismatched:
                 raise WorkflowPrerequisiteError(
@@ -235,8 +307,15 @@ class ResearchService:
                 )
             artifacts = self.repository.list_artifacts(project_id)
             screenings = [item for item in artifacts if item.kind == "ScreeningDecision"]
-            included_ids = set(screenings[-1].payload["included_paper_ids"])
-            if payload["paper_id"] not in included_ids:
+            if not screenings:
+                raise WorkflowPrerequisiteError(
+                    "PaperCard requires a ScreeningDecision with included_paper_ids"
+                )
+            included_ids = {
+                normalize_paper_id(item)
+                for item in screenings[-1].payload["included_paper_ids"]
+            }
+            if normalize_paper_id(payload["paper_id"]) not in included_ids:
                 raise WorkflowPrerequisiteError(
                     f"PaperCard {payload['paper_id']!r} is not included by ScreeningDecision"
                 )
@@ -299,7 +378,14 @@ class ResearchService:
                 )
         if target is ResearchStage.EXTRACTED:
             screenings = [item for item in artifacts if item.kind == "ScreeningDecision"]
-            included_ids = set(screenings[-1].payload["included_paper_ids"])
+            if not screenings:
+                raise WorkflowPrerequisiteError(
+                    "EXTRACTED requires a ScreeningDecision with included_paper_ids"
+                )
+            included_ids = {
+                normalize_paper_id(item)
+                for item in screenings[-1].payload["included_paper_ids"]
+            }
             if not included_ids:
                 raise WorkflowPrerequisiteError(
                     "EXTRACTED requires included papers; finish as INCONCLUSIVE instead"

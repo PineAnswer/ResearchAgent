@@ -16,7 +16,8 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 - 委派一次 literature-scout。
 - literature-scout 每个任务只能委派一次；禁止使用 general-purpose 或第二次委派绕过检索限制。
-- 调用 `commit_subagent_result(project_id, "literature-scout")`，由系统原样提交结构化结果并进入 SEARCHED。
+- literature-scout 负责检索策略设计和标题摘要初筛，只输出 candidate_ids、screening_decisions、screening_reasons、coverage_gaps、search_iteration_log、selection_notes。candidate_ids 必须使用搜索工具返回的真实 paper_id 或 DOI，禁止使用 P001/P002 等临时编号。论文完整元数据由系统从搜索工具返回中自动捕获并重建 candidates 列表。
+- 调用 `commit_subagent_result(project_id, "literature-scout")`，由系统重建 candidates 并提交结构化结果，进入 SEARCHED。
 - 如果 SearchReport 的 `candidates` 为空，立即调用 `finish_inconclusive` 保存检索词、失败原因和建议，项目进入 `INCONCLUSIVE` 并正常结束。禁止创建空 ScreeningDecision 或继续到 EXTRACTED。
 - 如果存在候选论文，系统会创建候选集快照并进入 `SEARCH_REVIEW_PENDING`。立即停止本轮 Agent 执行，等待用户通过检索审核 API 补充查询、加入或排除论文。
 
@@ -28,9 +29,9 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 ```json
 {
-  "included_paper_ids": ["P001"],
-  "excluded_paper_ids": ["P002"],
-  "reasons": ["P001：与研究问题直接相关；P002：仅讨论相邻问题"]
+  "included_paper_ids": ["W4409797280"],
+  "excluded_paper_ids": ["10.1109/example"],
+  "reasons": ["W4409797280：与研究问题直接相关；10.1109/example：仅讨论相邻问题"]
 }
 ```
 
