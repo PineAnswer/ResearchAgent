@@ -16,7 +16,7 @@ from research_agent.domain.models import (
     ReviewResult,
     StateEvent,
 )
-from research_agent.domain.workflow import validate_transition
+from research_agent.domain.workflow import InvalidTransition, validate_transition
 
 
 class ProjectNotFound(KeyError):
@@ -177,6 +177,74 @@ class SqliteResearchRepository:
                     project.updated_at.isoformat(),
                     payload_hash,
                     review.verdict.value if review else None,
+                ),
+            )
+        return project
+
+    def reopen_interrupted_workflow(
+        self,
+        project_id: str,
+        target: ResearchStage,
+        actor: str,
+        review: ReviewResult,
+    ) -> ResearchProject:
+        """Reopen a false completion or recoverable operational interruption."""
+        allowed_targets = {
+            ResearchStage.REVIEWED,
+            ResearchStage.OUTLINED,
+            ResearchStage.NARRATED,
+        }
+        allowed_sources = {
+            ResearchStage.COMPLETED,
+            ResearchStage.INCONCLUSIVE,
+        }
+        if target not in allowed_targets:
+            raise InvalidTransition(
+                f"Recovery cannot target {target.value}; allowed: "
+                + ", ".join(sorted(stage.value for stage in allowed_targets))
+            )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            if row is None:
+                raise ProjectNotFound(project_id)
+
+            project = ResearchProject.model_validate_json(row["payload_json"])
+            if project.stage not in allowed_sources:
+                raise InvalidTransition(
+                    "Workflow recovery requires COMPLETED or INCONCLUSIVE; current stage is "
+                    + project.stage.value
+                )
+
+            from_stage = project.stage
+            project.stage = target
+            project.current_review = review
+            project.updated_at = datetime.now(UTC)
+            payload = project.model_dump_json()
+            payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+            connection.execute(
+                "UPDATE projects SET payload_json = ?, updated_at = ? WHERE project_id = ?",
+                (payload, project.updated_at.isoformat(), project_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO state_events(
+                    project_id, from_stage, to_stage, actor, created_at,
+                    artifact_hash, review_verdict
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    from_stage.value,
+                    target.value,
+                    actor,
+                    project.updated_at.isoformat(),
+                    payload_hash,
+                    review.verdict.value,
                 ),
             )
         return project

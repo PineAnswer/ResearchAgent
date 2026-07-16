@@ -40,7 +40,12 @@ from research_agent.domain.models import (
 def _bounded_middleware(tool_call_limit: int) -> list:
     return [
         SerialToolExecutionMiddleware(),
-        ToolCallLimitMiddleware(run_limit=tool_call_limit, exit_behavior="end"),
+        ModelCallLimitMiddleware(run_limit=tool_call_limit + 2, exit_behavior="end"),
+        ToolCallLimitMiddleware(
+            tool_name="get_active_research_project",
+            run_limit=tool_call_limit,
+            exit_behavior="end",
+        ),
     ]
 
 

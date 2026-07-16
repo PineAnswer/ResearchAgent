@@ -30,6 +30,14 @@ class ResearchRepositoryPort(Protocol):
         review: ReviewResult | None = None,
     ) -> ResearchProject: ...
 
+    def reopen_interrupted_workflow(
+        self,
+        project_id: str,
+        target: ResearchStage,
+        actor: str,
+        review: ReviewResult,
+    ) -> ResearchProject: ...
+
     def save_artifact(
         self,
         project_id: str,

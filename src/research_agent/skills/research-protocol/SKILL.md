@@ -87,10 +87,32 @@ PaperCard 官方字段固定为：
 - 委派 evidence-reviewer。
 - 调用 `commit_subagent_result(project_id, "evidence-reviewer")` 原样提交并进入 REVIEWED。
 
-## 第七步：完成
+## 第七步：审查分流
 
-- PASS：推进到 COMPLETED。
+- PASS：只能进入综述写作流程，禁止直接推进到 COMPLETED。
 - REVISE：明确标记“报告需要修订”；可返回 EXTRACTED 修订一次，证据无法补充时进入 INCONCLUSIVE。
+
+## 第八步：综述提纲 → OUTLINED
+
+- 在 REVIEWED 且审查为 PASS 时委派 `research-outliner`。
+- 调用 `commit_subagent_result(project_id, "research-outliner")` 原样提交 ReviewOutline 并进入 OUTLINED。
+- ReviewOutline 的每个 `section_id` 必须唯一，并明确分配论文、Evidence、核心论点和目标字数。
+
+## 第九步：分节写作与总编整合 → NARRATED
+
+- 按 ReviewOutline 顺序逐节委派 `narrative-writer`，每次任务只指定一个 `section_id`。
+- 每节完成后立即调用 `commit_subagent_result(project_id, "narrative-writer")` 保存 SectionDraft，再处理下一节。
+- 已保存的 SectionDraft 不得重复生成；恢复执行时只补写缺失章节。
+- 全部提纲章节都有 SectionDraft 后，委派 `chief-editor` 整合完整 NarrativeReview。
+- 调用 `commit_subagent_result(project_id, "chief-editor")` 原样提交并进入 NARRATED。
+
+## 第十步：逐节事实核查 → COMPLETED
+
+- 按 NarrativeReview.sections 逐节委派 `fact-checker`，每次任务只指定一个 `section_id`。
+- 每节完成后立即调用 `commit_subagent_result(project_id, "fact-checker")` 保存 FactCheckReport。
+- 已保存的 FactCheckReport 不得重复生成；恢复执行时只核查缺失章节。
+- 只有 NarrativeReview 的每一节都有对应 FactCheckReport 后，才能调用 `advance_project_stage(project_id, "COMPLETED", "research-supervisor")`。
+- FactCheckReport 为 REVISE 时保留问题和修订建议；所有章节核查均已完成后仍可结束，但不得把 REVISE 描述为“没有问题”。
 
 ## 停止规则
 

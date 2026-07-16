@@ -45,6 +45,23 @@ def test_supervisor_has_atomic_commit_tool_and_explicit_ordering_policy(tmp_path
     assert "每次只委派一篇论文给 paper-reader" in PI_PROMPT
     assert "fetch_paper_text" in PI_PROMPT
     assert "必须复制 create_research_project 返回的原始 project_id" in PI_PROMPT
+    assert "REVIEWED → OUTLINED → NARRATED → COMPLETED" in PI_PROMPT
+    assert "research-outliner、narrative-writer、chief-editor、fact-checker" in PI_PROMPT
+
+
+def test_narrative_continuation_prompt_skips_completed_work() -> None:
+    prompt = ResearchSupervisor.build_narrative_continue_prompt(
+        "RP-test",
+        {
+            "current_stage": "OUTLINED",
+            "saved_section_draft_ids": ["sec-1"],
+            "fact_checked_section_ids": [],
+        },
+    )
+
+    assert "禁止创建新项目、重新检索" in prompt
+    assert "OUTLINED只补写尚未保存的SectionDraft" in prompt
+    assert '"saved_section_draft_ids": [\n    "sec-1"\n  ]' in prompt
 
 
 def test_skill_injection_rejects_empty_content_and_missing_subagent_skills() -> None:
@@ -112,6 +129,7 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert "skills" not in captured
     assert '<skill name="research-protocol">' in captured["system_prompt"]
     assert "禁止为了继续流程而跳过前置产物" in captured["system_prompt"]
+    assert "每一节都有对应 FactCheckReport" in captured["system_prompt"]
     configured_subagents = captured["subagents"]
     assert len(configured_subagents) == 8
     assert all(set(agent) == {"name", "description", "runnable"} for agent in configured_subagents)
@@ -187,3 +205,12 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert reviewer["middleware"][2].tool_name == "get_active_research_project"
     assert reviewer["middleware"][2].run_limit == 1
     assert reviewer["middleware"][2].exit_behavior == "end"
+    chief_editor = next(
+        config for config in agent_configs if config["name"] == "chief-editor"
+    )
+    assert len(chief_editor["middleware"]) == 3
+    assert isinstance(chief_editor["middleware"][0], SerialToolExecutionMiddleware)
+    assert isinstance(chief_editor["middleware"][1], ModelCallLimitMiddleware)
+    assert chief_editor["middleware"][1].run_limit == 4
+    assert chief_editor["middleware"][2].tool_name == "get_active_research_project"
+    assert chief_editor["middleware"][2].run_limit == 2

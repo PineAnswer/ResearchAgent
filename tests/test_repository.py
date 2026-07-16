@@ -42,10 +42,12 @@ def test_full_reviewed_flow(tmp_path) -> None:
         actor="evidence-reviewer",
         review=review,
     )
+    project = repository.transition(project.project_id, ResearchStage.OUTLINED, actor="pi")
+    project = repository.transition(project.project_id, ResearchStage.NARRATED, actor="editor")
     project = repository.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
 
     assert project.stage is ResearchStage.COMPLETED
-    assert len(repository.list_events(project.project_id)) == 8
+    assert len(repository.list_events(project.project_id)) == 10
 
 
 def test_delete_project_removes_project_artifacts_and_events(tmp_path) -> None:

@@ -6,7 +6,11 @@ from research_agent.application.research_service import (
     ResearchService,
     WorkflowPrerequisiteError,
 )
-from research_agent.domain.models import ResearchStage
+from research_agent.domain.models import (
+    ResearchStage,
+    ReviewResult,
+    ReviewVerdict,
+)
 from research_agent.domain.workflow import InvalidTransition
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 
@@ -28,6 +32,106 @@ def _enter_search_review(service, project_id: str, paper_ids: list[str]) -> None
         ResearchStage.SEARCH_REVIEW_PENDING,
         actor="human-search-review",
     )
+
+
+def _create_reviewed_project(service: ResearchService):
+    project = service.create_project("topic", "question")
+    for stage in (
+        ResearchStage.SEARCHED,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        ResearchStage.SCREENED,
+        ResearchStage.EXTRACTED,
+        ResearchStage.SYNTHESIZED,
+        ResearchStage.REVIEW_PENDING,
+    ):
+        project = service.repository.transition(project.project_id, stage, actor="test")
+    review = ReviewResult(
+        verdict=ReviewVerdict.PASS,
+        verified_evidence_ids=["P1:E1"],
+    )
+    project = service.repository.transition(
+        project.project_id,
+        ResearchStage.REVIEWED,
+        actor="evidence-reviewer",
+        review=review,
+    )
+    service.save_artifact(
+        project.project_id,
+        "ReviewResult",
+        review.model_dump(mode="json"),
+    )
+    return project
+
+
+def _save_narrative_inputs(service: ResearchService, project_id: str):
+    service.repository.save_artifact(
+        project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {
+                    "paper_id": "P1",
+                    "title": "Evidence Paper",
+                    "authors": ["A. Author"],
+                    "year": 2025,
+                    "doi": "10.1000/example",
+                    "source": "test",
+                }
+            ]
+        },
+    )
+    service.repository.save_artifact(
+        project_id,
+        "PaperCard",
+        {
+            "paper_id": "P1",
+            "title": "Evidence Paper",
+            "research_question": "question",
+            "methods": ["experiment"],
+            "datasets": [],
+            "findings": [
+                {
+                    "evidence_id": "P1:E1",
+                    "paper_id": "P1",
+                    "claim": "supported finding",
+                    "quote": "The finding is supported.",
+                    "page": 2,
+                }
+            ],
+            "limitations": [],
+        },
+    )
+    _, project = service.save_artifact_and_transition(
+        project_id,
+        "ReviewOutline",
+        {
+            "title": "Evidence Review",
+            "narrative_arc": "evidence first",
+            "sections": [
+                {
+                    "section_id": "sec-1",
+                    "heading": "Findings",
+                    "assigned_paper_ids": ["P1"],
+                    "assigned_evidence_ids": ["P1:E1"],
+                    "key_claims": ["supported finding"],
+                    "target_words": 300,
+                }
+            ],
+        },
+        ResearchStage.OUTLINED,
+        actor="research-outliner",
+    )
+    service.save_artifact(
+        project_id,
+        "SectionDraft",
+        {
+            "section_id": "sec-1",
+            "heading": "Findings",
+            "content": "Persisted evidence-backed text [P1:E1].",
+            "cited_evidence": ["P1:E1"],
+        },
+    )
+    return project
 
 
 def test_fallback_creates_traceable_project_without_claiming_results(tmp_path) -> None:
@@ -517,3 +621,194 @@ def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) ->
             ResearchStage.SYNTHESIZED,
             actor="synthesizer",
         )
+
+
+def test_completion_requires_narrative_and_fact_check_for_every_section(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "ReviewOutline",
+        {
+            "title": "Review",
+            "narrative_arc": "evidence first",
+            "sections": [
+                {
+                    "section_id": "sec-1",
+                    "heading": "Findings",
+                    "assigned_paper_ids": ["P1"],
+                    "assigned_evidence_ids": ["P1:E1"],
+                    "key_claims": ["finding"],
+                    "target_words": 300,
+                }
+            ],
+        },
+        ResearchStage.OUTLINED,
+        actor="research-outliner",
+    )
+    service.save_artifact(
+        project.project_id,
+        "SectionDraft",
+        {
+            "section_id": "sec-1",
+            "heading": "Findings",
+            "content": "Evidence-backed text [P1:E1].",
+            "cited_evidence": ["P1:E1"],
+        },
+    )
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "NarrativeReview",
+        {
+            "title": "Review",
+            "abstract": "Abstract",
+            "sections": [
+                {
+                    "section_id": "sec-1",
+                    "heading": "Findings",
+                    "content": "Evidence-backed text [P1:E1].",
+                    "cited_evidence": ["P1:E1"],
+                }
+            ],
+            "references": [],
+            "word_count": 4,
+        },
+        ResearchStage.NARRATED,
+        actor="chief-editor",
+    )
+
+    with pytest.raises(WorkflowPrerequisiteError, match="FactCheckReport"):
+        service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
+
+    service.save_artifact(
+        project.project_id,
+        "FactCheckReport",
+        {"section_id": "sec-1", "verdict": "PASS", "issues": []},
+    )
+    completed = service.transition(
+        project.project_id,
+        ResearchStage.COMPLETED,
+        actor="pi",
+    )
+
+    assert completed.stage is ResearchStage.COMPLETED
+
+
+def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    project = service.repository.transition(
+        project.project_id,
+        ResearchStage.OUTLINED,
+        actor="legacy-supervisor",
+    )
+    project = service.repository.transition(
+        project.project_id,
+        ResearchStage.NARRATED,
+        actor="legacy-supervisor",
+    )
+    service.repository.transition(
+        project.project_id,
+        ResearchStage.COMPLETED,
+        actor="legacy-supervisor",
+    )
+
+    continuation = service.prepare_continuation(project.project_id)
+
+    assert continuation["mode"] == "narrative"
+    assert continuation["project"].stage is ResearchStage.REVIEWED
+    assert continuation["context"]["current_stage"] == "REVIEWED"
+    recovery_event = service.get_snapshot(project.project_id)["events"][-1]
+    assert recovery_event["from_stage"] == "COMPLETED"
+    assert recovery_event["to_stage"] == "REVIEWED"
+    assert recovery_event["actor"] == "workflow-recovery"
+
+
+def test_prepare_continuation_recovers_operational_writing_failure(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    project = _save_narrative_inputs(service, project.project_id)
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "InsufficientEvidence",
+        {
+            "reason": "chief-editor连续两次生成无效结果，缺少title和sections字段。",
+            "queries_attempted": [],
+            "search_failures": [],
+            "recommendation": "重新委派chief-editor并返回完整结构化结果。",
+        },
+        ResearchStage.INCONCLUSIVE,
+        actor="research-supervisor",
+    )
+
+    continuation = service.prepare_continuation(project.project_id)
+
+    assert continuation["project"].stage is ResearchStage.OUTLINED
+    assert continuation["context"]["saved_section_draft_ids"] == ["sec-1"]
+    assert continuation["context"]["recovered_from"] == "INCONCLUSIVE"
+    recovery_event = service.get_snapshot(project.project_id)["events"][-1]
+    assert recovery_event["from_stage"] == "INCONCLUSIVE"
+    assert recovery_event["to_stage"] == "OUTLINED"
+    assert recovery_event["actor"] == "workflow-recovery"
+
+
+def test_prepare_continuation_does_not_reopen_true_evidence_failure(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    project = _save_narrative_inputs(service, project.project_id)
+    service.save_artifact_and_transition(
+        project.project_id,
+        "InsufficientEvidence",
+        {
+            "reason": "可用论文的证据范围不足以回答研究问题。",
+            "queries_attempted": ["query"],
+            "search_failures": [],
+            "recommendation": "扩大检索范围并补充论文。",
+        },
+        ResearchStage.INCONCLUSIVE,
+        actor="research-supervisor",
+    )
+
+    with pytest.raises(WorkflowPrerequisiteError, match="recoverable writing-system"):
+        service.prepare_continuation(project.project_id)
+
+    assert service.get_project(project.project_id).stage is ResearchStage.INCONCLUSIVE
+
+
+def test_deterministic_narrative_assembly_preserves_saved_drafts(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    project = _save_narrative_inputs(service, project.project_id)
+
+    artifact, updated = service.assemble_narrative_review(project.project_id)
+
+    assert updated.stage is ResearchStage.NARRATED
+    assert artifact.kind == "NarrativeReview"
+    assert artifact.payload["sections"][0]["content"] == (
+        "Persisted evidence-backed text [P1:E1]."
+    )
+    assert artifact.payload["evidence_chain"] == {"P1:E1": ["sec-1"]}
+    assert artifact.payload["references"] == [
+        {
+            "paper_id": "P1",
+            "text": "A. Author (2025) Evidence Paper. DOI: 10.1000/example.",
+            "bibtex": "",
+        }
+    ]
+    assert "1 篇入选文献" in artifact.payload["abstract"]
+    assert artifact.payload["word_count"] > 0
+
+
+def test_agent_context_omits_search_history_and_keeps_current_writing_inputs(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    project = _save_narrative_inputs(service, project.project_id)
+
+    context = service.get_agent_context(project.project_id)
+
+    assert "events" not in context
+    assert [artifact["kind"] for artifact in context["artifacts"]] == [
+        "PaperCard",
+        "ReviewOutline",
+        "SectionDraft",
+    ]

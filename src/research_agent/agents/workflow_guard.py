@@ -123,7 +123,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 return self._error(
                     request,
                     "subagent_not_allowed",
-                    "只能委派literature-scout、paper-reader、research-synthesizer或evidence-reviewer。",
+                    "只能委派已注册的检索、精读、综合、审查、提纲、写作、编辑或事实核查Agent。",
                 )
         if self.service is not None and self.runtime_state is not None:
             project_id = self.runtime_state.project_id(thread_id)

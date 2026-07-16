@@ -29,9 +29,7 @@ from research_agent.agents.serial_tools import SerialToolExecutionMiddleware
 from research_agent.agents.workflow_guard import ResearchWorkflowGuardMiddleware
 from research_agent.application.fallback import OfflineFallback
 from research_agent.application.research_service import ResearchService
-from research_agent.application.research_service import WorkflowPrerequisiteError
 from research_agent.application.search_review import SearchReviewService
-from research_agent.domain.models import ResearchStage
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
@@ -332,6 +330,25 @@ class ResearchSupervisor:
         )
 
     @staticmethod
+    def build_narrative_continue_prompt(
+        project_id: str,
+        narrative_context: dict[str, Any],
+    ) -> str:
+        return (
+            f"继续已有科研项目：{project_id}\n"
+            "该项目已完成论文精读、证据综合和PASS证据审查。"
+            "禁止创建新项目、重新检索、重新筛选、重新精读、重新综合或重新审查。\n"
+            "从 narrative_context.current_stage 继续综述写作："
+            "REVIEWED先生成提纲；OUTLINED只补写尚未保存的SectionDraft再交给chief-editor；"
+            "NARRATED只核查尚未保存FactCheckReport的章节。"
+            "必须复用已保存产物并跳过context中列出的已完成章节。"
+            "仅当NarrativeReview的每一节都有FactCheckReport后，才调用"
+            "advance_project_stage推进到COMPLETED。\n\n"
+            "narrative_context:\n"
+            f"{json.dumps(narrative_context, ensure_ascii=False, indent=2)}"
+        )
+
+    @staticmethod
     def build_config(thread_id: str | None = None) -> dict[str, Any]:
         return {
             "configurable": {"thread_id": thread_id or uuid.uuid4().hex},
@@ -502,18 +519,23 @@ class ResearchSupervisor:
         project_id: str,
         thread_id: str | None = None,
     ) -> dict:
-        """Continue a persisted project after the human accepted its candidate set."""
+        """Continue a persisted project from screening or an interrupted writing stage."""
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
             )
-        project = self.service.get_project(project_id)
-        if project.stage is not ResearchStage.SCREENED:
-            raise WorkflowPrerequisiteError(
-                "Project continuation requires SCREENED after human search review; "
-                f"current stage is {project.stage.value}"
+        continuation = self.service.prepare_continuation(project_id)
+        project = continuation["project"]
+        if continuation["mode"] == "screening":
+            continue_prompt = self.build_continue_prompt(
+                project_id,
+                continuation["context"],
             )
-        screening_context = self.service.screening_context(project_id)
+        else:
+            continue_prompt = self.build_narrative_continue_prompt(
+                project_id,
+                continuation["context"],
+            )
         active_thread_id = thread_id or uuid.uuid4().hex
         self.runtime_state.register_project(active_thread_id, project_id)
         self.workflow_guard.bind_existing_project(active_thread_id)
@@ -531,10 +553,7 @@ class ResearchSupervisor:
                     "messages": [
                         {
                             "role": "user",
-                            "content": self.build_continue_prompt(
-                                project_id,
-                                screening_context,
-                            ),
+                            "content": continue_prompt,
                         }
                     ]
                 },

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from research_agent.application.research_service import ResearchService
 from research_agent.agents.runtime_state import ResearchRuntimeState
-from research_agent.domain.models import ResearchStage
+from research_agent.domain.models import ResearchStage, ReviewResult, ReviewVerdict
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 from research_agent.tools.project_tools import build_project_tools
 
@@ -33,6 +33,86 @@ def _enter_search_review(service, project_id: str, paper_ids: list[str]) -> None
         ResearchStage.SEARCH_REVIEW_PENDING,
         actor="human-search-review",
     )
+
+
+def _create_outlined_project(service: ResearchService):
+    project = service.create_project("topic", "question")
+    for stage in (
+        ResearchStage.SEARCHED,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        ResearchStage.SCREENED,
+        ResearchStage.EXTRACTED,
+        ResearchStage.SYNTHESIZED,
+        ResearchStage.REVIEW_PENDING,
+    ):
+        project = service.repository.transition(project.project_id, stage, actor="test")
+    review = ReviewResult(
+        verdict=ReviewVerdict.PASS,
+        verified_evidence_ids=["P1:E1"],
+    )
+    project = service.repository.transition(
+        project.project_id,
+        ResearchStage.REVIEWED,
+        actor="evidence-reviewer",
+        review=review,
+    )
+    service.repository.save_artifact(
+        project.project_id,
+        "ReviewResult",
+        review.model_dump(mode="json"),
+    )
+    service.repository.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "P1",
+            "title": "Paper",
+            "research_question": "question",
+            "methods": [],
+            "datasets": [],
+            "findings": [
+                {
+                    "evidence_id": "P1:E1",
+                    "paper_id": "P1",
+                    "claim": "finding",
+                    "quote": "Evidence text.",
+                    "page": 1,
+                }
+            ],
+            "limitations": [],
+        },
+    )
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "ReviewOutline",
+        {
+            "title": "Review",
+            "narrative_arc": "evidence first",
+            "sections": [
+                {
+                    "section_id": "sec-1",
+                    "heading": "Findings",
+                    "assigned_paper_ids": ["P1"],
+                    "assigned_evidence_ids": ["P1:E1"],
+                    "key_claims": ["finding"],
+                    "target_words": 200,
+                }
+            ],
+        },
+        ResearchStage.OUTLINED,
+        actor="research-outliner",
+    )
+    service.save_artifact(
+        project.project_id,
+        "SectionDraft",
+        {
+            "section_id": "sec-1",
+            "heading": "Findings",
+            "content": "Saved draft [P1:E1].",
+            "cited_evidence": ["P1:E1"],
+        },
+    )
+    return project
 
 
 def test_active_project_tool_is_scoped_by_thread_and_takes_no_model_id(tmp_path) -> None:
@@ -465,3 +545,36 @@ def test_invalid_synthesis_is_discarded_and_can_be_regenerated(tmp_path) -> None
     assert result["rejection_count"] == 1
     assert state.pending_result("thread-a", "research-synthesizer") is None
     assert service.get_project(project_id).stage is ResearchStage.EXTRACTED
+
+
+def test_chief_editor_missing_structure_uses_saved_draft_fallback(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_outlined_project(service)
+    state = ResearchRuntimeState()
+    state.register_project("thread-a", project.project_id)
+    state.record_result(
+        "thread-a",
+        "chief-editor",
+        {
+            "_subagent_error": "structured_response_missing",
+            "_instruction": "submit the failure result",
+        },
+    )
+    tools = {
+        tool.name: tool for tool in build_project_tools(service, runtime_state=state)
+    }
+
+    result = json.loads(
+        tools["commit_subagent_result"].func(
+            project.project_id,
+            "chief-editor",
+            runtime=_runtime("thread-a"),
+        )
+    )
+
+    assert result["deterministic_fallback"] is True
+    assert result["project"]["stage"] == "NARRATED"
+    assert result["artifact"]["payload"]["sections"][0]["content"] == (
+        "Saved draft [P1:E1]."
+    )
+    assert state.pending_result("thread-a", "chief-editor") is None

@@ -71,7 +71,7 @@ def build_project_tools(
                 ensure_ascii=False,
             )
         try:
-            response = service.get_snapshot(project_id)
+            response = service.get_agent_context(project_id)
         except ProjectNotFound:
             return json.dumps(
                 {
@@ -155,9 +155,9 @@ def build_project_tools(
     ) -> str:
         """Commit the exact structured output returned by the latest subagent.
 
-        Supported subagents are literature-scout, paper-reader,
-        research-synthesizer, and evidence-reviewer. The model does not resubmit
-        or reconstruct JSON fields.
+        Supported subagents are the registered search, reading, synthesis,
+        review, outlining, writing, editing, and fact-checking agents. The model
+        does not resubmit or reconstruct JSON fields.
         """
         thread_id = thread_id_from_config(runtime.config)
         active_id = state.project_id(thread_id)
@@ -182,6 +182,7 @@ def build_project_tools(
                 ensure_ascii=False,
             )
         search_review = None
+        deterministic_fallback = False
         try:
             if subagent_type == "literature-scout":
                 artifact, project = service.save_artifact_and_transition(
@@ -227,13 +228,21 @@ def build_project_tools(
                 artifact = service.save_artifact(project_id, "SectionDraft", payload)
                 project = service.get_project(project_id)
             elif subagent_type == "chief-editor":
-                artifact, project = service.save_artifact_and_transition(
-                    project_id,
-                    "NarrativeReview",
-                    payload,
-                    ResearchStage.NARRATED,
-                    actor="chief-editor",
-                )
+                if payload.get("_subagent_error"):
+                    artifact, project = service.assemble_narrative_review(project_id)
+                    deterministic_fallback = True
+                else:
+                    try:
+                        artifact, project = service.save_artifact_and_transition(
+                            project_id,
+                            "NarrativeReview",
+                            payload,
+                            ResearchStage.NARRATED,
+                            actor="chief-editor",
+                        )
+                    except (ValidationError, WorkflowPrerequisiteError, ValueError):
+                        artifact, project = service.assemble_narrative_review(project_id)
+                        deterministic_fallback = True
             elif subagent_type == "fact-checker":
                 artifact = service.save_artifact(project_id, "FactCheckReport", payload)
                 project = service.get_project(project_id)
@@ -281,6 +290,7 @@ def build_project_tools(
                 "artifact": artifact.model_dump(mode="json"),
                 "project": project.model_dump(mode="json"),
                 "search_review": search_review,
+                "deterministic_fallback": deterministic_fallback,
             },
             ensure_ascii=False,
             default=str,
@@ -438,7 +448,7 @@ def build_project_tools(
         """Advance a stage that does not require a newly submitted artifact.
 
         Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING, and
-        COMPLETED after a PASS review.
+        COMPLETED after NarrativeReview plus one FactCheckReport per section.
         """
         try:
             target = ResearchStage(target_stage)

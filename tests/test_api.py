@@ -79,19 +79,65 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
                 await client.get("/"),
                 await client.get("/ui-assets/styles.css"),
                 await client.get("/ui-assets/app.js"),
+                await client.get("/ui-assets/vendor/lucide.min.js"),
+                await client.get("/ui-assets/vendor/marked.umd.js"),
+                await client.get("/ui-assets/fonts/InterVariable.woff2"),
+                await client.get("/ui-assets/fonts/NotoSerifSC-Regular.otf"),
+                await client.get("/ui-assets/licenses/LUCIDE-LICENSE.txt"),
+                await client.get("/ui-assets/licenses/INTER-LICENSE.txt"),
+                await client.get("/ui-assets/licenses/NOTO-SERIF-CJK-LICENSE.txt"),
+                await client.get("/ui-assets/licenses/MARKED-LICENSE.md"),
                 await client.get("/api/projects?limit=10"),
                 await client.get(f"/api/projects/{first.project_id}"),
                 await client.get("/api/projects/RP-missing"),
             )
 
-    index, styles, script, projects, snapshot, missing = asyncio.run(exercise_api())
+    (
+        index,
+        styles,
+        script,
+        lucide,
+        marked,
+        inter_font,
+        noto_font,
+        lucide_license,
+        inter_license,
+        noto_license,
+        marked_license,
+        projects,
+        snapshot,
+        missing,
+    ) = asyncio.run(exercise_api())
 
     assert index.status_code == 200
     assert "文献研究工作台" in index.text
+    assert "continueButtonLabel" in index.text
+    assert "vendor/marked.umd.js" in index.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
     assert script.status_code == 200
     assert "submitFeedback" in script.text
+    assert "继续生成综述" in script.text
+    assert "成果待补全" in script.text
+    assert "写作待恢复" in script.text
+    assert "本次停止来自主编输出格式故障" in script.text
+    assert "renderMarkdown" in script.text
+    assert lucide.status_code == 200
+    assert "createIcons" in lucide.text
+    assert marked.status_code == 200
+    assert "parseMarkdown" in marked.text
+    assert inter_font.status_code == 200
+    assert len(inter_font.content) > 100_000
+    assert noto_font.status_code == 200
+    assert len(noto_font.content) > 1_000_000
+    for license_response in (
+        lucide_license,
+        inter_license,
+        noto_license,
+        marked_license,
+    ):
+        assert license_response.status_code == 200
+        assert len(license_response.content) > 1_000
     assert projects.status_code == 200
     assert [item["project_id"] for item in projects.json()["data"]] == [
         second.project_id,

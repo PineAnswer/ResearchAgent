@@ -189,9 +189,9 @@ GET /api/projects/RP-.../search-review
 POST /api/projects/RP-.../continue
 ```
 
-服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
+服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。若写作阶段意外中断，同一接口也会从 `REVIEWED`、`OUTLINED` 或 `NARRATED` 恢复，并跳过已经保存的章节。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
 
-`/continue` 只接受 `SCREENED` 项目。`INCONCLUSIVE` 是当前状态机的终态，已有 `PaperCard` 和 Evidence 仍保存在 SQLite，但当前 API 没有从 `EXTRACTED` 重新执行综合的恢复入口。
+`/continue` 接受 `SCREENED`、`REVIEWED`、`OUTLINED` 和 `NARRATED` 项目。旧版本错误标记为 `COMPLETED`、但缺少完整综述或逐节事实核查的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
 
 ### 8. 运行测试
 

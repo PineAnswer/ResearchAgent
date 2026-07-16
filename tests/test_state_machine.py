@@ -28,10 +28,12 @@ def test_review_result_is_required() -> None:
         validate_transition(make_project(ResearchStage.REVIEW_PENDING), ResearchStage.REVIEWED)
 
 
-def test_pass_review_allows_completion() -> None:
+def test_pass_review_allows_outlining_but_not_direct_completion() -> None:
     project = make_project(ResearchStage.REVIEWED)
     project.current_review = ReviewResult(verdict=ReviewVerdict.PASS)
-    validate_transition(project, ResearchStage.COMPLETED)
+    validate_transition(project, ResearchStage.OUTLINED)
+    with pytest.raises(InvalidTransition):
+        validate_transition(project, ResearchStage.COMPLETED)
 
 
 def test_revise_review_returns_to_extraction() -> None:

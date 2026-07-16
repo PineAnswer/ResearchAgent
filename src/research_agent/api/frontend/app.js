@@ -50,16 +50,28 @@ const state = {
   busy: false,
   agentAvailable: false,
   toastTimer: null,
+  artifactViewMode: "html",
+  sidebarPreference: null,
+  inspectorOpen: false,
+  inspectorPreviousFocus: null,
 };
 
 const byId = (id) => document.getElementById(id);
 
 const elements = {
+  appShell: byId("appShell"),
+  sidebarToggle: byId("sidebarToggle"),
   healthBadge: byId("healthBadge"),
+  toolsMenuToggle: byId("toolsMenuToggle"),
+  toolsMenu: byId("toolsMenu"),
   newProjectToggle: byId("newProjectToggle"),
   newProjectForm: byId("newProjectForm"),
+  createView: byId("createView"),
   cancelNewProject: byId("cancelNewProject"),
+  cancelNewProjectSecondary: byId("cancelNewProjectSecondary"),
   emptyNewProject: byId("emptyNewProject"),
+  recentProjects: byId("recentProjects"),
+  recentProjectList: byId("recentProjectList"),
   projectList: byId("projectList"),
   refreshProjects: byId("refreshProjects"),
   projectLookupForm: byId("projectLookupForm"),
@@ -75,6 +87,9 @@ const elements = {
   projectQuestion: byId("projectQuestion"),
   copyProjectId: byId("copyProjectId"),
   reloadProject: byId("reloadProject"),
+  inspectorToggle: byId("inspectorToggle"),
+  projectMenuToggle: byId("projectMenuToggle"),
+  projectMenu: byId("projectMenu"),
   deleteProject: byId("deleteProject"),
   stageStepper: byId("stageStepper"),
   projectSummary: byId("projectSummary"),
@@ -103,13 +118,130 @@ const elements = {
   acceptReview: byId("acceptReview"),
   stopReview: byId("stopReview"),
   continuePanel: byId("continuePanel"),
+  continueEyebrow: byId("continueEyebrow"),
+  continueTitle: byId("continueTitle"),
+  continueText: byId("continueText"),
+  continueButtonLabel: byId("continueButtonLabel"),
   continueResearch: byId("continueResearch"),
+  projectInspector: byId("projectInspector"),
+  inspectorBackdrop: byId("inspectorBackdrop"),
+  closeInspector: byId("closeInspector"),
+  processTab: byId("processTab"),
+  artifactsTab: byId("artifactsTab"),
+  processPanel: byId("processPanel"),
+  artifactsPanel: byId("artifactsPanel"),
   projectDetails: byId("projectDetails"),
   artifactSummary: byId("artifactSummary"),
   eventTimeline: byId("eventTimeline"),
   artifactList: byId("artifactList"),
   toast: byId("toast"),
 };
+
+const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
+
+function iconNode(name) {
+  const icon = document.createElement("i");
+  icon.setAttribute("data-lucide", name);
+  icon.setAttribute("aria-hidden", "true");
+  return icon;
+}
+
+function refreshIcons() {
+  if (window.lucide?.createIcons) window.lucide.createIcons();
+}
+
+function showWorkspace(view) {
+  elements.emptyState.hidden = view !== "empty";
+  elements.createView.hidden = view !== "create";
+  elements.projectView.hidden = view !== "project";
+}
+
+function setPopover(toggle, popover, open) {
+  popover.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+}
+
+function closeMenus() {
+  setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
+  setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+}
+
+function readSidebarPreference() {
+  try {
+    const value = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return ["expanded", "collapsed"].includes(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function applySidebarState(value, persist = false) {
+  const next = value === "collapsed" ? "collapsed" : "expanded";
+  elements.appShell.dataset.sidebar = next;
+  const expanded = next === "expanded";
+  const label = expanded ? "收起项目侧栏" : "展开项目侧栏";
+  elements.sidebarToggle.setAttribute("aria-expanded", String(expanded));
+  elements.sidebarToggle.setAttribute("aria-label", label);
+  elements.sidebarToggle.title = label;
+  elements.sidebarToggle.replaceChildren(iconNode(expanded ? "panel-left-close" : "panel-left-open"));
+  if (persist) {
+    state.sidebarPreference = next;
+    try {
+      window.localStorage.setItem(SIDEBAR_STORAGE_KEY, next);
+    } catch {
+      // The layout still works when browser storage is unavailable.
+    }
+  }
+  refreshIcons();
+}
+
+function initializeSidebar() {
+  state.sidebarPreference = readSidebarPreference();
+  const initial = state.sidebarPreference || (window.innerWidth >= 1440 ? "expanded" : "collapsed");
+  applySidebarState(initial);
+  window.addEventListener("resize", () => {
+    if (!state.sidebarPreference) {
+      applySidebarState(window.innerWidth >= 1440 ? "expanded" : "collapsed");
+    }
+  });
+}
+
+function setInspectorTab(tab) {
+  const showArtifacts = tab === "artifacts";
+  elements.processTab.classList.toggle("is-active", !showArtifacts);
+  elements.artifactsTab.classList.toggle("is-active", showArtifacts);
+  elements.processTab.setAttribute("aria-selected", String(!showArtifacts));
+  elements.artifactsTab.setAttribute("aria-selected", String(showArtifacts));
+  elements.processPanel.hidden = showArtifacts;
+  elements.artifactsPanel.hidden = !showArtifacts;
+}
+
+function openInspector(tab = "process") {
+  if (!state.projectId) return;
+  state.inspectorPreviousFocus = document.activeElement;
+  state.inspectorOpen = true;
+  setInspectorTab(tab);
+  elements.projectInspector.classList.add("is-open");
+  elements.projectInspector.setAttribute("aria-hidden", "false");
+  elements.projectInspector.inert = false;
+  elements.inspectorBackdrop.hidden = false;
+  elements.inspectorToggle.setAttribute("aria-expanded", "true");
+  window.setTimeout(() => elements.closeInspector.focus(), 0);
+}
+
+function closeInspector({ restoreFocus = true } = {}) {
+  if (!state.inspectorOpen) return;
+  state.inspectorOpen = false;
+  elements.projectInspector.classList.remove("is-open");
+  elements.projectInspector.setAttribute("aria-hidden", "true");
+  elements.projectInspector.inert = true;
+  elements.inspectorBackdrop.hidden = true;
+  elements.inspectorToggle.setAttribute("aria-expanded", "false");
+  if (restoreFocus && state.inspectorPreviousFocus instanceof HTMLElement) {
+    state.inspectorPreviousFocus.focus();
+  }
+  state.inspectorPreviousFocus = null;
+}
 
 function candidateId(candidate) {
   return candidate.paper_id || candidate.doi || `title:${candidate.title || ""}`;
@@ -214,7 +346,7 @@ function setBusy(busy) {
     button.disabled = busy;
   });
   elements.continueResearch.disabled =
-    busy || (state.project?.stage === "SCREENED" && !state.agentAvailable);
+    busy || (Boolean(continuationMode(state.snapshot)) && !state.agentAvailable);
 }
 
 function setHealth(data) {
@@ -243,22 +375,62 @@ async function checkHealth() {
   }
 }
 
+function renderRecentProjects() {
+  elements.recentProjectList.replaceChildren();
+  elements.recentProjects.hidden = !state.projects.length;
+  state.projects.slice(0, 3).forEach((project) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "start-recent-item";
+    button.setAttribute("aria-label", `打开研究：${project.topic || "未命名研究"}`);
+
+    const copy = document.createElement("span");
+    copy.className = "start-recent-copy";
+    const title = document.createElement("strong");
+    title.textContent = project.topic || "未命名研究";
+    const meta = document.createElement("span");
+    meta.textContent = `${STAGE_LABELS[project.stage] || project.stage} · ${formatDate(project.updated_at)}`;
+    copy.append(title, meta);
+
+    button.append(copy, iconNode("arrow-right"));
+    button.addEventListener("click", () => loadProject(project.project_id));
+    elements.recentProjectList.append(button);
+  });
+  refreshIcons();
+}
+
 function renderProjectList() {
   elements.projectList.replaceChildren();
+  renderRecentProjects();
   if (!state.projects.length) {
     const empty = document.createElement("p");
-    empty.className = "muted small";
+    empty.className = "muted small sidebar-label";
     empty.textContent = "还没有项目记录";
     elements.projectList.append(empty);
     return;
   }
 
   state.projects.forEach((project) => {
+    const displayStage =
+      project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery"
+        ? recoverableOperationalFailure(state.snapshot)
+          ? "写作待恢复"
+          : "成果待补全"
+        : STAGE_LABELS[project.stage] || project.stage;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "project-list-item";
     button.classList.toggle("is-active", project.project_id === state.projectId);
     button.setAttribute("aria-current", project.project_id === state.projectId ? "page" : "false");
+    button.setAttribute("aria-label", `${project.topic || "未命名研究"}，${displayStage}`);
+    button.title = project.topic || "未命名研究";
+
+    const icon = document.createElement("span");
+    icon.className = "project-list-icon";
+    icon.append(iconNode(project.project_id === state.projectId ? "folder-open" : "folder"));
+
+    const content = document.createElement("span");
+    content.className = "project-list-content";
 
     const title = document.createElement("span");
     title.className = "project-list-title";
@@ -267,15 +439,17 @@ function renderProjectList() {
     const meta = document.createElement("span");
     meta.className = "project-list-meta";
     const stage = document.createElement("span");
-    stage.textContent = STAGE_LABELS[project.stage] || project.stage;
+    stage.textContent = displayStage;
     const date = document.createElement("span");
     date.textContent = formatDate(project.updated_at);
     meta.append(stage, date);
 
-    button.append(title, meta);
+    content.append(title, meta);
+    button.append(icon, content);
     button.addEventListener("click", () => loadProject(project.project_id));
     elements.projectList.append(button);
   });
+  refreshIcons();
 }
 
 async function loadProjects() {
@@ -284,7 +458,10 @@ async function loadProjects() {
     state.projects = payload.data || [];
     renderProjectList();
   } catch (error) {
-    elements.projectList.textContent = `项目载入失败：${error.message}`;
+    const message = document.createElement("p");
+    message.className = "muted small sidebar-label";
+    message.textContent = `项目载入失败：${error.message}`;
+    elements.projectList.replaceChildren(message);
   }
 }
 
@@ -295,8 +472,9 @@ function clearProjectView() {
   state.review = null;
   state.candidates = [];
   state.selectedIds = new Set();
-  elements.projectView.hidden = true;
-  elements.emptyState.hidden = false;
+  closeInspector({ restoreFocus: false });
+  closeMenus();
+  showWorkspace("empty");
   elements.projectIdInput.value = "";
   window.history.replaceState({}, "", window.location.pathname);
   renderProjectList();
@@ -304,6 +482,7 @@ function clearProjectView() {
 
 async function deleteCurrentProject() {
   if (!state.projectId || state.busy) return;
+  closeMenus();
   const projectId = state.projectId;
   const topic = state.project?.topic || "未命名研究";
   const confirmed = window.confirm(
@@ -345,8 +524,7 @@ function renderStepper(stage) {
 function renderProjectHeader(project) {
   state.project = project;
   state.projectId = project.project_id;
-  elements.emptyState.hidden = true;
-  elements.projectView.hidden = false;
+  showWorkspace("project");
   elements.projectIdLabel.textContent = project.project_id;
   elements.projectTopic.textContent = project.topic || "未命名研究";
   elements.projectQuestion.textContent = project.research_question || "";
@@ -360,6 +538,7 @@ function renderProjectHeader(project) {
   }
   renderStepper(project.stage);
   renderProjectList();
+  refreshIcons();
 }
 
 // ── Artifact HTML renderers ──────────────────────────────────────────
@@ -498,7 +677,7 @@ function renderSynthesisReportHTML(payload) {
       h('span',{cls:'aw-label'},`研究空白（${gaps.length}）`),
       h('div',{}, gaps.map(g => h('div',{cls:'aw-gap'}, [
         h('div',{cls:'aw-gap-head'}, [
-          h('span',{cls:'aw-conf',cla:`conf-${(g.confidence||'low').toLowerCase()}`},g.confidence||'LOW'),
+          h('span',{cls:`aw-conf conf-${(g.confidence||'low').toLowerCase()}`},g.confidence||'LOW'),
           h('p',{},g.description||''),
         ]),
         h('p',{cls:'aw-gap-hypo'},h('em',{},`假设: ${g.proposed_hypothesis||''}`)),
@@ -518,7 +697,7 @@ function renderReviewResultHTML(payload) {
   const verdict = payload.verdict || '';
   parts.push(h('div',{cls:'aw-row'}, [
     h('span',{cls:'aw-label'},'审查结论'),
-    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '✅ 通过' : '⚠️ 需修订'),
+    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '通过' : '需修订'),
   ]));
   const fatal = payload.fatal_issues || [];
   if (fatal.length) {
@@ -684,6 +863,169 @@ function renderReviewOutlineHTML(payload) {
   return h('div',{cls:'artifact-html'}, parts);
 }
 
+const MARKDOWN_ALLOWED_TAGS = new Set([
+  "a",
+  "blockquote",
+  "br",
+  "code",
+  "del",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+]);
+
+const MARKDOWN_BLOCKED_TAGS = new Set([
+  "embed",
+  "form",
+  "iframe",
+  "math",
+  "object",
+  "script",
+  "style",
+  "svg",
+  "template",
+]);
+
+const MARKDOWN_PARSER = (() => {
+  if (!window.marked?.Marked) return null;
+  const parser = new window.marked.Marked();
+  parser.use({
+    tokenizer: {
+      html(source) {
+        if (!source.startsWith("<")) return false;
+        return { type: "text", raw: "<", text: "&lt;" };
+      },
+    },
+  });
+  return parser;
+})();
+
+function safeMarkdownHref(value) {
+  try {
+    const url = new URL(String(value || "").trim(), window.location.href);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function cloneMarkdownChildren(node) {
+  const fragment = document.createDocumentFragment();
+  node.childNodes.forEach((child) => {
+    const safeChild = cloneMarkdownNode(child);
+    if (safeChild) fragment.append(safeChild);
+  });
+  return fragment;
+}
+
+function cloneMarkdownNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return document.createTextNode(node.textContent || "");
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+  const tag = node.tagName.toLowerCase();
+  if (MARKDOWN_BLOCKED_TAGS.has(tag)) return null;
+  if (!MARKDOWN_ALLOWED_TAGS.has(tag)) return cloneMarkdownChildren(node);
+
+  if (tag === "a") {
+    const href = safeMarkdownHref(node.getAttribute("href"));
+    if (!href) return cloneMarkdownChildren(node);
+    const link = document.createElement("a");
+    link.href = href.href;
+    const title = node.getAttribute("title");
+    if (title) link.title = title;
+    if (["http:", "https:"].includes(href.protocol) && href.origin !== window.location.origin) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+    link.append(cloneMarkdownChildren(node));
+    return link;
+  }
+
+  const clean = document.createElement(tag);
+  if (tag === "code") {
+    const languageClass = [...node.classList].find((name) =>
+      /^language-[a-z0-9_-]+$/i.test(name),
+    );
+    if (languageClass) clean.classList.add(languageClass);
+  }
+  if (tag === "ol") {
+    const start = Number.parseInt(node.getAttribute("start") || "", 10);
+    if (Number.isInteger(start) && start > 1) clean.setAttribute("start", String(start));
+  }
+  if (["td", "th"].includes(tag)) {
+    const align = node.getAttribute("align");
+    if (["left", "center", "right"].includes(align)) clean.setAttribute("align", align);
+  }
+  clean.append(cloneMarkdownChildren(node));
+  return clean;
+}
+
+function sanitizedMarkdownFragment(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  return cloneMarkdownChildren(template.content);
+}
+
+function renderMarkdown(markdown, className = "aw-markdown") {
+  const container = h("div", { cls: className });
+  const source = String(markdown || "").trim();
+  if (!source) return container;
+
+  try {
+    if (!MARKDOWN_PARSER) throw new Error("Markdown parser unavailable");
+    const rendered = MARKDOWN_PARSER.parse(source, {
+      async: false,
+      breaks: false,
+      gfm: true,
+    });
+    container.append(sanitizedMarkdownFragment(rendered));
+  } catch {
+    source.split(/\n{2,}/).forEach((paragraph) => {
+      container.append(h("p", { cls: "aw-para" }, paragraph));
+    });
+  }
+  return container;
+}
+
+function stripDuplicateLeadingMarkdownHeading(markdown, heading) {
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const firstContentLine = lines.findIndex((line) => line.trim());
+  if (firstContentLine < 0) return "";
+
+  const match = lines[firstContentLine].match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/);
+  if (!match) return lines.join("\n");
+  const plainHeading = match[1]
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+  if (plainHeading !== String(heading || "").trim()) return lines.join("\n");
+
+  lines.splice(firstContentLine, 1);
+  while (lines[firstContentLine] !== undefined && !lines[firstContentLine].trim()) {
+    lines.splice(firstContentLine, 1);
+  }
+  return lines.join("\n");
+}
+
 function renderSectionDraftHTML(payload) {
   const parts = [];
   if (payload.heading) {
@@ -693,9 +1035,12 @@ function renderSectionDraftHTML(payload) {
     parts.push(h('div',{cls:'aw-transition'}, [h('span',{cls:'aw-label'},'接上文'), h('p',{},payload.transition_from)]));
   }
   if (payload.content) {
-    parts.push(h('div',{cls:'aw-content'}, payload.content.split('\n\n').map(p =>
-      h('p',{cls:'aw-para'}, p)
-    )));
+    parts.push(
+      renderMarkdown(
+        stripDuplicateLeadingMarkdownHeading(payload.content, payload.heading),
+        "aw-content aw-markdown",
+      ),
+    );
   }
   if (payload.transition_to) {
     parts.push(h('div',{cls:'aw-transition'}, [h('span',{cls:'aw-label'},'启下文'), h('p',{},payload.transition_to)]));
@@ -710,7 +1055,11 @@ function renderSectionDraftHTML(payload) {
   return h('div',{cls:'artifact-html'}, parts);
 }
 
+let narrativeRenderSequence = 0;
+
 function renderNarrativeReviewHTML(payload) {
+  narrativeRenderSequence += 1;
+  const anchorPrefix = `review-${narrativeRenderSequence}`;
   const parts = [];
   // Title + abstract
   if (payload.title) {
@@ -719,7 +1068,7 @@ function renderNarrativeReviewHTML(payload) {
   if (payload.abstract) {
     parts.push(h('div',{cls:'aw-abstract'}, [
       h('strong',{},'摘要'),
-      h('p',{},payload.abstract),
+      renderMarkdown(payload.abstract, "aw-markdown aw-abstract-body"),
     ]));
   }
   // Meta
@@ -733,17 +1082,18 @@ function renderNarrativeReviewHTML(payload) {
   if (sections.length > 1) {
     parts.push(h('div',{cls:'aw-toc'}, [
       h('strong',{},'目录'),
-      h('ol',{}, sections.map(s => h('li',{}, h('a',{href:`#aw-${s.section_id||''}`},s.heading||'')))),
+      h('ol',{}, sections.map((s, index) => h('li',{}, h('a',{href:`#${anchorPrefix}-${s.section_id||index}`},s.heading||'')))),
     ]));
   }
   // Section bodies
-  sections.forEach(s => {
+  sections.forEach((s, index) => {
     const cited = (s.cited_evidence||[]);
-    parts.push(h('div',{cls:'aw-section', id:`aw-${s.section_id||''}`}, [
+    parts.push(h('div',{cls:'aw-section', id:`${anchorPrefix}-${s.section_id||index}`}, [
       h('h4',{cls:'aw-section-heading'},s.heading||''),
-      h('div',{cls:'aw-content'}, (s.content||'').split('\n\n').map(p =>
-        h('p',{cls:'aw-para'}, p)
-      )),
+      renderMarkdown(
+        stripDuplicateLeadingMarkdownHeading(s.content || "", s.heading || ""),
+        "aw-content aw-markdown",
+      ),
       cited.length ? h('div',{cls:'aw-cited'}, [
         h('span',{cls:'muted'},'引用: '),
         ...cited.map(eid => h('code',{cls:'aw-ev-ref'},eid)),
@@ -751,7 +1101,10 @@ function renderNarrativeReviewHTML(payload) {
       // Subsections
       ...(s.subsections||[]).map(sub => h('div',{cls:'aw-subsection'}, [
         h('h5',{},sub.heading||''),
-        h('div',{cls:'aw-content'}, (sub.content||'').split('\n\n').map(p => h('p',{cls:'aw-para'},p))),
+        renderMarkdown(
+          stripDuplicateLeadingMarkdownHeading(sub.content || "", sub.heading || ""),
+          "aw-content aw-markdown",
+        ),
       ])),
     ]));
   });
@@ -760,7 +1113,7 @@ function renderNarrativeReviewHTML(payload) {
   if (refs.length) {
     parts.push(h('div',{cls:'aw-refs'}, [
       h('h4',{cls:'aw-section-heading'},'参考文献'),
-      h('ol',{cls:'aw-ref-list'}, refs.map((r,i) => h('li',{id:`ref-${i+1}`}, [
+      h('ol',{cls:'aw-ref-list'}, refs.map((r,i) => h('li',{id:`${anchorPrefix}-ref-${i+1}`}, [
         h('span',{cls:'aw-ref-text'},r.text||r.paper_id||''),
         r.bibtex ? h('details',{cls:'aw-bibtex'}, [
           h('summary',{},'BibTeX'),
@@ -777,7 +1130,7 @@ function renderFactCheckReportHTML(payload) {
   const verdict = payload.verdict || '';
   parts.push(h('div',{cls:'aw-row'}, [
     h('span',{cls:'aw-label'},'核查结论'),
-    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '✅ 通过' : '⚠️ 需修订'),
+    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '通过' : '需修订'),
   ]));
   parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'章节'), h('code',{},payload.section_id||'')]));
   const issues = payload.issues || [];
@@ -881,6 +1234,84 @@ function factCheckSummary(snapshot) {
   return { reports: reports.length, revise: revise.length, issues };
 }
 
+function latestReviewPassed(snapshot) {
+  return latestArtifact(snapshot, "ReviewResult")?.payload?.verdict === "PASS";
+}
+
+function narrativeCompletion(snapshot) {
+  const narrativeArtifact = latestArtifact(snapshot, "NarrativeReview");
+  const sections = narrativeArtifact?.payload?.sections || [];
+  if (!sections.length) return { complete: false, missing: [], narrative: null };
+  const narrativeId = Number(narrativeArtifact.artifact_id || 0);
+  const checked = new Set(
+    artifactsOf(snapshot, "FactCheckReport")
+      .filter((artifact) => Number(artifact.artifact_id || 0) > narrativeId)
+      .map((artifact) => artifact.payload?.section_id)
+      .filter(Boolean),
+  );
+  const missing = sections
+    .map((section) => section.section_id)
+    .filter((sectionId) => sectionId && !checked.has(sectionId));
+  return { complete: missing.length === 0, missing, narrative: narrativeArtifact.payload };
+}
+
+function currentSectionDrafts(snapshot) {
+  const outline = latestArtifact(snapshot, "ReviewOutline");
+  if (!outline) return [];
+  const outlineId = Number(outline.artifact_id || 0);
+  const drafts = new Map();
+  artifactsOf(snapshot, "SectionDraft")
+    .filter((artifact) => Number(artifact.artifact_id || 0) > outlineId)
+    .forEach((artifact) => {
+      const sectionId = artifact.payload?.section_id;
+      if (sectionId) drafts.set(sectionId, artifact.payload);
+    });
+  return [...drafts.values()];
+}
+
+function recoverableOperationalFailure(snapshot) {
+  if (snapshot?.project?.stage !== "INCONCLUSIVE" || !latestReviewPassed(snapshot)) {
+    return false;
+  }
+  const failure = latestArtifact(snapshot, "InsufficientEvidence")?.payload;
+  const details = `${failure?.reason || ""}\n${failure?.recommendation || ""}`.toLowerCase();
+  return [
+    "chief-editor",
+    "fact-checker",
+    "narrative-writer",
+    "research-outliner",
+    "structured_response",
+    "structured response",
+    "subagent",
+    "invalid result",
+    "missing field",
+    "timeout",
+    "结构化",
+    "无效结果",
+    "缺少字段",
+    "模型超时",
+  ].some((marker) => details.includes(marker));
+}
+
+function continuationMode(snapshot) {
+  const stage = snapshot?.project?.stage;
+  if (stage === "SCREENED") return "screening";
+  if (["REVIEWED", "OUTLINED", "NARRATED"].includes(stage) && latestReviewPassed(snapshot)) {
+    return "narrative";
+  }
+  if (stage === "COMPLETED" && latestReviewPassed(snapshot)) {
+    return narrativeCompletion(snapshot).complete ? null : "recovery";
+  }
+  if (recoverableOperationalFailure(snapshot)) return "recovery";
+  return null;
+}
+
+function effectiveRecoveryStage(snapshot) {
+  if (latestArtifact(snapshot, "NarrativeReview")) return "NARRATED";
+  if (latestArtifact(snapshot, "ReviewOutline")) return "OUTLINED";
+  return "REVIEWED";
+}
+
 function metricCard(label, value, hint = "") {
   return h("div", { cls: "summary-card" }, [
     h("strong", {}, String(value)),
@@ -891,19 +1322,30 @@ function metricCard(label, value, hint = "") {
 
 function renderOutcome(snapshot) {
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
-  const insufficient = latestArtifact(snapshot, "InsufficientEvidence")?.payload;
+  const insufficient = snapshot?.project?.stage === "INCONCLUSIVE"
+    ? latestArtifact(snapshot, "InsufficientEvidence")?.payload
+    : null;
   const facts = factCheckSummary(snapshot);
+  const needsRecovery = continuationMode(snapshot) === "recovery";
+  const operationalRecovery = recoverableOperationalFailure(snapshot);
+  const savedDrafts = currentSectionDrafts(snapshot);
   elements.primaryOutcome.replaceChildren();
+  elements.projectSummary.classList.remove("has-outcome");
 
   if (narrative) {
     elements.primaryOutcome.hidden = false;
+    elements.projectSummary.classList.add("has-outcome");
     elements.primaryOutcome.append(
       h("div", { cls: "outcome-header" }, [
         h("div", {}, [
-          h("p", { cls: "eyebrow" }, "最终成果"),
+          h("p", { cls: "eyebrow" }, needsRecovery ? "成果待核查" : "最终成果"),
           h("h3", {}, narrative.title || "文献综述已生成"),
         ]),
-        h("span", { cls: "outcome-badge" }, `${narrative.sections?.length || 0} 章`),
+        h(
+          "span",
+          { cls: `outcome-badge${needsRecovery ? " is-warning" : ""}` },
+          needsRecovery ? "待补全" : `${narrative.sections?.length || 0} 章`,
+        ),
       ]),
       narrative.abstract
         ? h("p", { cls: "outcome-abstract" }, narrative.abstract)
@@ -918,11 +1360,41 @@ function renderOutcome(snapshot) {
         ),
       );
     }
+    elements.primaryOutcome.append(renderNarrativeReviewHTML(narrative));
+    return;
+  }
+
+  if (needsRecovery) {
+    elements.primaryOutcome.hidden = false;
+    elements.projectSummary.classList.add("has-outcome");
+    elements.primaryOutcome.append(
+      h("div", { cls: "outcome-header" }, [
+        h("div", {}, [
+          h("p", { cls: "eyebrow" }, operationalRecovery ? "写作中断" : "成果待补全"),
+          h(
+            "h3",
+            {},
+            operationalRecovery && savedDrafts.length
+              ? `${savedDrafts.length} 个章节草稿已保存，等待整合`
+              : "综述正文尚未生成",
+          ),
+        ]),
+        h("span", { cls: "outcome-badge is-warning" }, "可恢复"),
+      ]),
+      h(
+        "p",
+        { cls: "outcome-abstract" },
+        operationalRecovery
+          ? "检索、筛选、证据提取和章节写作均已保留；本次停止来自主编输出格式故障，不代表证据不足。继续后将直接恢复综述整合与事实核查。"
+          : "检索、论文筛选、证据提取和证据审查均已完成，但旧流程提前结束了项目。可复用现有证据继续生成提纲、正文与事实核查。",
+      ),
+    );
     return;
   }
 
   if (insufficient) {
     elements.primaryOutcome.hidden = false;
+    elements.projectSummary.classList.add("has-outcome");
     elements.primaryOutcome.append(
       h("div", { cls: "outcome-header" }, [
         h("div", {}, [
@@ -950,10 +1422,29 @@ function renderProjectSummary(snapshot) {
   }
   elements.projectSummary.hidden = false;
 
-  const [title, text] = USER_STAGE_GUIDANCE[project.stage] || [
+  let [title, text] = USER_STAGE_GUIDANCE[project.stage] || [
     STAGE_LABELS[project.stage] || project.stage,
     "项目正在推进中。",
   ];
+  const needsRecovery = continuationMode(snapshot) === "recovery";
+  if (needsRecovery) {
+    const completion = narrativeCompletion(snapshot);
+    const operationalRecovery = recoverableOperationalFailure(snapshot);
+    const savedDrafts = currentSectionDrafts(snapshot);
+    title = completion.narrative
+      ? "事实核查尚未完成"
+      : operationalRecovery && savedDrafts.length
+        ? `${savedDrafts.length} 个章节草稿等待整合`
+        : "综述正文尚未生成";
+    text = completion.narrative
+      ? `还需核查 ${completion.missing.length} 个章节，点击下方按钮即可继续。`
+      : operationalRecovery
+        ? "主编结构化输出中断，现有论文、证据、提纲和章节草稿均已保留。点击下方按钮从整合阶段继续。"
+        : "旧流程提前结束了项目；点击下方按钮可复用现有证据补全最终综述。";
+    elements.stageBadge.textContent = operationalRecovery ? "写作待恢复" : "成果待补全";
+    elements.stageBadge.className = "stage-badge is-warning";
+    renderStepper(effectiveRecoveryStage(snapshot));
+  }
   elements.nextActionTitle.textContent = title;
   elements.nextActionText.textContent = text;
 
@@ -980,9 +1471,6 @@ function renderDetails(snapshot) {
   const events = snapshot?.events || [];
   elements.projectDetails.hidden = false;
 
-  // Init view mode
-  if (!state.artifactViewMode) state.artifactViewMode = 'html';
-
   const counts = new Map();
   artifacts.forEach((artifact) => {
     counts.set(artifact.kind, (counts.get(artifact.kind) || 0) + 1);
@@ -991,7 +1479,7 @@ function renderDetails(snapshot) {
   counts.forEach((count, kind) => {
     const chip = document.createElement("span");
     chip.className = "artifact-chip";
-    chip.textContent = `${artifactLabel(kind)} × ${count}`;
+    chip.textContent = `${artifactLabel(kind)} ${count}`;
     elements.artifactSummary.append(chip);
   });
 
@@ -1006,7 +1494,7 @@ function renderDetails(snapshot) {
       const item = document.createElement("li");
       item.className = "event-item";
       const transition = document.createElement("strong");
-      transition.textContent = `${event.from_stage} → ${event.to_stage}`;
+      transition.textContent = `${STAGE_LABELS[event.from_stage] || event.from_stage} 至 ${STAGE_LABELS[event.to_stage] || event.to_stage}`;
       const meta = document.createElement("span");
       meta.textContent = `${event.actor} · ${formatDate(event.created_at)}`;
       item.append(transition, meta);
@@ -1077,27 +1565,48 @@ function renderDetails(snapshot) {
 function switchArtifactView(mode) {
   state.artifactViewMode = mode;
   // Update toggle buttons
-  document.querySelectorAll('.toggle-btn').forEach(btn => {
+  elements.artifactList.querySelectorAll('.toggle-btn').forEach(btn => {
     btn.classList.toggle('is-active', btn.dataset.mode === mode);
   });
   // Toggle all artifact view panes
-  document.querySelectorAll('.artifact-json').forEach(el => {
+  elements.artifactList.querySelectorAll('.artifact-json').forEach(el => {
     el.style.display = mode === 'json' ? '' : 'none';
   });
-  document.querySelectorAll('.artifact-html').forEach(el => {
+  elements.artifactList.querySelectorAll('.artifact-html').forEach(el => {
     el.style.display = mode === 'html' ? '' : 'none';
   });
 }
 
-function renderStagePanels(project) {
+function renderStagePanels(snapshot) {
+  const mode = continuationMode(snapshot);
   elements.reviewPanel.hidden = true;
-  elements.continuePanel.hidden = project.stage !== "SCREENED";
-  if (project.stage === "SCREENED" && !state.agentAvailable) {
+  elements.continuePanel.hidden = !mode;
+  if (mode === "screening") {
+    elements.continueEyebrow.textContent = "Screening complete";
+    elements.continueTitle.textContent = "候选集已经确认";
+    elements.continueText.textContent = "继续后将读取论文、提取证据并完成综述。";
+    elements.continueButtonLabel.textContent = "继续研究";
+  } else if (mode) {
+    const operationalRecovery = recoverableOperationalFailure(snapshot);
+    const savedDraftCount = currentSectionDrafts(snapshot).length;
+    elements.continueEyebrow.textContent =
+      mode === "recovery" ? "Outcome recovery" : "Resume writing";
+    elements.continueTitle.textContent =
+      operationalRecovery ? "恢复综述整合" : mode === "recovery" ? "补全最终综述" : "继续综述写作";
+    elements.continueText.textContent =
+      operationalRecovery
+        ? `系统将复用已保存的 ${savedDraftCount} 个章节草稿，从整合阶段继续，不会重新检索或重写章节。`
+        : "系统将复用已保存的论文卡片和证据，从当前写作阶段继续，不会重新检索。";
+    elements.continueButtonLabel.textContent = "继续生成综述";
+  }
+  if (mode && !state.agentAvailable) {
     elements.continueResearch.disabled = true;
     elements.continueResearch.title = "Agent 当前不可用，请检查模型配置";
   } else {
+    elements.continueResearch.disabled = state.busy;
     elements.continueResearch.title = "";
   }
+  refreshIcons();
 }
 
 async function loadProject(projectId, quiet = false, force = false) {
@@ -1109,9 +1618,10 @@ async function loadProject(projectId, quiet = false, force = false) {
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const snapshot = payload.data;
+    state.snapshot = snapshot;
     renderProjectHeader(snapshot.project);
     renderProjectSummary(snapshot);
-    renderStagePanels(snapshot.project);
+    renderStagePanels(snapshot);
     renderDetails(snapshot);
     elements.runPanel.hidden = true;
     if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
@@ -1169,7 +1679,7 @@ function renderCandidateCards() {
     checkbox.type = "checkbox";
     checkbox.className = "candidate-toggle";
     checkbox.checked = selected;
-    checkbox.setAttribute("aria-label", `${selected ? "排除" : "保留"}：${candidate.title}`);
+    checkbox.setAttribute("aria-label", `保留论文：${candidate.title || "未命名论文"}`);
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) state.selectedIds.add(id);
       else state.selectedIds.delete(id);
@@ -1203,7 +1713,7 @@ function renderCandidateCards() {
       : "作者信息暂缺";
 
     const reason = document.createElement("p");
-    reason.className = "candidate-authors";
+    reason.className = "candidate-reason";
     reason.textContent = agentReason ? `筛选意见：${agentReason}` : "";
 
     const abstract = document.createElement("p");
@@ -1221,7 +1731,7 @@ function renderCandidateCards() {
       link.href = url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      link.textContent = "查看原文 ↗";
+      link.append(document.createTextNode("查看原文"), iconNode("external-link"));
       identifiers.append(link);
     }
 
@@ -1230,6 +1740,7 @@ function renderCandidateCards() {
     card.append(abstract, identifiers);
     elements.candidateGrid.append(card);
   });
+  refreshIcons();
 }
 
 function updateReviewStats() {
@@ -1450,8 +1961,7 @@ async function startResearch(topic, question, reviewLimits = {}) {
   state.projectId = null;
   state.snapshot = null;
   state.review = null;
-  elements.emptyState.hidden = true;
-  elements.projectView.hidden = false;
+  showWorkspace("project");
   elements.reviewPanel.hidden = true;
   elements.continuePanel.hidden = true;
   elements.projectDetails.hidden = true;
@@ -1539,13 +2049,23 @@ async function continueResearch() {
     notify("Agent 当前不可用，请先检查模型配置", true);
     return;
   }
-  if (!window.confirm("继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？")) {
+  const mode = continuationMode(state.snapshot);
+  const confirmation = mode === "screening"
+    ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
+    : recoverableOperationalFailure(state.snapshot)
+      ? "将从已保存的章节草稿恢复综述整合与事实核查，不会重新检索、重读论文或重写章节。确认开始吗？"
+      : "将复用已保存的证据继续生成综述，不会重新检索或重读论文。确认开始吗？";
+  if (!window.confirm(confirmation)) {
     return;
   }
   setBusy(true);
   elements.runPanel.hidden = false;
   elements.activityLog.replaceChildren();
-  addActivity("正在恢复项目并启动论文精读");
+  addActivity(
+    mode === "screening"
+      ? "正在恢复项目并启动论文精读"
+      : "正在恢复写作阶段并生成缺失的综述产物",
+  );
   try {
     await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
       method: "POST",
@@ -1565,15 +2085,21 @@ async function continueResearch() {
 }
 
 function toggleNewProject(show) {
-  elements.newProjectForm.hidden = !show;
-  if (show) byId("topicInput").focus();
+  if (show) {
+    closeMenus();
+    showWorkspace("create");
+    window.setTimeout(() => byId("topicInput").focus(), 0);
+    return;
+  }
+  showWorkspace(state.project ? "project" : "empty");
 }
 
 elements.newProjectToggle.addEventListener("click", () => {
-  toggleNewProject(elements.newProjectForm.hidden);
+  toggleNewProject(true);
 });
 elements.emptyNewProject.addEventListener("click", () => toggleNewProject(true));
 elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false));
+elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
 elements.newProjectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.busy) return;
@@ -1595,7 +2121,10 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
 elements.refreshProjects.addEventListener("click", loadProjects);
 elements.projectLookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadProject(elements.projectIdInput.value.trim());
+  const projectId = elements.projectIdInput.value.trim();
+  if (!projectId) return;
+  closeMenus();
+  loadProject(projectId);
 });
 elements.reloadProject.addEventListener("click", () => loadProject(state.projectId));
 elements.deleteProject.addEventListener("click", deleteCurrentProject);
@@ -1624,7 +2153,74 @@ elements.acceptReview.addEventListener("click", () => submitFeedback("accept"));
 elements.stopReview.addEventListener("click", () => submitFeedback("stop"));
 elements.continueResearch.addEventListener("click", continueResearch);
 
+elements.sidebarToggle.addEventListener("click", () => {
+  const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";
+  applySidebarState(next, true);
+});
+elements.toolsMenuToggle.addEventListener("click", () => {
+  const open = elements.toolsMenu.hidden;
+  setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  setPopover(elements.toolsMenuToggle, elements.toolsMenu, open);
+  if (open) elements.toolsMenu.querySelector("a, button, input")?.focus();
+});
+elements.projectMenuToggle.addEventListener("click", () => {
+  const open = elements.projectMenu.hidden;
+  setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
+  setPopover(elements.projectMenuToggle, elements.projectMenu, open);
+  if (open) elements.deleteProject.focus();
+});
+elements.inspectorToggle.addEventListener("click", () => {
+  if (state.inspectorOpen) closeInspector();
+  else openInspector("process");
+});
+elements.closeInspector.addEventListener("click", () => closeInspector());
+elements.inspectorBackdrop.addEventListener("click", () => closeInspector());
+elements.processTab.addEventListener("click", () => setInspectorTab("process"));
+elements.artifactsTab.addEventListener("click", () => setInspectorTab("artifacts"));
+
+document.addEventListener("click", (event) => {
+  if (!elements.toolsMenuToggle.closest(".menu-anchor").contains(event.target)) {
+    setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
+  }
+  if (!elements.projectMenuToggle.closest(".menu-anchor").contains(event.target)) {
+    setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (state.inspectorOpen && event.key === "Tab") {
+    const focusable = [...elements.projectInspector.querySelectorAll(
+      'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.getClientRects().length > 0);
+    if (focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+  if (event.key !== "Escape") return;
+  if (state.inspectorOpen) {
+    event.preventDefault();
+    closeInspector();
+    return;
+  }
+  const toolsWereOpen = !elements.toolsMenu.hidden;
+  const projectMenuWasOpen = !elements.projectMenu.hidden;
+  closeMenus();
+  if (projectMenuWasOpen) elements.projectMenuToggle.focus();
+  else if (toolsWereOpen) elements.toolsMenuToggle.focus();
+});
+
 async function initialize() {
+  initializeSidebar();
+  refreshIcons();
   await Promise.all([checkHealth(), loadProjects()]);
   const params = new URLSearchParams(window.location.search);
   const requestedProject = params.get("project");
