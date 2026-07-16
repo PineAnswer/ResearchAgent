@@ -67,12 +67,14 @@ def build_subagent_registry(
     scout_tools = [tools_by_name["search_openalex"]]
     if max_crossref_searches > 0:
         scout_tools.append(tools_by_name["search_crossref"])
+    scout_model_limit = max(4, max_openalex_searches + max_crossref_searches + 3)
     scout_middleware = [
         SerialToolExecutionMiddleware(),
+        ModelCallLimitMiddleware(run_limit=scout_model_limit, exit_behavior="end"),
         ToolCallLimitMiddleware(
             tool_name="search_openalex",
             run_limit=max_openalex_searches,
-            exit_behavior="continue",
+            exit_behavior="end",
         ),
     ]
     if max_crossref_searches > 0:
@@ -80,7 +82,7 @@ def build_subagent_registry(
             ToolCallLimitMiddleware(
                 tool_name="search_crossref",
                 run_limit=max_crossref_searches,
-                exit_behavior="continue",
+                exit_behavior="end",
             )
         )
     scout_middleware.append(ExecutedSearchTrackingMiddleware(state))

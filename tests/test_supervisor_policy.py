@@ -55,6 +55,21 @@ def test_skill_injection_rejects_empty_content_and_missing_subagent_skills() -> 
         build_subagent_registry({}, {}, model="test-model")
 
 
+def test_supervisor_loads_aws_credentials_csv(tmp_path) -> None:
+    csv_path = tmp_path / "aws.csv"
+    csv_path.write_text(
+        "Access key ID,Secret access key\nAKIAtest1234567890,secret-test-key\n",
+        encoding="utf-8",
+    )
+
+    credentials = ResearchSupervisor._load_aws_credentials_from_csv(csv_path)
+
+    assert credentials == {
+        "aws_access_key_id": "AKIAtest1234567890",
+        "aws_secret_access_key": "secret-test-key",
+    }
+
+
 def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> None:
     captured: dict = {}
     agent_configs: list[dict] = []
@@ -133,12 +148,17 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         "search_openalex",
         "search_crossref",
     ]
-    assert scout_captured["middleware"][1].tool_name == "search_openalex"
-    assert scout_captured["middleware"][1].run_limit == 3
-    assert scout_captured["middleware"][2].tool_name == "search_crossref"
-    assert scout_captured["middleware"][2].run_limit == 1
-    assert isinstance(scout_captured["middleware"][3], ExecutedSearchTrackingMiddleware)
-    assert len(scout_captured["middleware"]) == 4
+    assert isinstance(scout_captured["middleware"][1], ModelCallLimitMiddleware)
+    assert scout_captured["middleware"][1].run_limit == 7
+    assert scout_captured["middleware"][1].exit_behavior == "end"
+    assert scout_captured["middleware"][2].tool_name == "search_openalex"
+    assert scout_captured["middleware"][2].run_limit == 3
+    assert scout_captured["middleware"][2].exit_behavior == "end"
+    assert scout_captured["middleware"][3].tool_name == "search_crossref"
+    assert scout_captured["middleware"][3].run_limit == 1
+    assert scout_captured["middleware"][3].exit_behavior == "end"
+    assert isinstance(scout_captured["middleware"][4], ExecutedSearchTrackingMiddleware)
+    assert len(scout_captured["middleware"]) == 5
     assert isinstance(scout_captured["response_format"], dict)
     assert scout_captured["response_format"]["title"] == "SearchReport"
     synthesizer = next(

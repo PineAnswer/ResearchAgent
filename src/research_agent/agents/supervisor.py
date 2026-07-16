@@ -4,10 +4,13 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
+from csv import DictReader
+from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 
 import httpx
+from botocore.exceptions import BotoCoreError, ClientError
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langgraph.checkpoint.memory import InMemorySaver
@@ -58,6 +61,8 @@ FALLBACK_EXCEPTIONS = (
     AuthenticationError,
     InternalServerError,
     RateLimitError,
+    BotoCoreError,
+    ClientError,
     httpx.NetworkError,
     httpx.TimeoutException,
     URLError,
@@ -109,17 +114,69 @@ class ResearchSupervisor:
             self.initialization_error = str(exc)
 
     def _build_model(self):
+        provider, _, model_name = self.settings.model.partition(":")
+        if provider.lower() == "bedrock":
+            return self._build_bedrock_model(model_name or self.settings.model)
+
         if not self.settings.base_url:
             return self.settings.model
 
         from langchain_openai import ChatOpenAI
 
-        model_name = self.settings.model.split(":", maxsplit=1)[-1]
         return ChatOpenAI(
             model=model_name,
             api_key=os.getenv("OPENAI_API_KEY", "not-set"),
             base_url=self.settings.base_url,
         )
+
+    def _build_bedrock_model(self, model_name: str):
+        from langchain_aws import ChatBedrockConverse
+
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "region_name": self.settings.aws_region or "us-east-1",
+            "temperature": 0,
+            "max_tokens": 4096,
+        }
+        if self.settings.aws_profile:
+            kwargs["credentials_profile_name"] = self.settings.aws_profile
+        kwargs.update(self._load_aws_credentials_from_csv(self.settings.aws_credentials_csv))
+        return ChatBedrockConverse(**kwargs)
+
+    @staticmethod
+    def _load_aws_credentials_from_csv(csv_path: Path | None) -> dict[str, str]:
+        if csv_path is None:
+            return {}
+        with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+            row = next(DictReader(handle), None)
+        if not row:
+            raise ValueError(f"AWS credentials CSV is empty: {csv_path}")
+
+        access_key = (
+            row.get("Access key ID")
+            or row.get("Access key id")
+            or row.get("AWS Access Key ID")
+            or row.get("aws_access_key_id")
+        )
+        secret_key = (
+            row.get("Secret access key")
+            or row.get("Secret Access Key")
+            or row.get("AWS Secret Access Key")
+            or row.get("aws_secret_access_key")
+        )
+        session_token = row.get("Session token") or row.get("AWS Session Token")
+        if not access_key or not secret_key:
+            raise ValueError(
+                "AWS credentials CSV must include Access key ID and Secret access key columns"
+            )
+
+        credentials = {
+            "aws_access_key_id": access_key.strip(),
+            "aws_secret_access_key": secret_key.strip(),
+        }
+        if session_token:
+            credentials["aws_session_token"] = session_token.strip()
+        return credentials
 
     @staticmethod
     def _search_review_options(
@@ -276,7 +333,10 @@ class ResearchSupervisor:
 
     @staticmethod
     def build_config(thread_id: str | None = None) -> dict[str, Any]:
-        return {"configurable": {"thread_id": thread_id or uuid.uuid4().hex}}
+        return {
+            "configurable": {"thread_id": thread_id or uuid.uuid4().hex},
+            "recursion_limit": 80,
+        }
 
     def _new_run_logger(
         self,

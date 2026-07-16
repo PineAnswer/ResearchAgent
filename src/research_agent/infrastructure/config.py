@@ -19,6 +19,9 @@ class Settings:
     database_path: Path
     filesystem_root: Path
     base_url: str | None = None
+    aws_region: str | None = None
+    aws_profile: str | None = None
+    aws_credentials_csv: Path | None = None
     enable_fallback: bool = True
     api_host: str = "127.0.0.1"
     api_port: int = 8000
@@ -45,6 +48,16 @@ class Settings:
             database_path=data_dir / "research_agent.db",
             filesystem_root=filesystem_root,
             base_url=os.getenv("RESEARCH_AGENT_BASE_URL") or None,
+            aws_region=os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or os.getenv("RESEARCH_AGENT_AWS_REGION")
+            or None,
+            aws_profile=os.getenv("AWS_PROFILE") or None,
+            aws_credentials_csv=(
+                Path(csv_path).expanduser().resolve()
+                if (csv_path := os.getenv("RESEARCH_AGENT_AWS_CREDENTIALS_CSV"))
+                else None
+            ),
             enable_fallback=_as_bool(
                 os.getenv("RESEARCH_AGENT_ENABLE_FALLBACK", "true"),
                 default=True,
