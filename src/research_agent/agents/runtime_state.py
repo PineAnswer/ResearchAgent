@@ -83,6 +83,62 @@ def _message_content(message: Any) -> Any:
     return content
 
 
+def _diagnostic_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return _diagnostic_value(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return {str(key): _diagnostic_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_diagnostic_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _structured_response_diagnostics(
+    result: dict[str, Any], subagent_type: str
+) -> dict[str, Any]:
+    messages = result.get("messages", [])
+    if not isinstance(messages, list):
+        messages = []
+    for message in reversed(messages):
+        message_type = getattr(message, "type", None)
+        if message_type is None and isinstance(message, dict):
+            message_type = message.get("type")
+        if message_type != "ai":
+            continue
+        def field(name: str, default: Any) -> Any:
+            value = getattr(message, name, None)
+            if value is None and isinstance(message, dict):
+                value = message.get(name)
+            return default if value is None else value
+
+        response_metadata = field("response_metadata", {})
+        tool_calls = field("tool_calls", [])
+        invalid_tool_calls = field("invalid_tool_calls", [])
+        return {
+            "subagent_type": subagent_type,
+            "expected_schema_tool": SUBAGENT_SCHEMA_TOOLS.get(subagent_type),
+            "content": _diagnostic_value(field("content", None)),
+            "tool_calls": _diagnostic_value(tool_calls),
+            "invalid_tool_calls": _diagnostic_value(invalid_tool_calls),
+            "additional_kwargs": _diagnostic_value(field("additional_kwargs", {})),
+            "response_metadata": _diagnostic_value(response_metadata),
+            "finish_reason": (
+                response_metadata.get("finish_reason")
+                if isinstance(response_metadata, dict)
+                else None
+            ),
+            "raw_provider_response_captured": False,
+        }
+    return {
+        "subagent_type": subagent_type,
+        "expected_schema_tool": SUBAGENT_SCHEMA_TOOLS.get(subagent_type),
+        "message": "No AIMessage was available in the subagent result.",
+        "raw_provider_response_captured": False,
+    }
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -491,6 +547,9 @@ def recording_runnable(agent: Any, subagent_type: str, state: ResearchRuntimeSta
                     "_instruction": (
                         "模型没有返回可解析的结构化对象；请提交该失败结果，"
                         "由系统释放后重新委派一次。"
+                    ),
+                    "_diagnostics": _structured_response_diagnostics(
+                        result, subagent_type
                     ),
                 }
                 if expected_id := _expected_paper_id(inputs):

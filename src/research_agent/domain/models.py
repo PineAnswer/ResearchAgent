@@ -196,6 +196,72 @@ class ArtifactRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class LibraryPaper(BaseModel):
+    """Canonical bibliographic record shared by every research project."""
+
+    library_id: str
+    paper_id: str = ""
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    abstract: str = ""
+    doi: str = ""
+    url: HttpUrl | None = None
+    source: str = "user"
+    tags: list[str] = Field(default_factory=list)
+    starred: bool = False
+    saved: bool = True
+    archived_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryCollection(BaseModel):
+    """User-managed folder used to organize canonical library records."""
+
+    collection_id: str
+    name: str
+    parent_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryNote(BaseModel):
+    """Reusable reading note attached to one canonical paper."""
+
+    note_id: str
+    library_id: str
+    content: str
+    project_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryAttachment(BaseModel):
+    """File or URL reference associated with a canonical paper."""
+
+    attachment_id: str
+    library_id: str
+    name: str
+    url: str
+    media_type: str = "application/pdf"
+    full_text_status: Literal["unavailable", "linked", "ready"] = "linked"
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectPaper(BaseModel):
+    """Project-specific judgement for one globally shared paper."""
+
+    project_id: str
+    library_id: str
+    source_paper_id: str = ""
+    status: Literal["candidate", "included", "excluded", "uncertain"] = "candidate"
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 # ── DeepSynthesis: narrative review models ──────────────────────────
 
 

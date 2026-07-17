@@ -136,6 +136,26 @@ GET  /api/projects/{project_id}
 GET  /api/projects/{project_id}/search-review
 POST /api/projects/{project_id}/search-feedback
 POST /api/projects/{project_id}/continue
+GET  /api/library
+GET  /api/library/overview
+POST /api/library/papers
+GET  /api/library/papers/{library_id}
+PATCH /api/library/papers/{library_id}
+DELETE /api/library/papers/{library_id}
+POST /api/library/papers/{library_id}/restore
+POST /api/library/papers/{library_id}/notes
+POST /api/library/papers/{library_id}/attachments
+POST /api/library/papers/{library_id}/attachments/upload
+POST /api/library/collections
+POST /api/library/bulk
+GET  /api/library/duplicates
+POST /api/library/merge
+POST /api/library/compare
+POST /api/library/assistant
+POST /api/library/import
+GET  /api/library/export?format=bibtex
+GET  /api/projects/{project_id}/library
+POST /api/projects/{project_id}/library
 ```
 
 请求体示例：
@@ -193,7 +213,23 @@ POST /api/projects/RP-.../continue
 
 `/continue` 接受 `SCREENED`、`REVIEWED`、`OUTLINED` 和 `NARRATED` 项目。旧版本错误标记为 `COMPLETED`、但缺少完整综述或逐节事实核查的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
 
-### 8. 运行测试
+### 8. 文献库
+
+前端侧栏的“文献库”保存跨项目共享的论文元数据。候选审核页可以单独收藏论文；人工确认纳入的论文会自动进入文献库。论文按 DOI、OpenAlex ID 或标题与年份去重，同一论文在不同研究项目中的纳入、排除和原因分别保存。
+
+文献库工作台包含以下整理与精读能力：
+
+- 通过全部、重点、未加入文件夹和回收站等智能视图快速筛选。
+- 创建最多三层的嵌套文件夹树，并将同一篇论文放入一个或多个文件夹。每个一级、二级文件夹都可直接新建子文件夹；删除父文件夹后论文记录继续保留，直属子文件夹自动提升一级。
+- 多选论文后批量修改重点标记和标签，加入文件夹或研究项目，导出所选 BibTeX/RIS，也可批量归档、恢复和永久删除。
+- 在右侧详情中编辑标题、作者、年份、DOI、来源、链接、标签和摘要，记录可复用的阅读笔记，上传本地 PDF，或维护外部资料链接。单个上传文件上限为 30 MB。
+- 汇总论文在不同项目中形成的 `PaperCard` 方法、数据集、发现和局限，保留每个项目自己的纳入状态与理由。
+- 选择 2–8 篇论文进行横向对照，并向文献管理助手提问。模型可用时，助手基于选中材料生成带 `[1]`、`[2]` 来源标记的回答；模型不可用时返回摘要、笔记与证据摘录。
+- 检查标题相近、作者和年份接近的疑似重复项。合并时会迁移文件夹、项目、笔记和附件关联。
+
+打开旧项目时，服务会渐进建立论文关联并复用现有 Artifact，不会改写历史研究记录。文献库支持 BibTeX 和 RIS 导入导出；普通删除会将论文移入回收站，已有项目关联和研究产物继续保留。永久删除仅能从回收站执行。
+
+### 9. 运行测试
 
 ```powershell
 pytest -q
@@ -208,6 +244,7 @@ ruff check .
 - Pydantic 结构化输出及 SQLite 原子产物提交。
 - Python 状态机、Reviewer 门禁和 append-only 状态事件。
 - 初次检索后暂停、候选论文人工增删、DOI 核验、多轮补充检索和跨进程继续。
+- 跨项目文献库、论文去重、候选收藏、旧项目渐进关联和 BibTeX/RIS 互通。
 - `InMemorySaver` 短期图状态、`ResearchRuntimeState` 子 Agent 交接状态和 `AGENTS.md` 长期规则。
 - 模型或网络不可用时生成可追踪的 `RuntimeFallback`，不伪造文献、证据或结论。
 - 前端 HTML/JSON 双视图、CLI 实时进度、完整运行日志、JSON 产物镜像和 Markdown 报告。

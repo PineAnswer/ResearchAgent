@@ -54,6 +54,13 @@ const state = {
   sidebarPreference: null,
   inspectorOpen: false,
   inspectorPreviousFocus: null,
+  libraryPapers: [],
+  libraryOverview: { counts: {}, collections: [] },
+  projectLibrary: new Map(),
+  selectedLibraryId: null,
+  selectedLibraryIds: new Set(),
+  libraryView: "all",
+  libraryCollectionId: null,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -65,8 +72,36 @@ const elements = {
   toolsMenuToggle: byId("toolsMenuToggle"),
   toolsMenu: byId("toolsMenu"),
   newProjectToggle: byId("newProjectToggle"),
+  libraryToggle: byId("libraryToggle"),
   newProjectForm: byId("newProjectForm"),
   createView: byId("createView"),
+  libraryView: byId("libraryView"),
+  librarySearch: byId("librarySearch"),
+  refreshLibrary: byId("refreshLibrary"),
+  libraryList: byId("libraryList"),
+  libraryCount: byId("libraryCount"),
+  libraryDetail: byId("libraryDetail"),
+  librarySmartViews: byId("librarySmartViews"),
+  libraryCollections: byId("libraryCollections"),
+  newCollection: byId("newCollection"),
+  findDuplicates: byId("findDuplicates"),
+  libraryListTitle: byId("libraryListTitle"),
+  libraryBulkBar: byId("libraryBulkBar"),
+  librarySelectedCount: byId("librarySelectedCount"),
+  libraryBulkAction: byId("libraryBulkAction"),
+  applyLibraryBulk: byId("applyLibraryBulk"),
+  compareLibrarySelection: byId("compareLibrarySelection"),
+  clearLibrarySelection: byId("clearLibrarySelection"),
+  libraryComparePanel: byId("libraryComparePanel"),
+  closeLibraryCompare: byId("closeLibraryCompare"),
+  libraryCompareTable: byId("libraryCompareTable"),
+  libraryAssistantForm: byId("libraryAssistantForm"),
+  libraryAssistantQuestion: byId("libraryAssistantQuestion"),
+  libraryAssistantAnswer: byId("libraryAssistantAnswer"),
+  libraryImportFormat: byId("libraryImportFormat"),
+  libraryImportContent: byId("libraryImportContent"),
+  libraryImportTags: byId("libraryImportTags"),
+  importLibrary: byId("importLibrary"),
   cancelNewProject: byId("cancelNewProject"),
   cancelNewProjectSecondary: byId("cancelNewProjectSecondary"),
   emptyNewProject: byId("emptyNewProject"),
@@ -153,7 +188,9 @@ function refreshIcons() {
 function showWorkspace(view) {
   elements.emptyState.hidden = view !== "empty";
   elements.createView.hidden = view !== "create";
+  elements.libraryView.hidden = view !== "library";
   elements.projectView.hidden = view !== "project";
+  elements.libraryToggle.classList.toggle("is-active", view === "library");
 }
 
 function setPopover(toggle, popover, open) {
@@ -372,6 +409,933 @@ async function checkHealth() {
     elements.healthBadge.classList.add("is-error");
     elements.healthBadge.innerHTML = '<span class="status-dot" aria-hidden="true"></span>连接失败';
     elements.healthBadge.title = error.message;
+  }
+}
+
+function safeLibraryResourceUrl(value) {
+  const text = String(value || "");
+  if (text.startsWith("/api/library/attachments/") && text.endsWith("/content")) {
+    return text;
+  }
+  return safeHttpUrl(text);
+}
+
+function libraryIdentity(value) {
+  return normalizePaperId(value).toLocaleLowerCase();
+}
+
+function indexProjectLibrary(items) {
+  state.projectLibrary = new Map();
+  (items || []).forEach((item) => {
+    const relation = item.relation || {};
+    const paper = item.paper || {};
+    [relation.source_paper_id, paper.paper_id, paper.doi]
+      .filter(Boolean)
+      .forEach((value) => state.projectLibrary.set(libraryIdentity(value), item));
+  });
+}
+
+function libraryEntryForCandidate(candidate) {
+  return [candidate.paper_id, candidate.doi]
+    .filter(Boolean)
+    .map((value) => state.projectLibrary.get(libraryIdentity(value)))
+    .find(Boolean) || null;
+}
+
+async function loadProjectLibrary(projectId) {
+  if (!projectId) {
+    indexProjectLibrary([]);
+    return [];
+  }
+  const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/library`);
+  const items = payload.data || [];
+  indexProjectLibrary(items);
+  return items;
+}
+
+function libraryPaperMeta(paper) {
+  const parts = [];
+  if ((paper.authors || []).length) parts.push(paper.authors.slice(0, 3).join("、"));
+  if (paper.year) parts.push(String(paper.year));
+  if (paper.doi) parts.push(`DOI ${paper.doi}`);
+  return parts.join(" · ") || "元数据待补充";
+}
+
+const LIBRARY_SMART_VIEWS = [
+  ["all", "library", "全部文献"],
+  ["starred", "star", "重点文献"],
+  ["unfiled", "inbox", "未加入文件夹"],
+  ["trash", "trash-2", "回收站"],
+];
+
+function renderLibraryNavigation() {
+  elements.librarySmartViews.replaceChildren();
+  LIBRARY_SMART_VIEWS.forEach(([view, icon, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-nav-item";
+    button.classList.toggle("is-active", !state.libraryCollectionId && state.libraryView === view);
+    button.append(iconNode(icon));
+    const copy = document.createElement("span");
+    copy.textContent = label;
+    const count = document.createElement("small");
+    count.textContent = String(state.libraryOverview.counts?.[view] || 0);
+    button.append(copy, count);
+    button.addEventListener("click", async () => {
+      state.libraryView = view;
+      state.libraryCollectionId = null;
+      state.selectedLibraryIds.clear();
+      await loadLibrary();
+    });
+    elements.librarySmartViews.append(button);
+  });
+
+  elements.libraryCollections.replaceChildren();
+  const collections = state.libraryOverview.collections || [];
+  const collectionIds = new Set(collections.map((item) => item.collection_id));
+  const childrenByParent = new Map();
+  collections.forEach((collection) => {
+    const parentId = collection.parent_id && collectionIds.has(collection.parent_id)
+      ? collection.parent_id
+      : null;
+    const siblings = childrenByParent.get(parentId) || [];
+    siblings.push(collection);
+    childrenByParent.set(parentId, siblings);
+  });
+
+  const renderCollectionNode = (collection, depth) => {
+    const row = document.createElement("div");
+    row.className = "library-collection-row";
+    row.dataset.depth = String(depth);
+    row.style.setProperty("--tree-depth", String(depth));
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-nav-item library-collection-main";
+    button.classList.toggle("is-active", state.libraryCollectionId === collection.collection_id);
+    button.append(iconNode((childrenByParent.get(collection.collection_id) || []).length ? "folder-tree" : "folder"));
+    const copy = document.createElement("span");
+    copy.textContent = collection.name;
+    const count = document.createElement("small");
+    count.textContent = String(collection.paper_count || 0);
+    button.append(copy, count);
+    button.addEventListener("click", async () => {
+      state.libraryView = "all";
+      state.libraryCollectionId = collection.collection_id;
+      state.selectedLibraryIds.clear();
+      await loadLibrary();
+    });
+
+    const actions = document.createElement("span");
+    actions.className = "library-collection-actions";
+    if (depth < 2) {
+      const addChild = document.createElement("button");
+      addChild.type = "button";
+      addChild.className = "icon-button";
+      addChild.title = `在“${collection.name}”中新建子文件夹`;
+      addChild.setAttribute("aria-label", `在“${collection.name}”中新建子文件夹`);
+      addChild.append(iconNode("folder-plus"));
+      addChild.addEventListener("click", () => createLibraryCollection(
+        collection.collection_id,
+        collection.name,
+      ));
+      actions.append(addChild);
+    }
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "icon-button";
+    edit.title = `编辑文件夹“${collection.name}”`;
+    edit.setAttribute("aria-label", `编辑文件夹“${collection.name}”`);
+    edit.append(iconNode("pencil"));
+    edit.addEventListener("click", () => editLibraryCollection(collection));
+    actions.append(edit);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button";
+    remove.title = `删除文件夹“${collection.name}”`;
+    remove.setAttribute("aria-label", `删除文件夹“${collection.name}”`);
+    remove.append(iconNode("trash-2"));
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`删除文件夹“${collection.name}”？文献会保留在库中。`)) return;
+      await api(`/api/library/collections/${encodeURIComponent(collection.collection_id)}`, { method: "DELETE" });
+      if (state.libraryCollectionId === collection.collection_id) state.libraryCollectionId = null;
+      await loadLibrary();
+    });
+    actions.append(remove);
+    row.append(button, actions);
+    elements.libraryCollections.append(row);
+
+    (childrenByParent.get(collection.collection_id) || []).forEach((child) => {
+      renderCollectionNode(child, depth + 1);
+    });
+  };
+
+  (childrenByParent.get(null) || []).forEach((collection) => {
+    renderCollectionNode(collection, 0);
+  });
+  refreshIcons();
+}
+
+function updateLibraryBulkBar() {
+  const count = state.selectedLibraryIds.size;
+  elements.libraryBulkBar.hidden = count === 0;
+  elements.librarySelectedCount.textContent = `已选 ${count} 篇`;
+  elements.compareLibrarySelection.disabled = count < 2 || count > 8;
+}
+
+function renderLibraryList() {
+  elements.libraryList.replaceChildren();
+  elements.libraryCount.textContent = `${state.libraryPapers.length} 篇`;
+  const selectedCollection = (state.libraryOverview.collections || []).find(
+    (item) => item.collection_id === state.libraryCollectionId,
+  );
+  elements.libraryListTitle.textContent = selectedCollection?.name
+    || LIBRARY_SMART_VIEWS.find(([view]) => view === state.libraryView)?.[2]
+    || "全部文献";
+  updateLibraryBulkBar();
+  if (!state.libraryPapers.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = elements.librarySearch.value.trim()
+      ? "没有匹配的文献"
+      : "文献库还是空的，可从候选论文收藏或导入 BibTeX / RIS";
+    elements.libraryList.append(empty);
+    return;
+  }
+
+  state.libraryPapers.forEach((paper) => {
+    const row = document.createElement("div");
+    row.className = "library-paper-row";
+    row.classList.toggle("is-active", paper.library_id === state.selectedLibraryId);
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.selectedLibraryIds.has(paper.library_id);
+    checkbox.setAttribute("aria-label", `选择文献：${paper.title}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.selectedLibraryIds.add(paper.library_id);
+      else state.selectedLibraryIds.delete(paper.library_id);
+      updateLibraryBulkBar();
+    });
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-paper-main";
+    button.setAttribute("aria-label", `查看文献：${paper.title}`);
+
+    const title = document.createElement("strong");
+    title.textContent = paper.title;
+    const meta = document.createElement("span");
+    meta.textContent = libraryPaperMeta(paper);
+    const badges = document.createElement("span");
+    badges.className = "library-paper-badges";
+    if (paper.starred) {
+      const starred = document.createElement("span");
+      starred.textContent = "已收藏";
+      badges.append(starred);
+    }
+    const projects = document.createElement("span");
+    projects.textContent = `${paper.project_count || 0} 个项目`;
+    badges.append(projects);
+    (paper.tags || []).slice(0, 3).forEach((tag) => {
+      const badge = document.createElement("span");
+      badge.textContent = tag;
+      badges.append(badge);
+    });
+    if (paper.note_count) {
+      const notes = document.createElement("span");
+      notes.textContent = `${paper.note_count} 条笔记`;
+      badges.append(notes);
+    }
+    button.append(title, meta, badges);
+    button.addEventListener("click", () => selectLibraryPaper(paper.library_id));
+    row.append(checkbox, button);
+    elements.libraryList.append(row);
+  });
+}
+
+function renderLibraryDetail(detail) {
+  const paper = detail.paper;
+  elements.libraryDetail.replaceChildren();
+
+  const header = document.createElement("header");
+  header.className = "library-detail-header";
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = "Paper detail";
+  const title = document.createElement("h3");
+  title.textContent = paper.title;
+  const meta = document.createElement("p");
+  meta.className = "library-detail-meta";
+  meta.textContent = libraryPaperMeta(paper);
+  header.append(eyebrow, title, meta);
+
+  const controls = document.createElement("div");
+  controls.className = "library-detail-controls";
+  const star = document.createElement("button");
+  star.type = "button";
+  star.className = "secondary";
+  star.append(iconNode(paper.starred ? "star-off" : "star"));
+  star.append(document.createTextNode(paper.starred ? "取消重点" : "标为重点"));
+  star.addEventListener("click", () => updateLibraryPaper(paper.library_id, {
+    starred: !paper.starred,
+  }));
+  controls.append(star);
+
+  const metadata = document.createElement("details");
+  metadata.className = "library-detail-section library-metadata-editor";
+  const metadataSummary = document.createElement("summary");
+  metadataSummary.textContent = "编辑元数据";
+  const metadataForm = document.createElement("form");
+  metadataForm.className = "library-metadata-form";
+  const metadataFields = [
+    ["title", "标题", paper.title, "text"],
+    ["authors", "作者（逗号分隔）", (paper.authors || []).join(", "), "text"],
+    ["year", "年份", paper.year || "", "number"],
+    ["doi", "DOI", paper.doi || "", "text"],
+    ["url", "来源链接", paper.url || "", "url"],
+    ["source", "来源", paper.source || "", "text"],
+    ["tags", "标签（逗号分隔）", (paper.tags || []).join(", "), "text"],
+  ];
+  metadataFields.forEach(([name, labelText, value, type]) => {
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = labelText;
+    const input = document.createElement("input");
+    input.name = name;
+    input.type = type;
+    input.value = value;
+    label.append(caption, input);
+    metadataForm.append(label);
+  });
+  const abstractLabel = document.createElement("label");
+  abstractLabel.className = "field library-metadata-wide";
+  const abstractCaption = document.createElement("span");
+  abstractCaption.textContent = "摘要";
+  const abstractInput = document.createElement("textarea");
+  abstractInput.name = "abstract";
+  abstractInput.rows = 6;
+  abstractInput.value = paper.abstract || "";
+  abstractLabel.append(abstractCaption, abstractInput);
+  const saveMetadata = document.createElement("button");
+  saveMetadata.type = "submit";
+  saveMetadata.className = "primary";
+  saveMetadata.textContent = "保存元数据";
+  metadataForm.append(abstractLabel, saveMetadata);
+  metadataForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(metadataForm);
+    await updateLibraryPaper(paper.library_id, {
+      title: String(data.get("title") || ""),
+      authors: parseList(String(data.get("authors") || ""), true),
+      year: data.get("year") ? Number(data.get("year")) : null,
+      doi: String(data.get("doi") || ""),
+      url: String(data.get("url") || "") || null,
+      source: String(data.get("source") || "user"),
+      tags: parseList(String(data.get("tags") || ""), true),
+      abstract: String(data.get("abstract") || ""),
+    });
+  });
+  metadata.append(metadataSummary, metadataForm);
+
+  const abstract = document.createElement("section");
+  abstract.className = "library-detail-section";
+  const abstractTitle = document.createElement("h4");
+  abstractTitle.textContent = "摘要";
+  const abstractText = document.createElement("p");
+  abstractText.textContent = paper.abstract || "暂无摘要。";
+  abstract.append(abstractTitle, abstractText);
+
+  const collections = document.createElement("section");
+  collections.className = "library-detail-section";
+  const collectionsTitle = document.createElement("h4");
+  collectionsTitle.textContent = "文件夹";
+  collections.append(collectionsTitle);
+  if (!(state.libraryOverview.collections || []).length) {
+    const empty = document.createElement("p");
+    empty.textContent = "尚未创建文件夹。";
+    collections.append(empty);
+  }
+  (state.libraryOverview.collections || []).forEach((collection) => {
+    const label = document.createElement("label");
+    label.className = "library-collection-check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = (detail.collection_ids || []).includes(collection.collection_id);
+    input.addEventListener("change", async () => {
+      await api("/api/library/bulk", {
+        method: "POST",
+        body: JSON.stringify({
+          library_ids: [paper.library_id],
+          action: input.checked ? "add_collection" : "remove_collection",
+          value: collection.collection_id,
+        }),
+      });
+      await loadLibrary();
+    });
+    label.append(input, document.createTextNode(collection.name));
+    collections.append(label);
+  });
+
+  const notes = document.createElement("section");
+  notes.className = "library-detail-section";
+  const notesTitle = document.createElement("h4");
+  notesTitle.textContent = `阅读笔记（${(detail.notes || []).length}）`;
+  notes.append(notesTitle);
+  (detail.notes || []).forEach((note) => {
+    const item = document.createElement("article");
+    item.className = "library-note";
+    const text = document.createElement("p");
+    text.textContent = note.content;
+    const noteActions = document.createElement("div");
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "quiet-button";
+    edit.textContent = "编辑";
+    edit.addEventListener("click", async () => {
+      const content = window.prompt("编辑笔记", note.content);
+      if (!content || content.trim() === note.content) return;
+      await api(`/api/library/papers/${encodeURIComponent(paper.library_id)}/notes/${encodeURIComponent(note.note_id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content }),
+      });
+      await selectLibraryPaper(paper.library_id);
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "quiet-button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", async () => {
+      await api(`/api/library/notes/${encodeURIComponent(note.note_id)}`, { method: "DELETE" });
+      await selectLibraryPaper(paper.library_id);
+    });
+    noteActions.append(edit, remove);
+    item.append(text, noteActions);
+    notes.append(item);
+  });
+  const noteComposer = document.createElement("form");
+  noteComposer.className = "library-note-composer";
+  const noteInput = document.createElement("textarea");
+  noteInput.rows = 3;
+  noteInput.placeholder = "记录方法、结论、质疑或可复用的写作线索";
+  const addNote = document.createElement("button");
+  addNote.type = "submit";
+  addNote.className = "secondary";
+  addNote.textContent = "添加笔记";
+  noteComposer.append(noteInput, addNote);
+  noteComposer.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!noteInput.value.trim()) return;
+    await api(`/api/library/papers/${encodeURIComponent(paper.library_id)}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ content: noteInput.value.trim() }),
+    });
+    await selectLibraryPaper(paper.library_id);
+  });
+  notes.append(noteComposer);
+
+  const evidence = document.createElement("section");
+  evidence.className = "library-detail-section";
+  const evidenceTitle = document.createElement("h4");
+  evidenceTitle.textContent = `项目证据（${(detail.evidence || []).length}）`;
+  evidence.append(evidenceTitle);
+  if (!(detail.evidence || []).length) {
+    const empty = document.createElement("p");
+    empty.textContent = "还没有从研究项目提取出 PaperCard。";
+    evidence.append(empty);
+  }
+  (detail.evidence || []).forEach((card) => {
+    const cardNode = document.createElement("article");
+    cardNode.className = "library-evidence-card";
+    const methods = document.createElement("strong");
+    methods.textContent = (card.methods || []).join("、") || "研究方法待补充";
+    const findings = document.createElement("ul");
+    (card.findings || []).slice(0, 4).forEach((finding) => {
+      const item = document.createElement("li");
+      item.textContent = finding.claim || finding.quote || "";
+      findings.append(item);
+    });
+    cardNode.append(methods, findings);
+    evidence.append(cardNode);
+  });
+
+  const projects = document.createElement("section");
+  projects.className = "library-detail-section";
+  const projectsTitle = document.createElement("h4");
+  projectsTitle.textContent = `参与项目（${(detail.projects || []).length}）`;
+  projects.append(projectsTitle);
+  if (!(detail.projects || []).length) {
+    const empty = document.createElement("p");
+    empty.textContent = "尚未关联研究项目。";
+    projects.append(empty);
+  }
+  (detail.projects || []).forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "library-project-link";
+    button.textContent = `${item.project.topic} · ${item.relation.status}`;
+    button.addEventListener("click", () => loadProject(item.project.project_id));
+    projects.append(button);
+  });
+  const addProject = document.createElement("button");
+  addProject.type = "button";
+  addProject.className = "secondary library-add-project";
+  addProject.textContent = "加入现有项目";
+  addProject.addEventListener("click", async () => {
+    const available = state.projects.filter(
+      (project) => !(detail.projects || []).some((item) => item.project.project_id === project.project_id),
+    );
+    if (!available.length) {
+      notify("没有可加入的其它项目", true);
+      return;
+    }
+    const menu = available.map((project, index) => `${index + 1}. ${project.topic}`).join("\n");
+    const choice = Number(window.prompt(`输入项目序号：\n${menu}`, "1"));
+    const project = available[choice - 1];
+    if (!project) return;
+    await api("/api/library/bulk", {
+      method: "POST",
+      body: JSON.stringify({ library_ids: [paper.library_id], action: "add_project", value: project.project_id }),
+    });
+    await selectLibraryPaper(paper.library_id);
+  });
+  projects.append(addProject);
+
+  const attachments = document.createElement("section");
+  attachments.className = "library-detail-section";
+  const attachmentsTitle = document.createElement("h4");
+  attachmentsTitle.textContent = `附件与全文（${(detail.attachments || []).length}）`;
+  attachments.append(attachmentsTitle);
+  (detail.attachments || []).forEach((attachment) => {
+    const row = document.createElement("div");
+    row.className = "library-attachment";
+    const link = document.createElement("a");
+    link.href = safeLibraryResourceUrl(attachment.url) || "#";
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = attachment.name;
+    const statusText = document.createElement("span");
+    statusText.textContent = attachment.full_text_status === "ready" ? "全文可用" : "已链接";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "quiet-button";
+    remove.textContent = "移除";
+    remove.addEventListener("click", async () => {
+      await api(`/api/library/attachments/${encodeURIComponent(attachment.attachment_id)}`, { method: "DELETE" });
+      await selectLibraryPaper(paper.library_id);
+    });
+    row.append(link, statusText, remove);
+    attachments.append(row);
+  });
+  const addAttachment = document.createElement("button");
+  addAttachment.type = "button";
+  addAttachment.className = "secondary";
+  addAttachment.textContent = "添加附件链接";
+  addAttachment.addEventListener("click", async () => {
+    const url = window.prompt("输入 PDF 或资料链接");
+    if (!url) return;
+    const name = window.prompt("附件名称", url.split("/").pop() || "全文链接");
+    if (!name) return;
+    await api(`/api/library/papers/${encodeURIComponent(paper.library_id)}/attachments`, {
+      method: "POST",
+      body: JSON.stringify({ name, url }),
+    });
+    await selectLibraryPaper(paper.library_id);
+  });
+  const uploadInput = document.createElement("input");
+  uploadInput.type = "file";
+  uploadInput.accept = "application/pdf,.pdf";
+  uploadInput.hidden = true;
+  const uploadAttachment = document.createElement("button");
+  uploadAttachment.type = "button";
+  uploadAttachment.className = "primary";
+  uploadAttachment.textContent = "上传 PDF";
+  uploadAttachment.addEventListener("click", () => uploadInput.click());
+  uploadInput.addEventListener("change", async () => {
+    const file = uploadInput.files?.[0];
+    if (!file) return;
+    try {
+      const params = new URLSearchParams({
+        filename: file.name,
+        media_type: file.type || "application/pdf",
+      });
+      const response = await fetch(
+        `/api/library/papers/${encodeURIComponent(paper.library_id)}/attachments/upload?${params.toString()}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+        },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(errorMessage(payload, `上传失败（HTTP ${response.status}）`));
+      await selectLibraryPaper(paper.library_id);
+      notify("PDF 已上传并关联到文献");
+    } catch (error) {
+      notify(`上传失败：${error.message}`, true);
+    } finally {
+      uploadInput.value = "";
+    }
+  });
+  const attachmentActions = document.createElement("div");
+  attachmentActions.className = "library-attachment-actions";
+  attachmentActions.append(uploadAttachment, addAttachment, uploadInput);
+  attachments.append(attachmentActions);
+
+  const actions = document.createElement("div");
+  actions.className = "library-detail-actions";
+  if (safeHttpUrl(paper.url)) {
+    const source = document.createElement("a");
+    source.className = "secondary";
+    source.href = safeHttpUrl(paper.url);
+    source.target = "_blank";
+    source.rel = "noopener noreferrer";
+    source.textContent = "查看来源";
+    actions.append(source);
+  }
+  if (paper.archived_at) {
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "secondary";
+    restore.textContent = "恢复文献";
+    restore.addEventListener("click", async () => {
+      await api(`/api/library/papers/${encodeURIComponent(paper.library_id)}/restore`, { method: "POST" });
+      state.selectedLibraryId = null;
+      await loadLibrary();
+    });
+    const permanent = document.createElement("button");
+    permanent.type = "button";
+    permanent.className = "danger-link";
+    permanent.textContent = "永久删除";
+    permanent.addEventListener("click", async () => {
+      if (!window.confirm(`永久删除“${paper.title}”及其笔记和附件？`)) return;
+      await api(`/api/library/papers/${encodeURIComponent(paper.library_id)}/permanent`, { method: "DELETE" });
+      state.selectedLibraryId = null;
+      await loadLibrary();
+    });
+    actions.append(restore, permanent);
+  } else {
+    const archive = document.createElement("button");
+    archive.type = "button";
+    archive.className = "danger-link";
+    archive.textContent = "移入回收站";
+    archive.addEventListener("click", () => archiveLibraryPaper(paper.library_id, paper.title));
+    actions.append(archive);
+  }
+
+  elements.libraryDetail.append(
+    header,
+    controls,
+    metadata,
+    abstract,
+    collections,
+    notes,
+    evidence,
+    projects,
+    attachments,
+    actions,
+  );
+  refreshIcons();
+}
+
+async function selectLibraryPaper(libraryId) {
+  state.selectedLibraryId = libraryId;
+  renderLibraryList();
+  try {
+    const payload = await api(`/api/library/papers/${encodeURIComponent(libraryId)}`);
+    renderLibraryDetail(payload.data);
+  } catch (error) {
+    notify(`文献详情载入失败：${error.message}`, true);
+  }
+}
+
+async function loadLibrary() {
+  const query = elements.librarySearch.value.trim();
+  try {
+    const params = new URLSearchParams({
+      limit: "500",
+      query,
+      view: state.libraryView,
+    });
+    if (state.libraryCollectionId) params.set("collection_id", state.libraryCollectionId);
+    const [payload, overview] = await Promise.all([
+      api(`/api/library?${params.toString()}`),
+      api("/api/library/overview"),
+    ]);
+    state.libraryPapers = payload.data || [];
+    state.libraryOverview = overview.data || { counts: {}, collections: [] };
+    if (
+      state.selectedLibraryId &&
+      !state.libraryPapers.some((paper) => paper.library_id === state.selectedLibraryId)
+    ) {
+      state.selectedLibraryId = null;
+    }
+    renderLibraryNavigation();
+    renderLibraryList();
+    if (state.selectedLibraryId) await selectLibraryPaper(state.selectedLibraryId);
+  } catch (error) {
+    notify(`文献库载入失败：${error.message}`, true);
+  }
+}
+
+async function openLibrary() {
+  closeMenus();
+  closeInspector({ restoreFocus: false });
+  showWorkspace("library");
+  window.history.replaceState({}, "", `${window.location.pathname}?view=library`);
+  await loadLibrary();
+}
+
+async function updateLibraryPaper(libraryId, changes) {
+  try {
+    await api(`/api/library/papers/${encodeURIComponent(libraryId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    });
+    await loadLibrary();
+    notify("文献状态已更新");
+  } catch (error) {
+    notify(`更新失败：${error.message}`, true);
+  }
+}
+
+async function createLibraryCollection(parentId = null, parentName = "") {
+  const promptText = parentId
+    ? `在“${parentName}”中新建子文件夹`
+    : "新建根文件夹名称";
+  const name = window.prompt(promptText);
+  if (!name?.trim()) return;
+  try {
+    await api("/api/library/collections", {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
+    });
+    await loadLibrary();
+    notify("文件夹已创建");
+  } catch (error) {
+    notify(`创建失败：${error.message}`, true);
+  }
+}
+
+async function editLibraryCollection(collection) {
+  const name = window.prompt("修改文件夹名称", collection.name);
+  if (!name?.trim()) return;
+  const collections = state.libraryOverview.collections || [];
+  const byId = new Map(collections.map((item) => [item.collection_id, item]));
+  const isDescendant = (candidateId) => {
+    let currentId = candidateId;
+    const visited = new Set();
+    while (currentId && !visited.has(currentId)) {
+      if (currentId === collection.collection_id) return true;
+      visited.add(currentId);
+      currentId = byId.get(currentId)?.parent_id || null;
+    }
+    return false;
+  };
+  const parentOptions = collections.filter(
+    (item) => item.collection_id !== collection.collection_id && !isDescendant(item.collection_id),
+  );
+  const choices = ["0. 根目录", ...parentOptions.map((item, index) => `${index + 1}. ${item.name}`)];
+  const currentIndex = collection.parent_id
+    ? parentOptions.findIndex((item) => item.collection_id === collection.parent_id) + 1
+    : 0;
+  const selectedIndex = Number(window.prompt(
+    `选择父文件夹序号：\n${choices.join("\n")}`,
+    String(Math.max(0, currentIndex)),
+  ));
+  if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex > parentOptions.length) return;
+  const parentId = selectedIndex === 0 ? null : parentOptions[selectedIndex - 1].collection_id;
+  try {
+    await api(`/api/library/collections/${encodeURIComponent(collection.collection_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
+    });
+    await loadLibrary();
+    notify("文件夹设置已更新");
+  } catch (error) {
+    notify(`更新失败：${error.message}`, true);
+  }
+}
+
+async function applyLibraryBulkAction() {
+  const selected = [...state.selectedLibraryIds];
+  const raw = elements.libraryBulkAction.value;
+  if (!selected.length || !raw) return;
+  let [action, value] = raw.split(":");
+  if (action === "export_bibtex" || action === "export_ris") {
+    const format = action === "export_ris" ? "ris" : "bibtex";
+    const link = document.createElement("a");
+    link.href = `/api/library/export?format=${format}&ids=${encodeURIComponent(selected.join(","))}`;
+    link.click();
+    elements.libraryBulkAction.value = "";
+    return;
+  }
+  if (action === "add_tags") {
+    const input = window.prompt("输入要添加的标签（逗号分隔）");
+    if (!input) return;
+    value = parseList(input, true);
+  } else if (action === "add_collection") {
+    const choices = state.libraryOverview.collections || [];
+    const menu = choices.map((item, index) => `${index + 1}. ${item.name}`).join("\n");
+    const choice = Number(window.prompt(`输入文件夹序号：\n${menu}`, "1"));
+    if (!choices[choice - 1]) return;
+    value = choices[choice - 1].collection_id;
+  } else if (action === "add_project") {
+    const menu = state.projects.map((item, index) => `${index + 1}. ${item.topic}`).join("\n");
+    const choice = Number(window.prompt(`输入项目序号：\n${menu}`, "1"));
+    if (!state.projects[choice - 1]) return;
+    value = state.projects[choice - 1].project_id;
+  } else if (action === "delete") {
+    if (!window.confirm(`永久删除选中的 ${selected.length} 篇文献？`)) return;
+  }
+  try {
+    await api("/api/library/bulk", {
+      method: "POST",
+      body: JSON.stringify({ library_ids: selected, action, value }),
+    });
+    state.selectedLibraryIds.clear();
+    elements.libraryBulkAction.value = "";
+    await loadLibrary();
+    notify("批量操作已完成");
+  } catch (error) {
+    notify(`批量操作失败：${error.message}`, true);
+  }
+}
+
+async function findLibraryDuplicates() {
+  try {
+    const payload = await api("/api/library/duplicates");
+    const groups = payload.data || [];
+    if (!groups.length) {
+      notify("没有发现疑似重复项");
+      return;
+    }
+    const group = groups[0];
+    const [primary, ...duplicates] = group.papers;
+    const list = group.papers.map((paper, index) => `${index + 1}. ${paper.title}`).join("\n");
+    if (!window.confirm(`发现 ${groups.length} 组疑似重复项。\n\n${list}\n\n将其合并并保留第 1 条记录？`)) return;
+    for (const duplicate of duplicates) {
+      await api("/api/library/merge", {
+        method: "POST",
+        body: JSON.stringify({ primary_id: primary.library_id, duplicate_id: duplicate.library_id }),
+      });
+    }
+    state.selectedLibraryId = primary.library_id;
+    await loadLibrary();
+    notify("重复项已合并，项目、笔记和附件关联已迁移");
+  } catch (error) {
+    notify(`重复项检查失败：${error.message}`, true);
+  }
+}
+
+function renderLibraryComparison(data) {
+  elements.libraryCompareTable.replaceChildren();
+  const summarize = (items, limit = 5) => {
+    const values = (items || [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, limit)
+      .map((item) => item.length > 180 ? `${item.slice(0, 177)}…` : item);
+    return values.join("；") || "—";
+  };
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["文献", "年份", "方法", "数据集", "核心发现", "局限", "笔记"].forEach((label) => {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    headRow.append(cell);
+  });
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  (data.rows || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    const values = [
+      row.paper.title,
+      row.paper.year || "—",
+      summarize(row.methods, 5),
+      summarize(row.datasets, 5),
+      summarize((row.findings || []).map((item) => item.claim || item.quote), 5),
+      summarize(row.limitations, 5),
+      summarize((row.notes || []).map((item) => item.content), 5),
+    ];
+    values.forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      tr.append(cell);
+    });
+    body.append(tr);
+  });
+  table.append(head, body);
+  elements.libraryCompareTable.append(table);
+}
+
+async function compareSelectedLibraryPapers() {
+  const libraryIds = [...state.selectedLibraryIds];
+  if (libraryIds.length < 2 || libraryIds.length > 8) return;
+  try {
+    const payload = await api("/api/library/compare", {
+      method: "POST",
+      body: JSON.stringify({ library_ids: libraryIds }),
+    });
+    renderLibraryComparison(payload.data);
+    elements.libraryComparePanel.hidden = false;
+    elements.libraryComparePanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    notify(`对照载入失败：${error.message}`, true);
+  }
+}
+
+async function askLibraryAssistant(event) {
+  event.preventDefault();
+  const question = elements.libraryAssistantQuestion.value.trim();
+  if (!question) return;
+  try {
+    const payload = await api("/api/library/assistant", {
+      method: "POST",
+      body: JSON.stringify({ library_ids: [...state.selectedLibraryIds], question }),
+    });
+    elements.libraryAssistantAnswer.hidden = false;
+    elements.libraryAssistantAnswer.textContent = payload.data.answer;
+  } catch (error) {
+    notify(`整理回答失败：${error.message}`, true);
+  }
+}
+
+async function archiveLibraryPaper(libraryId, title) {
+  if (!window.confirm(`将“${title}”移入回收站？已有项目关联和历史研究结果会保留。`)) return;
+  try {
+    await api(`/api/library/papers/${encodeURIComponent(libraryId)}`, { method: "DELETE" });
+    state.selectedLibraryId = null;
+    elements.libraryDetail.innerHTML = '<div class="library-detail-empty"><p>文献已移入回收站</p></div>';
+    await loadLibrary();
+    notify("文献已移入回收站");
+  } catch (error) {
+    notify(`操作失败：${error.message}`, true);
+  }
+}
+
+async function importLibraryRecords() {
+  const content = elements.libraryImportContent.value.trim();
+  if (!content) {
+    notify("请先粘贴 BibTeX 或 RIS 内容", true);
+    return;
+  }
+  try {
+    const payload = await api("/api/library/import", {
+      method: "POST",
+      body: JSON.stringify({
+        format: elements.libraryImportFormat.value,
+        content,
+        tags: parseList(elements.libraryImportTags.value, true),
+      }),
+    });
+    elements.libraryImportContent.value = "";
+    await loadLibrary();
+    notify(`已导入 ${payload.data?.length || 0} 篇文献`);
+  } catch (error) {
+    notify(`导入失败：${error.message}`, true);
   }
 }
 
@@ -1619,6 +2583,7 @@ async function loadProject(projectId, quiet = false, force = false) {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const snapshot = payload.data;
     state.snapshot = snapshot;
+    await loadProjectLibrary(projectId);
     renderProjectHeader(snapshot.project);
     renderProjectSummary(snapshot);
     renderStagePanels(snapshot);
@@ -1649,6 +2614,27 @@ function candidateMatches(candidate, query) {
     .join(" ")
     .toLocaleLowerCase();
   return haystack.includes(query.toLocaleLowerCase());
+}
+
+async function saveCandidateToLibrary(candidate) {
+  if (!state.projectId || state.busy) return;
+  try {
+    const payload = await api(
+      `/api/projects/${encodeURIComponent(state.projectId)}/library`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...candidate, status: "candidate" }),
+      },
+    );
+    const item = payload.data;
+    [item.relation?.source_paper_id, item.paper?.paper_id, item.paper?.doi]
+      .filter(Boolean)
+      .forEach((value) => state.projectLibrary.set(libraryIdentity(value), item));
+    renderCandidateCards();
+    notify("论文已收藏到文献库");
+  } catch (error) {
+    notify(`收藏失败：${error.message}`, true);
+  }
 }
 
 function renderCandidateCards() {
@@ -1734,6 +2720,17 @@ function renderCandidateCards() {
       link.append(document.createTextNode("查看原文"), iconNode("external-link"));
       identifiers.append(link);
     }
+
+    const libraryEntry = libraryEntryForCandidate(candidate);
+    const libraryButton = document.createElement("button");
+    libraryButton.type = "button";
+    libraryButton.className = "candidate-library-button";
+    const isSaved = Boolean(libraryEntry?.paper?.saved);
+    libraryButton.disabled = isSaved;
+    libraryButton.append(iconNode(isSaved ? "bookmark-check" : "bookmark-plus"));
+    libraryButton.append(document.createTextNode(isSaved ? "已在文献库" : "收藏到文献库"));
+    libraryButton.addEventListener("click", () => saveCandidateToLibrary(candidate));
+    identifiers.append(libraryButton);
 
     card.append(head, meta, authors);
     if (agentReason) card.append(reason);
@@ -2097,6 +3094,26 @@ function toggleNewProject(show) {
 elements.newProjectToggle.addEventListener("click", () => {
   toggleNewProject(true);
 });
+elements.libraryToggle.addEventListener("click", openLibrary);
+elements.refreshLibrary.addEventListener("click", loadLibrary);
+elements.importLibrary.addEventListener("click", importLibraryRecords);
+elements.newCollection.addEventListener("click", () => createLibraryCollection());
+elements.findDuplicates.addEventListener("click", findLibraryDuplicates);
+elements.applyLibraryBulk.addEventListener("click", applyLibraryBulkAction);
+elements.compareLibrarySelection.addEventListener("click", compareSelectedLibraryPapers);
+elements.clearLibrarySelection.addEventListener("click", () => {
+  state.selectedLibraryIds.clear();
+  renderLibraryList();
+});
+elements.closeLibraryCompare.addEventListener("click", () => {
+  elements.libraryComparePanel.hidden = true;
+});
+elements.libraryAssistantForm.addEventListener("submit", askLibraryAssistant);
+let librarySearchTimer = null;
+elements.librarySearch.addEventListener("input", () => {
+  window.clearTimeout(librarySearchTimer);
+  librarySearchTimer = window.setTimeout(loadLibrary, 220);
+});
 elements.emptyNewProject.addEventListener("click", () => toggleNewProject(true));
 elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false));
 elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
@@ -2223,6 +3240,10 @@ async function initialize() {
   refreshIcons();
   await Promise.all([checkHealth(), loadProjects()]);
   const params = new URLSearchParams(window.location.search);
+  if (params.get("view") === "library") {
+    await openLibrary();
+    return;
+  }
   const requestedProject = params.get("project");
   if (requestedProject) await loadProject(requestedProject, true);
 }

@@ -4,6 +4,11 @@ from typing import Any, Protocol
 
 from research_agent.domain.models import (
     ArtifactRecord,
+    LibraryAttachment,
+    LibraryCollection,
+    LibraryNote,
+    LibraryPaper,
+    ProjectPaper,
     ResearchProject,
     ResearchStage,
     ReviewResult,
@@ -21,6 +26,83 @@ class ResearchRepositoryPort(Protocol):
     def list_projects(self, limit: int = 20) -> list[ResearchProject]: ...
 
     def delete_project(self, project_id: str) -> None: ...
+
+    def get_library_paper(self, library_id: str) -> LibraryPaper: ...
+
+    def get_library_paper_by_key(self, canonical_key: str) -> LibraryPaper | None: ...
+
+    def save_library_paper(
+        self,
+        paper: LibraryPaper,
+        canonical_key: str,
+    ) -> LibraryPaper: ...
+
+    def list_library_papers(
+        self,
+        query: str = "",
+        *,
+        saved_only: bool = True,
+        include_archived: bool = False,
+        limit: int = 100,
+    ) -> list[LibraryPaper]: ...
+
+    def archive_library_paper(self, library_id: str) -> LibraryPaper: ...
+
+    def restore_library_paper(self, library_id: str) -> LibraryPaper: ...
+
+    def permanently_delete_library_paper(self, library_id: str) -> None: ...
+
+    def create_library_collection(
+        self, collection: LibraryCollection
+    ) -> LibraryCollection: ...
+
+    def list_library_collections(self) -> list[LibraryCollection]: ...
+
+    def update_library_collection(
+        self, collection: LibraryCollection
+    ) -> LibraryCollection: ...
+
+    def delete_library_collection(self, collection_id: str) -> None: ...
+
+    def add_paper_to_collection(self, collection_id: str, library_id: str) -> None: ...
+
+    def remove_paper_from_collection(self, collection_id: str, library_id: str) -> None: ...
+
+    def list_paper_collection_ids(self, library_id: str) -> list[str]: ...
+
+    def list_collection_paper_ids(self, collection_id: str) -> list[str]: ...
+
+    def save_library_note(self, note: LibraryNote) -> LibraryNote: ...
+
+    def list_library_notes(self, library_id: str) -> list[LibraryNote]: ...
+
+    def delete_library_note(self, note_id: str) -> None: ...
+
+    def save_library_attachment(
+        self, attachment: LibraryAttachment
+    ) -> LibraryAttachment: ...
+
+    def get_library_attachment(self, attachment_id: str) -> LibraryAttachment: ...
+
+    def list_library_attachments(self, library_id: str) -> list[LibraryAttachment]: ...
+
+    def delete_library_attachment(self, attachment_id: str) -> None: ...
+
+    def merge_library_papers(
+        self,
+        primary: LibraryPaper,
+        duplicate_id: str,
+        canonical_key: str,
+    ) -> LibraryPaper: ...
+
+    def link_project_paper(self, relation: ProjectPaper) -> ProjectPaper: ...
+
+    def list_project_papers(
+        self,
+        project_id: str,
+    ) -> list[tuple[ProjectPaper, LibraryPaper]]: ...
+
+    def list_library_paper_projects(self, library_id: str) -> list[ProjectPaper]: ...
 
     def transition(
         self,

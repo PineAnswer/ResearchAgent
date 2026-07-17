@@ -6,6 +6,7 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 
 from research_agent.application.research_service import ResearchService
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
+from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
 from research_agent.infrastructure.run_logger import ResearchRunLogger
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 
@@ -140,6 +141,122 @@ def test_run_logger_labels_model_batches_as_serial_execution(tmp_path) -> None:
 
     events = logger.events_path.read_text(encoding="utf-8")
     assert "LLM提出2个工具调用；系统串行执行第一个：verify_doi" in events
+
+
+def test_run_logger_records_invalid_tool_call_diagnostics(tmp_path) -> None:
+    logger = ResearchRunLogger(
+        tmp_path / "runs",
+        topic="topic",
+        research_question="question",
+        thread_id="thread-1",
+    )
+    message = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "SynthesisReport",
+                "args": '{"topic": "broken"',
+                "id": "bad-call",
+                "error": "invalid JSON",
+            }
+        ],
+        response_metadata={"finish_reason": "tool_calls"},
+    )
+
+    logger.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]])
+    )
+
+    events = logger.events_path.read_text(encoding="utf-8")
+    transcript = logger.messages_path.read_text(encoding="utf-8")
+    assert "llm.invalid_tool_calls" in events
+    assert "invalid JSON" in events
+    assert '"message_diagnostics"' in transcript
+    assert '"raw_provider_response_captured": false' in transcript
+
+
+def test_run_logger_marks_tool_finish_without_parsed_calls(tmp_path) -> None:
+    logger = ResearchRunLogger(
+        tmp_path / "runs",
+        topic="topic",
+        research_question="question",
+        thread_id="thread-1",
+    )
+    message = AIMessage(
+        content="",
+        response_metadata={"finish_reason": "tool_calls"},
+    )
+
+    logger.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]])
+    )
+
+    events = logger.events_path.read_text(encoding="utf-8")
+    assert "llm.tool_call_parse_gap" in events
+    assert "tool_call_finish_without_parsed_calls" in events
+
+
+def test_observable_chat_model_preserves_raw_provider_tool_arguments(tmp_path) -> None:
+    model = ObservableChatOpenAI(
+        model="deepseek-chat",
+        api_key="test-key",
+        base_url="https://example.invalid",
+    )
+    response = {
+        "id": "response-1",
+        "model": "deepseek-chat",
+        "object": "chat.completion",
+        "created": 1,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "bad-call",
+                            "type": "function",
+                            "function": {
+                                "name": "SynthesisReport",
+                                "arguments": '{"topic": "broken"',
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        },
+    }
+
+    result = model._create_chat_result(response)
+
+    raw = result.generations[0].generation_info["raw_provider_response"]
+    arguments = raw["choices"][0]["message"]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    assert arguments == '{"topic": "broken"'
+
+    logger = ResearchRunLogger(
+        tmp_path / "runs",
+        topic="topic",
+        research_question="question",
+        thread_id="thread-1",
+    )
+    logger.on_llm_end(LLMResult(generations=[[result.generations[0]]]))
+    transcript = logger.messages_path.read_text(encoding="utf-8")
+    assert '"raw_provider_response_captured": true' in transcript
+    record = json.loads(transcript)
+    logged_raw = record["data"]["message_diagnostics"]["raw_provider_response"]
+    logged_arguments = logged_raw["choices"][0]["message"]["tool_calls"][0][
+        "function"
+    ]["arguments"]
+    assert logged_arguments == '{"topic": "broken"'
 
 
 def test_run_logger_marks_nonterminal_return_incomplete_and_updates_run_file(

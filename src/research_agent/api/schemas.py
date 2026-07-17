@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,3 +28,87 @@ class SearchFeedbackRequest(SearchFeedback):
 
 class ContinueProjectRequest(BaseModel):
     thread_id: str | None = None
+
+
+class LibraryPaperRequest(BaseModel):
+    paper_id: str = ""
+    title: str = ""
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    abstract: str = ""
+    doi: str = ""
+    url: str | None = None
+    source: str = "user"
+    tags: list[str] = Field(default_factory=list)
+    starred: bool = False
+
+
+class ProjectLibraryPaperRequest(LibraryPaperRequest):
+    status: Literal["candidate", "included", "excluded", "uncertain"] = "candidate"
+    reason: str = ""
+
+
+class LibraryPaperUpdateRequest(BaseModel):
+    paper_id: str | None = None
+    title: str | None = None
+    authors: list[str] | None = None
+    year: int | None = None
+    abstract: str | None = None
+    doi: str | None = None
+    url: str | None = None
+    source: str | None = None
+    tags: list[str] | None = None
+    starred: bool | None = None
+    saved: bool | None = None
+
+
+class LibraryImportRequest(BaseModel):
+    format: Literal["bibtex", "ris"]
+    content: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+class LibraryCollectionRequest(BaseModel):
+    name: str = Field(min_length=1)
+    parent_id: str | None = None
+
+
+class LibraryBulkRequest(BaseModel):
+    library_ids: list[str] = Field(min_length=1)
+    action: Literal[
+        "archive",
+        "restore",
+        "delete",
+        "star",
+        "unstar",
+        "add_tags",
+        "remove_tags",
+        "add_collection",
+        "remove_collection",
+        "add_project",
+    ]
+    value: Any = None
+
+
+class LibraryNoteRequest(BaseModel):
+    content: str = Field(min_length=1)
+    project_id: str | None = None
+
+
+class LibraryAttachmentRequest(BaseModel):
+    name: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    media_type: str = "application/pdf"
+
+
+class LibraryMergeRequest(BaseModel):
+    primary_id: str
+    duplicate_id: str
+
+
+class LibrarySelectionRequest(BaseModel):
+    library_ids: list[str] = Field(min_length=2, max_length=8)
+
+
+class LibraryAssistantRequest(LibrarySelectionRequest):
+    question: str = Field(min_length=1)

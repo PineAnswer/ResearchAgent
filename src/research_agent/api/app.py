@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
@@ -15,12 +16,28 @@ from research_agent.agents.supervisor import ResearchSupervisor
 from research_agent.api.schemas import (
     ApiEnvelope,
     ContinueProjectRequest,
+    LibraryAssistantRequest,
+    LibraryAttachmentRequest,
+    LibraryBulkRequest,
+    LibraryCollectionRequest,
+    LibraryImportRequest,
+    LibraryMergeRequest,
+    LibraryNoteRequest,
+    LibraryPaperRequest,
+    LibraryPaperUpdateRequest,
+    LibrarySelectionRequest,
+    ProjectLibraryPaperRequest,
     ResearchRequest,
     SearchFeedbackRequest,
 )
 from research_agent.application.research_service import WorkflowPrerequisiteError
+from research_agent.domain.models import LibraryAttachment
 from research_agent.infrastructure.config import Settings
-from research_agent.infrastructure.sqlite_repository import ProjectNotFound
+from research_agent.infrastructure.sqlite_repository import (
+    LibraryCollectionNotFound,
+    LibraryPaperNotFound,
+    ProjectNotFound,
+)
 
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
@@ -139,16 +156,432 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         projects = supervisor.service.list_projects(limit)
         return ApiEnvelope(data=[item.model_dump(mode="json") for item in projects])
 
+    @app.get("/api/library", response_model=ApiEnvelope)
+    async def list_library_papers(
+        query: str = "",
+        limit: int = Query(default=100, ge=1, le=500),
+        view: str = "all",
+        collection_id: str | None = None,
+    ) -> ApiEnvelope:
+        try:
+            data = supervisor.service.library.list_papers(
+                query,
+                limit,
+                view=view,
+                collection_id=collection_id,
+            )
+        except LibraryCollectionNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_collection_not_found") from exc
+        return ApiEnvelope(data=data)
+
+    @app.get("/api/library/overview", response_model=ApiEnvelope)
+    async def library_overview() -> ApiEnvelope:
+        return ApiEnvelope(data=supervisor.service.library.library_overview())
+
+    @app.post("/api/library/bulk", response_model=ApiEnvelope)
+    async def bulk_library_action(request: LibraryBulkRequest) -> ApiEnvelope:
+        try:
+            changed = await asyncio.to_thread(
+                supervisor.service.library.bulk_update,
+                request.library_ids,
+                request.action,
+                request.value,
+            )
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_bulk_updated", data={"library_ids": changed})
+
+    @app.get("/api/library/duplicates", response_model=ApiEnvelope)
+    async def library_duplicates() -> ApiEnvelope:
+        return ApiEnvelope(data=supervisor.service.library.duplicate_groups())
+
+    @app.post("/api/library/merge", response_model=ApiEnvelope)
+    async def merge_library_papers(request: LibraryMergeRequest) -> ApiEnvelope:
+        try:
+            paper = await asyncio.to_thread(
+                supervisor.service.library.merge_papers,
+                request.primary_id,
+                request.duplicate_id,
+            )
+        except (ValueError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_papers_merged", data=paper.model_dump(mode="json"))
+
+    @app.post("/api/library/compare", response_model=ApiEnvelope)
+    async def compare_library_papers(request: LibrarySelectionRequest) -> ApiEnvelope:
+        try:
+            data = await asyncio.to_thread(
+                supervisor.service.library.compare_papers,
+                request.library_ids,
+            )
+        except (ValueError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=data)
+
+    @app.post("/api/library/assistant", response_model=ApiEnvelope)
+    async def library_assistant(request: LibraryAssistantRequest) -> ApiEnvelope:
+        try:
+            data = await supervisor.answer_library_question(
+                request.library_ids,
+                request.question,
+            )
+        except (ValueError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=data)
+
+    @app.post("/api/library/collections", response_model=ApiEnvelope)
+    async def create_library_collection(request: LibraryCollectionRequest) -> ApiEnvelope:
+        try:
+            collection = await asyncio.to_thread(
+                supervisor.service.library.create_collection,
+                request.name,
+                request.parent_id,
+            )
+        except (ValueError, LibraryCollectionNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_collection_created", data=collection.model_dump(mode="json"))
+
+    @app.patch("/api/library/collections/{collection_id}", response_model=ApiEnvelope)
+    async def update_library_collection(
+        collection_id: str,
+        request: LibraryCollectionRequest,
+    ) -> ApiEnvelope:
+        try:
+            collection = await asyncio.to_thread(
+                supervisor.service.library.update_collection,
+                collection_id,
+                name=request.name,
+                parent_id=request.parent_id,
+            )
+        except (ValueError, StopIteration, LibraryCollectionNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=collection.model_dump(mode="json"))
+
+    @app.delete("/api/library/collections/{collection_id}", response_model=ApiEnvelope)
+    async def delete_library_collection(collection_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(
+                supervisor.repository.delete_library_collection,
+                collection_id,
+            )
+        except LibraryCollectionNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_collection_not_found") from exc
+        return ApiEnvelope(message="library_collection_deleted", data={"collection_id": collection_id})
+
+    @app.post("/api/library/papers", response_model=ApiEnvelope)
+    async def add_library_paper(request: LibraryPaperRequest) -> ApiEnvelope:
+        try:
+            paper = await asyncio.to_thread(
+                supervisor.service.library.upsert_paper,
+                request.model_dump(),
+                saved=True,
+                tags=request.tags,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(
+            message="library_paper_saved",
+            data=paper.model_dump(mode="json"),
+        )
+
+    @app.get("/api/library/papers/{library_id}", response_model=ApiEnvelope)
+    async def get_library_paper(library_id: str) -> ApiEnvelope:
+        try:
+            detail = supervisor.service.library.get_paper(library_id)
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return ApiEnvelope(data=detail)
+
+    @app.patch("/api/library/papers/{library_id}", response_model=ApiEnvelope)
+    async def update_library_paper(
+        library_id: str,
+        request: LibraryPaperUpdateRequest,
+    ) -> ApiEnvelope:
+        changes = request.model_dump(exclude_none=True)
+        try:
+            paper = await asyncio.to_thread(
+                supervisor.service.library.update_paper,
+                library_id,
+                changes,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=paper.model_dump(mode="json"))
+
+    @app.delete("/api/library/papers/{library_id}", response_model=ApiEnvelope)
+    async def archive_library_paper(library_id: str) -> ApiEnvelope:
+        try:
+            paper = await asyncio.to_thread(
+                supervisor.repository.archive_library_paper,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return ApiEnvelope(
+            message="library_paper_archived",
+            data=paper.model_dump(mode="json"),
+        )
+
+    @app.post("/api/library/papers/{library_id}/restore", response_model=ApiEnvelope)
+    async def restore_library_paper(library_id: str) -> ApiEnvelope:
+        try:
+            paper = await asyncio.to_thread(
+                supervisor.repository.restore_library_paper,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return ApiEnvelope(message="library_paper_restored", data=paper.model_dump(mode="json"))
+
+    @app.delete("/api/library/papers/{library_id}/permanent", response_model=ApiEnvelope)
+    async def permanently_delete_library_paper(library_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(
+                supervisor.repository.permanently_delete_library_paper,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_paper_deleted", data={"library_id": library_id})
+
+    @app.post("/api/library/papers/{library_id}/notes", response_model=ApiEnvelope)
+    async def add_library_note(
+        library_id: str,
+        request: LibraryNoteRequest,
+    ) -> ApiEnvelope:
+        try:
+            note = await asyncio.to_thread(
+                supervisor.service.library.add_note,
+                library_id,
+                request.content,
+                request.project_id,
+            )
+        except (ValueError, LibraryPaperNotFound, ProjectNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_note_saved", data=note.model_dump(mode="json"))
+
+    @app.patch("/api/library/papers/{library_id}/notes/{note_id}", response_model=ApiEnvelope)
+    async def update_library_note(
+        library_id: str,
+        note_id: str,
+        request: LibraryNoteRequest,
+    ) -> ApiEnvelope:
+        try:
+            note = await asyncio.to_thread(
+                supervisor.service.library.update_note,
+                note_id,
+                library_id,
+                request.content,
+            )
+        except (ValueError, StopIteration, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=note.model_dump(mode="json"))
+
+    @app.delete("/api/library/notes/{note_id}", response_model=ApiEnvelope)
+    async def delete_library_note(note_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(supervisor.repository.delete_library_note, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="library_note_not_found") from exc
+        return ApiEnvelope(message="library_note_deleted", data={"note_id": note_id})
+
+    @app.post("/api/library/papers/{library_id}/attachments", response_model=ApiEnvelope)
+    async def add_library_attachment(
+        library_id: str,
+        request: LibraryAttachmentRequest,
+    ) -> ApiEnvelope:
+        try:
+            attachment = await asyncio.to_thread(
+                supervisor.service.library.add_attachment,
+                library_id,
+                name=request.name,
+                url=request.url,
+                media_type=request.media_type,
+            )
+        except (ValueError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="library_attachment_saved", data=attachment.model_dump(mode="json"))
+
+    @app.post(
+        "/api/library/papers/{library_id}/attachments/upload",
+        response_model=ApiEnvelope,
+    )
+    async def upload_library_attachment(
+        library_id: str,
+        request: Request,
+        filename: str = Query(min_length=1, max_length=240),
+        media_type: str = "application/pdf",
+    ) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(supervisor.repository.get_library_paper, library_id)
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        content = await request.body()
+        if not content:
+            raise HTTPException(status_code=400, detail="attachment_is_empty")
+        if len(content) > 30 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="attachment_exceeds_30_mb")
+        safe_name = Path(filename).name.strip()
+        if not safe_name:
+            raise HTTPException(status_code=400, detail="invalid_attachment_name")
+        attachment_id = f"LA-{uuid.uuid4().hex[:12]}"
+        attachment_root = Path(supervisor.settings.data_dir) / "library-attachments"
+        paper_dir = attachment_root / library_id
+        file_path = paper_dir / attachment_id
+        await asyncio.to_thread(paper_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(file_path.write_bytes, content)
+        attachment = LibraryAttachment(
+            attachment_id=attachment_id,
+            library_id=library_id,
+            name=safe_name,
+            url=f"/api/library/attachments/{attachment_id}/content",
+            media_type=media_type or "application/pdf",
+            full_text_status="ready",
+        )
+        try:
+            attachment = await asyncio.to_thread(
+                supervisor.repository.save_library_attachment,
+                attachment,
+            )
+        except Exception:
+            file_path.unlink(missing_ok=True)
+            raise
+        return ApiEnvelope(
+            message="library_attachment_uploaded",
+            data=attachment.model_dump(mode="json"),
+        )
+
+    @app.get("/api/library/attachments/{attachment_id}/content")
+    async def get_library_attachment_content(attachment_id: str) -> FileResponse:
+        try:
+            attachment = await asyncio.to_thread(
+                supervisor.repository.get_library_attachment,
+                attachment_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="library_attachment_not_found") from exc
+        file_path = (
+            Path(supervisor.settings.data_dir)
+            / "library-attachments"
+            / attachment.library_id
+            / attachment.attachment_id
+        )
+        if attachment.full_text_status != "ready" or not file_path.is_file():
+            raise HTTPException(status_code=404, detail="library_attachment_content_not_found")
+        return FileResponse(
+            file_path,
+            media_type=attachment.media_type,
+            filename=attachment.name,
+        )
+
+    @app.delete("/api/library/attachments/{attachment_id}", response_model=ApiEnvelope)
+    async def delete_library_attachment(attachment_id: str) -> ApiEnvelope:
+        try:
+            attachment = await asyncio.to_thread(
+                supervisor.repository.get_library_attachment,
+                attachment_id,
+            )
+            await asyncio.to_thread(
+                supervisor.repository.delete_library_attachment,
+                attachment_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="library_attachment_not_found") from exc
+        if attachment.full_text_status == "ready":
+            file_path = (
+                Path(supervisor.settings.data_dir)
+                / "library-attachments"
+                / attachment.library_id
+                / attachment.attachment_id
+            )
+            await asyncio.to_thread(file_path.unlink, missing_ok=True)
+        return ApiEnvelope(message="library_attachment_deleted", data={"attachment_id": attachment_id})
+
+    @app.post("/api/library/import", response_model=ApiEnvelope)
+    async def import_library(request: LibraryImportRequest) -> ApiEnvelope:
+        try:
+            papers = await asyncio.to_thread(
+                supervisor.service.library.import_records,
+                request.content,
+                request.format,
+                request.tags,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(
+            message="library_imported",
+            data=[paper.model_dump(mode="json") for paper in papers],
+        )
+
+    @app.get("/api/library/export", response_class=PlainTextResponse)
+    async def export_library(
+        format: Literal["bibtex", "ris"] = "bibtex",
+        query: str = "",
+        ids: str = "",
+    ) -> PlainTextResponse:
+        library_ids = [item.strip() for item in ids.split(",") if item.strip()]
+        content = supervisor.service.library.export_records(format, query, library_ids)
+        media_type = "application/x-bibtex" if format == "bibtex" else "application/x-research-info-systems"
+        extension = "bib" if format == "bibtex" else "ris"
+        return PlainTextResponse(
+            content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="research-library.{extension}"'},
+        )
+
     @app.get(
         "/api/projects/{project_id}",
         response_model=ApiEnvelope,
     )
     async def get_project(project_id: str) -> ApiEnvelope:
         try:
+            await asyncio.to_thread(supervisor.service.library.sync_project, project_id)
             snapshot = supervisor.service.get_snapshot(project_id)
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
         return ApiEnvelope(data=_json_safe(snapshot))
+
+    @app.get(
+        "/api/projects/{project_id}/library",
+        response_model=ApiEnvelope,
+    )
+    async def get_project_library(project_id: str) -> ApiEnvelope:
+        try:
+            papers = await asyncio.to_thread(
+                supervisor.service.library.sync_project,
+                project_id,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        return ApiEnvelope(data=papers)
+
+    @app.post(
+        "/api/projects/{project_id}/library",
+        response_model=ApiEnvelope,
+    )
+    async def save_project_library_paper(
+        project_id: str,
+        request: ProjectLibraryPaperRequest,
+    ) -> ApiEnvelope:
+        try:
+            result = await asyncio.to_thread(
+                supervisor.service.library.add_project_paper,
+                project_id,
+                request.model_dump(exclude={"status", "reason"}),
+                status=request.status,
+                reason=request.reason,
+                saved=True,
+                tags=request.tags,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="project_library_paper_saved", data=result)
 
     @app.delete(
         "/api/projects/{project_id}",
