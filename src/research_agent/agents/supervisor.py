@@ -13,6 +13,8 @@ import httpx
 from botocore.exceptions import BotoCoreError, ClientError
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import (
     APIConnectionError,
@@ -33,6 +35,7 @@ from research_agent.application.search_review import SearchReviewService
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
+from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 from research_agent.infrastructure.workspace import WorkspaceBootstrapper
 from research_agent.tools.literature_tools import build_literature_tools
@@ -119,9 +122,7 @@ class ResearchSupervisor:
         if not self.settings.base_url:
             return self.settings.model
 
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(
+        return ObservableChatOpenAI(
             model=model_name,
             api_key=os.getenv("OPENAI_API_KEY", "not-set"),
             base_url=self.settings.base_url,
@@ -352,7 +353,7 @@ class ResearchSupervisor:
     def build_config(thread_id: str | None = None) -> dict[str, Any]:
         return {
             "configurable": {"thread_id": thread_id or uuid.uuid4().hex},
-            "recursion_limit": 80,
+            "recursion_limit": 160,
         }
 
     def _new_run_logger(
@@ -685,6 +686,85 @@ class ResearchSupervisor:
             "status": summary["status"],
             "result": result,
             "run_log_dir": str(run_logger.run_dir),
+        }
+
+    async def answer_library_question(
+        self,
+        library_ids: list[str],
+        question: str,
+    ) -> dict[str, Any]:
+        """Answer over selected library records while preserving source attribution."""
+        fallback = self.service.library.answer_library_question(library_ids, question)
+        if self.graph is None:
+            return {**fallback, "mode": "extractive"}
+
+        comparison = self.service.library.compare_papers(library_ids)
+        citations: list[dict[str, str]] = []
+        source_blocks: list[str] = []
+        for index, row in enumerate(comparison["rows"], start=1):
+            paper = row["paper"]
+            citations.append(
+                {
+                    "citation": f"[{index}]",
+                    "library_id": paper["library_id"],
+                    "title": paper["title"],
+                }
+            )
+            findings = "\n".join(
+                f"- {item.get('claim') or item.get('quote') or ''}"
+                for item in row["findings"][:8]
+            )
+            notes = "\n".join(
+                f"- {item.get('content', '')}" for item in row["notes"][:8]
+            )
+            source_blocks.append(
+                f"""[{index}] {paper['title']}
+Year: {paper.get('year') or 'unknown'}
+Authors: {', '.join(paper.get('authors') or [])}
+Abstract: {(paper.get('abstract') or '')[:3000]}
+Methods: {', '.join(row['methods'][:12])}
+Datasets: {', '.join(row['datasets'][:12])}
+Findings:
+{findings or '- none'}
+Limitations: {'; '.join(row['limitations'][:12])}
+Reading notes:
+{notes or '- none'}"""
+            )
+
+        model = self._build_model()
+        if isinstance(model, str):
+            model = init_chat_model(model)
+        response = await model.ainvoke(
+            [
+                SystemMessage(
+                    content=(
+                        "你是科研文献管理助手。只能依据用户选中的文献材料回答，"
+                        "不得补充材料之外的事实。用简洁中文回答；涉及具体结论时在句末"
+                        "标注对应的 [1]、[2] 来源。如果材料不足，明确指出缺少什么。"
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"问题：{question.strip()}\n\n"
+                        "选中文献材料：\n\n" + "\n\n".join(source_blocks)
+                    )
+                ),
+            ]
+        )
+        content = response.content
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        answer = str(content).strip()
+        if not answer:
+            return {**fallback, "mode": "extractive"}
+        return {
+            "question": question.strip(),
+            "answer": answer,
+            "citations": citations,
+            "mode": "model",
         }
 
     @staticmethod

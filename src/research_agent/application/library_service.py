@@ -1,0 +1,889 @@
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import UTC, datetime
+from difflib import SequenceMatcher
+from typing import Any, Literal
+
+from research_agent.application.paper_ids import (
+    canonical_paper_key,
+    normalize_doi,
+    normalize_paper_id,
+    normalize_title,
+)
+from research_agent.application.ports import ResearchRepositoryPort
+from research_agent.domain.models import (
+    LibraryAttachment,
+    LibraryCollection,
+    LibraryNote,
+    LibraryPaper,
+    ProjectPaper,
+)
+
+
+ProjectPaperStatus = Literal["candidate", "included", "excluded", "uncertain"]
+MAX_COLLECTION_DEPTH = 3
+
+
+class LibraryService:
+    """Long-lived paper library layered over project-scoped research artifacts."""
+
+    def __init__(self, repository: ResearchRepositoryPort):
+        self.repository = repository
+
+    @staticmethod
+    def _clean_tags(tags: list[str] | None) -> list[str]:
+        return sorted({str(tag).strip() for tag in tags or [] if str(tag).strip()})
+
+    def _find_existing(self, payload: dict[str, Any]) -> LibraryPaper | None:
+        key = canonical_paper_key(
+            doi=payload.get("doi"),
+            paper_id=payload.get("paper_id"),
+            title=payload.get("title"),
+            year=payload.get("year"),
+        )
+        exact = self.repository.get_library_paper_by_key(key)
+        if exact is not None:
+            return exact
+
+        doi = normalize_doi(payload.get("doi"))
+        paper_id = normalize_paper_id(payload.get("paper_id"))
+        title = normalize_title(payload.get("title"))
+        year = payload.get("year")
+        for paper in self.repository.list_library_papers(
+            saved_only=False,
+            include_archived=True,
+            limit=500,
+        ):
+            if doi and normalize_doi(paper.doi) == doi:
+                return paper
+            if paper_id and normalize_paper_id(paper.paper_id) == paper_id:
+                return paper
+            if title and normalize_title(paper.title) == title and paper.year == year:
+                return paper
+        return None
+
+    def upsert_paper(
+        self,
+        payload: dict[str, Any],
+        *,
+        saved: bool = True,
+        tags: list[str] | None = None,
+    ) -> LibraryPaper:
+        title = str(payload.get("title") or "").strip()
+        doi = normalize_doi(payload.get("doi"))
+        paper_id = normalize_paper_id(payload.get("paper_id"))
+        if not title and not doi and not paper_id:
+            raise ValueError("Library paper requires a title, DOI, or paper_id")
+        if not title:
+            title = doi or paper_id
+
+        existing = self._find_existing({**payload, "title": title})
+        now = datetime.now(UTC)
+        incoming_authors = [
+            str(author).strip() for author in payload.get("authors") or [] if str(author).strip()
+        ]
+        incoming_abstract = str(payload.get("abstract") or "").strip()
+        incoming_tags = self._clean_tags(tags or payload.get("tags"))
+
+        if existing is None:
+            paper = LibraryPaper(
+                library_id=f"LP-{uuid.uuid4().hex[:12]}",
+                paper_id=paper_id,
+                title=title,
+                authors=incoming_authors,
+                year=payload.get("year"),
+                abstract=incoming_abstract,
+                doi=doi,
+                url=payload.get("url") or None,
+                source=str(payload.get("source") or "user"),
+                tags=incoming_tags,
+                starred=bool(payload.get("starred", False)),
+                saved=saved,
+            )
+        else:
+            paper = existing.model_copy(deep=True)
+            paper.paper_id = paper.paper_id or paper_id
+            if len(title) > len(paper.title):
+                paper.title = title
+            if len(incoming_authors) > len(paper.authors):
+                paper.authors = incoming_authors
+            paper.year = paper.year or payload.get("year")
+            if len(incoming_abstract) > len(paper.abstract):
+                paper.abstract = incoming_abstract
+            paper.doi = paper.doi or doi
+            paper.url = paper.url or payload.get("url") or None
+            if paper.source == "user" and payload.get("source"):
+                paper.source = str(payload["source"])
+            paper.tags = self._clean_tags([*paper.tags, *incoming_tags])
+            paper.saved = paper.saved or saved
+            if saved:
+                paper.archived_at = None
+            if "starred" in payload:
+                paper.starred = bool(payload["starred"])
+            paper.updated_at = now
+
+        key = canonical_paper_key(
+            doi=paper.doi,
+            paper_id=paper.paper_id,
+            title=paper.title,
+            year=paper.year,
+        )
+        return self.repository.save_library_paper(paper, key)
+
+    def add_project_paper(
+        self,
+        project_id: str,
+        payload: dict[str, Any],
+        *,
+        status: ProjectPaperStatus = "candidate",
+        reason: str = "",
+        saved: bool = True,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        paper = self.upsert_paper(payload, saved=saved, tags=tags)
+        now = datetime.now(UTC)
+        relation = ProjectPaper(
+            project_id=project_id,
+            library_id=paper.library_id,
+            source_paper_id=normalize_paper_id(payload.get("paper_id")) or paper.paper_id,
+            status=status,
+            reason=reason,
+            updated_at=now,
+        )
+        relation = self.repository.link_project_paper(relation)
+        return {
+            "paper": paper.model_dump(mode="json"),
+            "relation": relation.model_dump(mode="json"),
+        }
+
+    def update_paper(self, library_id: str, changes: dict[str, Any]) -> LibraryPaper:
+        paper = self.repository.get_library_paper(library_id)
+        allowed = {
+            "paper_id",
+            "title",
+            "authors",
+            "year",
+            "abstract",
+            "doi",
+            "url",
+            "source",
+            "tags",
+            "starred",
+            "saved",
+        }
+        unexpected = sorted(set(changes) - allowed)
+        if unexpected:
+            raise ValueError("Unsupported library fields: " + ", ".join(unexpected))
+        payload = paper.model_dump(mode="json")
+        payload.update(changes)
+        payload["tags"] = self._clean_tags(payload.get("tags"))
+        payload["authors"] = [
+            str(author).strip()
+            for author in payload.get("authors") or []
+            if str(author).strip()
+        ]
+        payload["title"] = str(payload.get("title") or "").strip()
+        payload["doi"] = normalize_doi(payload.get("doi"))
+        payload["paper_id"] = normalize_paper_id(payload.get("paper_id"))
+        if not payload["title"] and not payload["doi"] and not payload["paper_id"]:
+            raise ValueError("Library paper requires a title, DOI, or paper_id")
+        if not payload["title"]:
+            payload["title"] = payload["doi"] or payload["paper_id"]
+        payload["library_id"] = library_id
+        updated = LibraryPaper.model_validate(payload)
+        updated.updated_at = datetime.now(UTC)
+        if updated.saved:
+            updated.archived_at = None
+        key = canonical_paper_key(
+            doi=updated.doi,
+            paper_id=updated.paper_id,
+            title=updated.title,
+            year=updated.year,
+        )
+        return self.repository.save_library_paper(updated, key)
+
+    def _paper_evidence(self, paper: LibraryPaper) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        target_ids = {
+            normalize_paper_id(paper.paper_id),
+            normalize_doi(paper.doi),
+        } - {""}
+        for relation in self.repository.list_library_paper_projects(paper.library_id):
+            for artifact in self.repository.list_artifacts(relation.project_id, "PaperCard"):
+                payload = artifact.payload
+                artifact_ids = {
+                    normalize_paper_id(payload.get("paper_id")),
+                    normalize_doi(payload.get("doi")),
+                } - {""}
+                title_match = normalize_title(payload.get("title")) == normalize_title(paper.title)
+                if target_ids.isdisjoint(artifact_ids) and not title_match:
+                    continue
+                evidence.append(
+                    {
+                        "project_id": relation.project_id,
+                        "artifact_id": artifact.artifact_id,
+                        "research_question": payload.get("research_question", ""),
+                        "methods": payload.get("methods", []),
+                        "datasets": payload.get("datasets", []),
+                        "findings": payload.get("findings", []),
+                        "limitations": payload.get("limitations", []),
+                    }
+                )
+        return evidence
+
+    def get_paper(self, library_id: str) -> dict[str, Any]:
+        paper = self.repository.get_library_paper(library_id)
+        projects = []
+        for relation in self.repository.list_library_paper_projects(library_id):
+            project = self.repository.get_project(relation.project_id)
+            projects.append(
+                {
+                    "relation": relation.model_dump(mode="json"),
+                    "project": project.model_dump(mode="json"),
+                }
+            )
+        return {
+            "paper": paper.model_dump(mode="json"),
+            "projects": projects,
+            "collection_ids": self.repository.list_paper_collection_ids(library_id),
+            "notes": [
+                note.model_dump(mode="json")
+                for note in self.repository.list_library_notes(library_id)
+            ],
+            "attachments": [
+                attachment.model_dump(mode="json")
+                for attachment in self.repository.list_library_attachments(library_id)
+            ],
+            "evidence": self._paper_evidence(paper),
+        }
+
+    def list_papers(
+        self,
+        query: str = "",
+        limit: int = 100,
+        *,
+        view: str = "all",
+        collection_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        include_archived = view == "trash"
+        papers = self.repository.list_library_papers(
+            query=query,
+            include_archived=include_archived,
+            limit=500,
+        )
+        if view == "trash":
+            papers = [paper for paper in papers if paper.archived_at is not None]
+        elif view == "starred":
+            papers = [paper for paper in papers if paper.starred]
+        elif view == "unfiled":
+            papers = [
+                paper
+                for paper in papers
+                if not self.repository.list_paper_collection_ids(paper.library_id)
+            ]
+        if collection_id:
+            member_ids = set(self.repository.list_collection_paper_ids(collection_id))
+            papers = [paper for paper in papers if paper.library_id in member_ids]
+        papers = papers[: max(1, min(int(limit), 500))]
+        result = []
+        for paper in papers:
+            relations = self.repository.list_library_paper_projects(paper.library_id)
+            result.append(
+                {
+                    **paper.model_dump(mode="json"),
+                    "project_count": len(relations),
+                    "project_statuses": sorted({relation.status for relation in relations}),
+                    "collection_ids": self.repository.list_paper_collection_ids(
+                        paper.library_id
+                    ),
+                    "note_count": len(self.repository.list_library_notes(paper.library_id)),
+                    "attachment_count": len(
+                        self.repository.list_library_attachments(paper.library_id)
+                    ),
+                }
+            )
+        return result
+
+    def library_overview(self) -> dict[str, Any]:
+        active = self.repository.list_library_papers(limit=500)
+        all_papers = self.repository.list_library_papers(
+            saved_only=True,
+            include_archived=True,
+            limit=500,
+        )
+        collections = self.repository.list_library_collections()
+        return {
+            "counts": {
+                "all": len(active),
+                "starred": sum(paper.starred for paper in active),
+                "unfiled": sum(
+                    not self.repository.list_paper_collection_ids(paper.library_id)
+                    for paper in active
+                ),
+                "trash": sum(paper.archived_at is not None for paper in all_papers),
+            },
+            "collections": [
+                {
+                    **collection.model_dump(mode="json"),
+                    "paper_count": len(
+                        self.repository.list_collection_paper_ids(collection.collection_id)
+                    ),
+                }
+                for collection in collections
+            ],
+        }
+
+    def create_collection(
+        self, name: str, parent_id: str | None = None
+    ) -> LibraryCollection:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Collection name is required")
+        collections = self.repository.list_library_collections()
+        by_id = {item.collection_id: item for item in collections}
+        if parent_id:
+            if parent_id not in by_id:
+                raise ValueError("Parent collection does not exist")
+            if self._collection_depth(parent_id, by_id) >= MAX_COLLECTION_DEPTH:
+                raise ValueError("Collections support at most three levels")
+        collection = LibraryCollection(
+            collection_id=f"LC-{uuid.uuid4().hex[:12]}",
+            name=clean_name,
+            parent_id=parent_id,
+        )
+        return self.repository.create_library_collection(collection)
+
+    @staticmethod
+    def _collection_depth(
+        collection_id: str,
+        by_id: dict[str, LibraryCollection],
+    ) -> int:
+        depth = 1
+        current = by_id[collection_id]
+        visited = {collection_id}
+        while current.parent_id:
+            if current.parent_id in visited:
+                raise ValueError("Collection tree contains a cycle")
+            parent = by_id.get(current.parent_id)
+            if parent is None:
+                break
+            visited.add(parent.collection_id)
+            depth += 1
+            current = parent
+        return depth
+
+    @staticmethod
+    def _collection_subtree_height(
+        collection_id: str,
+        collections: list[LibraryCollection],
+    ) -> int:
+        children: dict[str, list[str]] = {}
+        for item in collections:
+            if item.parent_id:
+                children.setdefault(item.parent_id, []).append(item.collection_id)
+
+        def height(node_id: str, path: set[str]) -> int:
+            if node_id in path:
+                raise ValueError("Collection tree contains a cycle")
+            descendants = children.get(node_id, [])
+            if not descendants:
+                return 1
+            next_path = {*path, node_id}
+            return 1 + max(height(child_id, next_path) for child_id in descendants)
+
+        return height(collection_id, set())
+
+    def update_collection(
+        self,
+        collection_id: str,
+        *,
+        name: str,
+        parent_id: str | None = None,
+    ) -> LibraryCollection:
+        collections = self.repository.list_library_collections()
+        by_id = {item.collection_id: item for item in collections}
+        current = by_id.get(collection_id)
+        if current is None:
+            raise ValueError("Collection does not exist")
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Collection name is required")
+        if parent_id == collection_id:
+            raise ValueError("A collection cannot contain itself")
+        if parent_id and parent_id not in by_id:
+            raise ValueError("Parent collection does not exist")
+        ancestor_id = parent_id
+        visited: set[str] = set()
+        while ancestor_id:
+            if ancestor_id == collection_id:
+                raise ValueError("A collection cannot be moved below its descendant")
+            if ancestor_id in visited:
+                raise ValueError("Collection tree contains a cycle")
+            visited.add(ancestor_id)
+            ancestor = by_id.get(ancestor_id)
+            ancestor_id = ancestor.parent_id if ancestor else None
+        new_depth = self._collection_depth(parent_id, by_id) + 1 if parent_id else 1
+        subtree_height = self._collection_subtree_height(collection_id, collections)
+        if new_depth + subtree_height - 1 > MAX_COLLECTION_DEPTH:
+            raise ValueError("Collections support at most three levels")
+        current.name = clean_name
+        current.parent_id = parent_id
+        current.updated_at = datetime.now(UTC)
+        return self.repository.update_library_collection(current)
+
+    def add_note(
+        self,
+        library_id: str,
+        content: str,
+        project_id: str | None = None,
+    ) -> LibraryNote:
+        clean_content = content.strip()
+        if not clean_content:
+            raise ValueError("Note content is required")
+        return self.repository.save_library_note(
+            LibraryNote(
+                note_id=f"LN-{uuid.uuid4().hex[:12]}",
+                library_id=library_id,
+                content=clean_content,
+                project_id=project_id,
+            )
+        )
+
+    def update_note(self, note_id: str, library_id: str, content: str) -> LibraryNote:
+        note = next(
+            item
+            for item in self.repository.list_library_notes(library_id)
+            if item.note_id == note_id
+        )
+        clean_content = content.strip()
+        if not clean_content:
+            raise ValueError("Note content is required")
+        note.content = clean_content
+        note.updated_at = datetime.now(UTC)
+        return self.repository.save_library_note(note)
+
+    def add_attachment(
+        self,
+        library_id: str,
+        *,
+        name: str,
+        url: str,
+        media_type: str = "application/pdf",
+    ) -> LibraryAttachment:
+        clean_name = name.strip()
+        clean_url = url.strip()
+        if not clean_name or not clean_url:
+            raise ValueError("Attachment name and URL are required")
+        status = "ready" if clean_url.casefold().startswith("file:") else "linked"
+        return self.repository.save_library_attachment(
+            LibraryAttachment(
+                attachment_id=f"LA-{uuid.uuid4().hex[:12]}",
+                library_id=library_id,
+                name=clean_name,
+                url=clean_url,
+                media_type=media_type.strip() or "application/pdf",
+                full_text_status=status,
+            )
+        )
+
+    def bulk_update(
+        self,
+        library_ids: list[str],
+        action: str,
+        value: Any = None,
+    ) -> list[str]:
+        ids = list(dict.fromkeys(library_ids))
+        if not ids:
+            raise ValueError("Select at least one paper")
+        for library_id in ids:
+            if action == "archive":
+                self.repository.archive_library_paper(library_id)
+            elif action == "restore":
+                self.repository.restore_library_paper(library_id)
+            elif action == "delete":
+                self.repository.permanently_delete_library_paper(library_id)
+            elif action in {"star", "unstar"}:
+                self.update_paper(library_id, {"starred": action == "star"})
+            elif action in {"add_tags", "remove_tags"}:
+                paper = self.repository.get_library_paper(library_id)
+                tags = self._clean_tags(value if isinstance(value, list) else [])
+                merged = (
+                    self._clean_tags([*paper.tags, *tags])
+                    if action == "add_tags"
+                    else [tag for tag in paper.tags if tag not in set(tags)]
+                )
+                self.update_paper(library_id, {"tags": merged})
+            elif action == "add_collection":
+                self.repository.add_paper_to_collection(str(value), library_id)
+            elif action == "remove_collection":
+                self.repository.remove_paper_from_collection(str(value), library_id)
+            elif action == "add_project":
+                paper = self.repository.get_library_paper(library_id)
+                self.add_project_paper(
+                    str(value), paper.model_dump(mode="json"), saved=True
+                )
+            else:
+                raise ValueError(f"Unsupported bulk action: {action}")
+        return ids
+
+    def duplicate_groups(self) -> list[dict[str, Any]]:
+        papers = self.repository.list_library_papers(
+            saved_only=False,
+            include_archived=False,
+            limit=500,
+        )
+        groups: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for index, paper in enumerate(papers):
+            if paper.library_id in used:
+                continue
+            matches = [paper]
+            normalized = normalize_title(paper.title)
+            for other in papers[index + 1 :]:
+                if other.library_id in used:
+                    continue
+                score = SequenceMatcher(
+                    None, normalized, normalize_title(other.title)
+                ).ratio()
+                author_overlap = bool(set(paper.authors) & set(other.authors))
+                year_close = not paper.year or not other.year or abs(paper.year - other.year) <= 1
+                if score >= 0.92 and year_close and (author_overlap or score >= 0.97):
+                    matches.append(other)
+            if len(matches) > 1:
+                used.update(item.library_id for item in matches)
+                groups.append(
+                    {
+                        "score": round(
+                            min(
+                                SequenceMatcher(
+                                    None,
+                                    normalized,
+                                    normalize_title(item.title),
+                                ).ratio()
+                                for item in matches[1:]
+                            ),
+                            3,
+                        ),
+                        "papers": [item.model_dump(mode="json") for item in matches],
+                    }
+                )
+        return groups
+
+    def merge_papers(self, primary_id: str, duplicate_id: str) -> LibraryPaper:
+        primary = self.repository.get_library_paper(primary_id).model_copy(deep=True)
+        duplicate = self.repository.get_library_paper(duplicate_id)
+        if len(duplicate.title) > len(primary.title):
+            primary.title = duplicate.title
+        if len(duplicate.authors) > len(primary.authors):
+            primary.authors = duplicate.authors
+        if len(duplicate.abstract) > len(primary.abstract):
+            primary.abstract = duplicate.abstract
+        primary.paper_id = primary.paper_id or duplicate.paper_id
+        primary.doi = primary.doi or duplicate.doi
+        primary.url = primary.url or duplicate.url
+        primary.year = primary.year or duplicate.year
+        primary.tags = self._clean_tags([*primary.tags, *duplicate.tags])
+        primary.starred = primary.starred or duplicate.starred
+        primary.saved = primary.saved or duplicate.saved
+        primary.archived_at = None
+        primary.updated_at = datetime.now(UTC)
+        key = canonical_paper_key(
+            doi=primary.doi,
+            paper_id=primary.paper_id,
+            title=primary.title,
+            year=primary.year,
+        )
+        return self.repository.merge_library_papers(primary, duplicate_id, key)
+
+    def compare_papers(self, library_ids: list[str]) -> dict[str, Any]:
+        if len(library_ids) < 2 or len(library_ids) > 8:
+            raise ValueError("Compare between 2 and 8 papers")
+        rows = []
+        for library_id in library_ids:
+            detail = self.get_paper(library_id)
+            evidence = detail["evidence"]
+            rows.append(
+                {
+                    "paper": detail["paper"],
+                    "methods": sorted(
+                        {method for card in evidence for method in card.get("methods", [])}
+                    ),
+                    "datasets": sorted(
+                        {dataset for card in evidence for dataset in card.get("datasets", [])}
+                    ),
+                    "findings": [
+                        finding
+                        for card in evidence
+                        for finding in card.get("findings", [])
+                    ],
+                    "limitations": sorted(
+                        {
+                            limitation
+                            for card in evidence
+                            for limitation in card.get("limitations", [])
+                        }
+                    ),
+                    "notes": detail["notes"],
+                }
+            )
+        return {"rows": rows}
+
+    def answer_library_question(
+        self, library_ids: list[str], question: str
+    ) -> dict[str, Any]:
+        clean_question = question.strip()
+        if not clean_question:
+            raise ValueError("Question is required")
+        comparison = self.compare_papers(library_ids)
+        cited: list[dict[str, Any]] = []
+        snippets: list[str] = []
+        keywords = {
+            token
+            for token in re.findall(r"[\w\u4e00-\u9fff]+", clean_question.casefold())
+            if len(token) > 1
+        }
+        for row in comparison["rows"]:
+            paper = row["paper"]
+            candidates = [paper.get("abstract", "")]
+            candidates.extend(note.get("content", "") for note in row["notes"])
+            candidates.extend(
+                finding.get("claim", "") for finding in row["findings"]
+            )
+            ranked = sorted(
+                (text.strip() for text in candidates if text and text.strip()),
+                key=lambda text: sum(token in text.casefold() for token in keywords),
+                reverse=True,
+            )
+            if ranked:
+                excerpt = ranked[0]
+                if len(excerpt) > 500:
+                    excerpt = excerpt[:497].rstrip() + "…"
+                snippets.append(f"《{paper['title']}》：{excerpt}")
+                cited.append(
+                    {"library_id": paper["library_id"], "title": paper["title"]}
+                )
+        answer = "\n\n".join(snippets) or "选中文献中暂时没有可用于回答的摘要、笔记或证据。"
+        return {"question": clean_question, "answer": answer, "citations": cited}
+
+    def list_project_papers(self, project_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "relation": relation.model_dump(mode="json"),
+                "paper": paper.model_dump(mode="json"),
+            }
+            for relation, paper in self.repository.list_project_papers(project_id)
+        ]
+
+    @staticmethod
+    def _candidate_id(candidate: dict[str, Any]) -> str:
+        return normalize_paper_id(candidate.get("paper_id")) or normalize_doi(
+            candidate.get("doi")
+        )
+
+    def sync_project(self, project_id: str) -> list[dict[str, Any]]:
+        """Incrementally index legacy project artifacts without rewriting history."""
+        artifacts = self.repository.list_artifacts(project_id)
+        candidates: dict[str, dict[str, Any]] = {}
+        statuses: dict[str, ProjectPaperStatus] = {}
+        reasons: dict[str, str] = {}
+        saved_ids: set[str] = set()
+
+        for artifact in artifacts:
+            if artifact.kind in {
+                "SearchReport",
+                "SupplementalSearchReport",
+                "CandidateSetSnapshot",
+            }:
+                for candidate in artifact.payload.get("candidates", []):
+                    if not isinstance(candidate, dict):
+                        continue
+                    identity = self._candidate_id(candidate) or canonical_paper_key(
+                        title=candidate.get("title"), year=candidate.get("year")
+                    )
+                    previous = candidates.get(identity, {})
+                    if sum(bool(value) for value in candidate.values()) >= sum(
+                        bool(value) for value in previous.values()
+                    ):
+                        candidates[identity] = candidate
+                if artifact.kind == "CandidateSetSnapshot":
+                    for paper_id in artifact.payload.get("agent_included_paper_ids", []):
+                        statuses[normalize_paper_id(paper_id)] = "included"
+                    for paper_id in artifact.payload.get("agent_excluded_paper_ids", []):
+                        statuses[normalize_paper_id(paper_id)] = "excluded"
+                    for paper_id in artifact.payload.get("agent_uncertain_paper_ids", []):
+                        statuses[normalize_paper_id(paper_id)] = "uncertain"
+                    reasons.update(
+                        {
+                            normalize_paper_id(key): str(value)
+                            for key, value in artifact.payload.get(
+                                "agent_screening_reasons", {}
+                            ).items()
+                        }
+                    )
+            elif artifact.kind == "ScreeningDecision":
+                for paper_id in artifact.payload.get("included_paper_ids", []):
+                    normalized_id = normalize_paper_id(paper_id)
+                    statuses[normalized_id] = "included"
+                    saved_ids.add(normalized_id)
+                for paper_id in artifact.payload.get("excluded_paper_ids", []):
+                    statuses[normalize_paper_id(paper_id)] = "excluded"
+            elif artifact.kind == "PaperCard":
+                paper_id = normalize_paper_id(artifact.payload.get("paper_id"))
+                if paper_id:
+                    statuses[paper_id] = "included"
+                    saved_ids.add(paper_id)
+                    existing = candidates.get(paper_id, {})
+                    candidates[paper_id] = {
+                        **artifact.payload,
+                        **existing,
+                        "paper_id": paper_id,
+                        "source": existing.get("source") or "project-paper-card",
+                    }
+
+        for identity, candidate in candidates.items():
+            paper_id = self._candidate_id(candidate) or identity
+            status = statuses.get(paper_id, "candidate")
+            self.add_project_paper(
+                project_id,
+                candidate,
+                status=status,
+                reason=reasons.get(paper_id, ""),
+                saved=paper_id in saved_ids,
+            )
+        return self.list_project_papers(project_id)
+
+    @staticmethod
+    def _parse_bibtex(content: str) -> list[dict[str, Any]]:
+        papers: list[dict[str, Any]] = []
+        entries: list[str] = []
+        for start in (match.start() for match in re.finditer(r"@\w+\s*\{", content)):
+            open_brace = content.find("{", start)
+            depth = 0
+            for index in range(open_brace, len(content)):
+                if content[index] == "{":
+                    depth += 1
+                elif content[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        entries.append(content[open_brace + 1 : index])
+                        break
+
+        for entry in entries:
+            _, separator, body = entry.partition(",")
+            if not separator:
+                continue
+            fields: dict[str, str] = {}
+            for field in re.finditer(
+                r"(?P<key>\w+)\s*=\s*(?:\{(?P<braced>.*?)\}|\"(?P<quoted>.*?)\")\s*,?",
+                body,
+                flags=re.DOTALL,
+            ):
+                fields[field.group("key").casefold()] = (
+                    field.group("braced") or field.group("quoted") or ""
+                ).strip()
+            title = fields.get("title", "")
+            if not title:
+                continue
+            year_match = re.search(r"\d{4}", fields.get("year", ""))
+            papers.append(
+                {
+                    "title": title,
+                    "authors": [
+                        author.strip()
+                        for author in fields.get("author", "").split(" and ")
+                        if author.strip()
+                    ],
+                    "year": int(year_match.group()) if year_match else None,
+                    "abstract": fields.get("abstract", ""),
+                    "doi": fields.get("doi", ""),
+                    "url": fields.get("url") or None,
+                    "source": "bibtex",
+                }
+            )
+        return papers
+
+    @staticmethod
+    def _parse_ris(content: str) -> list[dict[str, Any]]:
+        papers: list[dict[str, Any]] = []
+        for block in re.split(r"(?m)^ER\s*-.*$", content):
+            fields: dict[str, list[str]] = {}
+            for line in block.splitlines():
+                match = re.match(r"^([A-Z0-9]{2})\s*-\s*(.*)$", line.strip())
+                if match:
+                    fields.setdefault(match.group(1), []).append(match.group(2).strip())
+            title = next(iter(fields.get("TI") or fields.get("T1") or []), "")
+            if not title:
+                continue
+            year_value = next(iter(fields.get("PY") or fields.get("Y1") or []), "")
+            year_match = re.search(r"\d{4}", year_value)
+            papers.append(
+                {
+                    "title": title,
+                    "authors": fields.get("AU") or fields.get("A1") or [],
+                    "year": int(year_match.group()) if year_match else None,
+                    "abstract": next(iter(fields.get("AB") or []), ""),
+                    "doi": next(iter(fields.get("DO") or []), ""),
+                    "url": next(iter(fields.get("UR") or []), None),
+                    "source": "ris",
+                }
+            )
+        return papers
+
+    def import_records(
+        self,
+        content: str,
+        format_name: Literal["bibtex", "ris"],
+        tags: list[str] | None = None,
+    ) -> list[LibraryPaper]:
+        parser = self._parse_bibtex if format_name == "bibtex" else self._parse_ris
+        payloads = parser(content)
+        if not payloads:
+            raise ValueError(f"No valid {format_name.upper()} records found")
+        return [self.upsert_paper(payload, saved=True, tags=tags) for payload in payloads]
+
+    def export_records(
+        self,
+        format_name: Literal["bibtex", "ris"],
+        query: str = "",
+        library_ids: list[str] | None = None,
+    ) -> str:
+        papers = self.repository.list_library_papers(query=query, limit=500)
+        if library_ids:
+            selected_ids = set(library_ids)
+            papers = [paper for paper in papers if paper.library_id in selected_ids]
+        if format_name == "ris":
+            blocks = []
+            for paper in papers:
+                lines = ["TY  - JOUR", f"TI  - {paper.title}"]
+                lines.extend(f"AU  - {author}" for author in paper.authors)
+                if paper.year:
+                    lines.append(f"PY  - {paper.year}")
+                if paper.doi:
+                    lines.append(f"DO  - {paper.doi}")
+                if paper.url:
+                    lines.append(f"UR  - {paper.url}")
+                if paper.abstract:
+                    lines.append(f"AB  - {paper.abstract}")
+                lines.append("ER  -")
+                blocks.append("\n".join(lines))
+            return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+        entries = []
+        for index, paper in enumerate(papers, start=1):
+            key = re.sub(r"\W+", "", paper.authors[0] if paper.authors else "paper")
+            key = f"{key}{paper.year or ''}_{index}"
+            fields = [f"  title = {{{paper.title}}}"]
+            if paper.authors:
+                fields.append(f"  author = {{{' and '.join(paper.authors)}}}")
+            if paper.year:
+                fields.append(f"  year = {{{paper.year}}}")
+            if paper.doi:
+                fields.append(f"  doi = {{{paper.doi}}}")
+            if paper.url:
+                fields.append(f"  url = {{{paper.url}}}")
+            if paper.abstract:
+                fields.append(f"  abstract = {{{paper.abstract}}}")
+            entries.append(f"@article{{{key},\n" + ",\n".join(fields) + "\n}")
+        return "\n\n".join(entries) + ("\n" if entries else "")

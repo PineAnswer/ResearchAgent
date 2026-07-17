@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from research_agent.application.artifact_normalization import normalize_artifact_payload
+from research_agent.application.library_service import LibraryService
 from research_agent.application.paper_ids import normalize_paper_id, same_paper_id
 from research_agent.application.ports import ArtifactExporterPort, ResearchRepositoryPort
 from research_agent.domain.models import (
@@ -90,6 +91,7 @@ class ResearchService:
     ):
         self.repository = repository
         self.exporter = exporter
+        self.library = LibraryService(repository)
 
     def _export_snapshot(self, project_id: str) -> None:
         if self.exporter is not None:

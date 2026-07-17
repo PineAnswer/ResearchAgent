@@ -191,6 +191,161 @@ def test_api_deletes_project_records_and_exported_files(tmp_path, monkeypatch) -
     assert not output_dir.exists()
 
 
+def test_library_api_saves_project_paper_and_imports_bibtex(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = Settings(
+        model="openai:gpt-4.1-mini",
+        data_dir=tmp_path,
+        database_path=tmp_path / "agent.db",
+        filesystem_root=tmp_path / "filesystem",
+        enable_fallback=True,
+    )
+    app = create_app(settings)
+    project = app.state.supervisor.service.create_project("library", "question")
+
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            saved = await client.post(
+                f"/api/projects/{project.project_id}/library",
+                json={
+                    "paper_id": "W10",
+                    "title": "Saved candidate",
+                    "doi": "10.1000/saved",
+                    "source": "OpenAlex",
+                },
+            )
+            imported = await client.post(
+                "/api/library/import",
+                json={
+                    "format": "bibtex",
+                    "content": "@article{two, title={Imported paper}, year={2023}}",
+                    "tags": ["imported"],
+                },
+            )
+            library = await client.get("/api/library")
+            project_library = await client.get(
+                f"/api/projects/{project.project_id}/library"
+            )
+            exported = await client.get("/api/library/export?format=ris")
+            return saved, imported, library, project_library, exported
+
+    saved, imported, library, project_library, exported = asyncio.run(exercise_api())
+
+    assert saved.status_code == 200
+    assert saved.json()["data"]["paper"]["saved"] is True
+    assert imported.status_code == 200
+    assert len(library.json()["data"]) == 2
+    assert len(project_library.json()["data"]) == 1
+    assert exported.status_code == 200
+    assert "TI  - Saved candidate" in exported.text
+
+
+def test_library_management_api_supports_organizing_notes_and_compare(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = Settings(
+        model="openai:gpt-4.1-mini",
+        data_dir=tmp_path,
+        database_path=tmp_path / "agent.db",
+        filesystem_root=tmp_path / "filesystem",
+        enable_fallback=True,
+    )
+    app = create_app(settings)
+
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.post(
+                "/api/library/papers",
+                json={"title": "First study", "abstract": "Traceability improved."},
+            )
+            second = await client.post(
+                "/api/library/papers",
+                json={"title": "Second study", "abstract": "A baseline result."},
+            )
+            first_id = first.json()["data"]["library_id"]
+            second_id = second.json()["data"]["library_id"]
+            collection = await client.post(
+                "/api/library/collections", json={"name": "Thesis"}
+            )
+            collection_id = collection.json()["data"]["collection_id"]
+            bulk = await client.post(
+                "/api/library/bulk",
+                json={
+                    "library_ids": [first_id, second_id],
+                    "action": "add_collection",
+                    "value": collection_id,
+                },
+            )
+            note = await client.post(
+                f"/api/library/papers/{first_id}/notes",
+                json={"content": "Reusable note"},
+            )
+            attachment = await client.post(
+                f"/api/library/papers/{first_id}/attachments",
+                json={"name": "PDF", "url": "https://example.test/paper.pdf"},
+            )
+            uploaded = await client.post(
+                f"/api/library/papers/{first_id}/attachments/upload",
+                params={"filename": "local.pdf", "media_type": "application/pdf"},
+                content=b"%PDF-1.4 test content",
+                headers={"Content-Type": "application/pdf"},
+            )
+            uploaded_id = uploaded.json()["data"]["attachment_id"]
+            downloaded = await client.get(
+                f"/api/library/attachments/{uploaded_id}/content"
+            )
+            detail = await client.get(f"/api/library/papers/{first_id}")
+            comparison = await client.post(
+                "/api/library/compare",
+                json={"library_ids": [first_id, second_id]},
+            )
+            answer = await client.post(
+                "/api/library/assistant",
+                json={
+                    "library_ids": [first_id, second_id],
+                    "question": "Which paper mentions traceability?",
+                },
+            )
+            overview = await client.get("/api/library/overview")
+            return (
+                bulk,
+                note,
+                attachment,
+                uploaded,
+                downloaded,
+                detail,
+                comparison,
+                answer,
+                overview,
+            )
+
+    (
+        bulk,
+        note,
+        attachment,
+        uploaded,
+        downloaded,
+        detail,
+        comparison,
+        answer,
+        overview,
+    ) = asyncio.run(exercise_api())
+
+    assert bulk.status_code == 200
+    assert note.status_code == 200
+    assert attachment.status_code == 200
+    assert uploaded.status_code == 200
+    assert downloaded.content == b"%PDF-1.4 test content"
+    assert detail.json()["data"]["notes"][0]["content"] == "Reusable note"
+    assert len(detail.json()["data"]["attachments"]) == 2
+    assert len(comparison.json()["data"]["rows"]) == 2
+    assert "Traceability improved" in answer.json()["data"]["answer"]
+    assert overview.json()["data"]["collections"][0]["paper_count"] == 2
+
+
 def test_search_review_api_can_show_accept_and_continue_project(
     tmp_path, monkeypatch
 ) -> None:

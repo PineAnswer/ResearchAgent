@@ -273,7 +273,41 @@ def test_missing_structured_response_becomes_recoverable_result() -> None:
     pending = state.pending_result("thread-a", "paper-reader")
     assert pending["_subagent_error"] == "structured_response_missing"
     assert pending["_paper_id"] == "https://openalex.org/W9"
+    assert pending["_diagnostics"]["raw_provider_response_captured"] is False
     assert result["structured_response"] == pending
+
+
+def test_missing_structured_response_preserves_invalid_tool_call_details() -> None:
+    state = ResearchRuntimeState()
+    message = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "SynthesisReport",
+                "args": '{"topic": "broken"',
+                "id": "bad-call",
+                "error": "invalid JSON",
+            }
+        ],
+        response_metadata={"finish_reason": "tool_calls"},
+    )
+    runnable = recording_runnable(
+        FakeStructuredAgent(None, messages=[message]),
+        "research-synthesizer",
+        state,
+    )
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="synthesize")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    pending = state.pending_result("thread-a", "research-synthesizer")
+    diagnostics = pending["_diagnostics"]
+    assert diagnostics["expected_schema_tool"] == "SynthesisReport"
+    assert diagnostics["finish_reason"] == "tool_calls"
+    assert diagnostics["invalid_tool_calls"][0]["args"] == '{"topic": "broken"'
+    assert diagnostics["invalid_tool_calls"][0]["error"] == "invalid JSON"
 
 
 def test_missing_structured_response_recovers_schema_tool_call_payload() -> None:

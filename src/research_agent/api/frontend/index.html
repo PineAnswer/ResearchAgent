@@ -91,6 +91,10 @@
             <i data-lucide="file-plus-2" aria-hidden="true"></i>
             <span class="sidebar-label">新建研究</span>
           </button>
+          <button id="libraryToggle" class="secondary sidebar-library" type="button" title="打开文献库">
+            <i data-lucide="library" aria-hidden="true"></i>
+            <span class="sidebar-label">文献库</span>
+          </button>
         </div>
 
         <div class="sidebar-heading">
@@ -195,6 +199,126 @@
               </button>
             </div>
           </form>
+        </section>
+
+        <section id="libraryView" class="library-view" hidden>
+          <header class="workspace-heading library-heading">
+            <div>
+              <p class="eyebrow">Research library</p>
+              <h2>文献库</h2>
+              <p>统一保存论文元数据，并查看它们参与过的研究项目。</p>
+            </div>
+            <div class="library-export-actions">
+              <a class="secondary" href="/api/library/export?format=bibtex">导出 BibTeX</a>
+              <a class="secondary" href="/api/library/export?format=ris">导出 RIS</a>
+            </div>
+          </header>
+
+          <div class="library-toolbar">
+            <label class="search-field" for="librarySearch">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input id="librarySearch" type="search" placeholder="按标题、作者、DOI 或标签搜索" />
+            </label>
+            <button id="refreshLibrary" class="secondary" type="button">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              刷新
+            </button>
+          </div>
+
+          <details class="library-import">
+            <summary>导入 BibTeX / RIS</summary>
+            <div class="library-import-fields">
+              <label class="field" for="libraryImportFormat">
+                <span>格式</span>
+                <select id="libraryImportFormat">
+                  <option value="bibtex">BibTeX</option>
+                  <option value="ris">RIS</option>
+                </select>
+              </label>
+              <label class="field library-import-content" for="libraryImportContent">
+                <span>文献内容</span>
+                <textarea id="libraryImportContent" rows="7" placeholder="粘贴 BibTeX 或 RIS 内容"></textarea>
+              </label>
+              <label class="field" for="libraryImportTags">
+                <span>标签</span>
+                <input id="libraryImportTags" type="text" placeholder="逗号分隔，可选" />
+              </label>
+              <button id="importLibrary" class="primary" type="button">导入文献</button>
+            </div>
+          </details>
+
+          <div class="library-layout">
+            <aside class="library-navigator" aria-label="文献库导航">
+              <div class="library-nav-heading">
+                <span>智能视图</span>
+              </div>
+              <nav id="librarySmartViews" class="library-smart-views"></nav>
+              <div class="library-nav-heading library-collection-heading">
+                <span>文件夹</span>
+                <button id="newCollection" class="icon-button" type="button" aria-label="新建文件夹" title="新建文件夹">
+                  <i data-lucide="folder-plus" aria-hidden="true"></i>
+                </button>
+              </div>
+              <nav id="libraryCollections" class="library-collections"></nav>
+              <button id="findDuplicates" class="library-utility-button" type="button">
+                <i data-lucide="copy-check" aria-hidden="true"></i>
+                检查重复项
+              </button>
+            </aside>
+
+            <section class="library-results" aria-labelledby="libraryListTitle">
+              <div class="library-list-heading">
+                <h3 id="libraryListTitle">全部文献</h3>
+                <span id="libraryCount">0 篇</span>
+              </div>
+              <div id="libraryBulkBar" class="library-bulk-bar" hidden>
+                <strong id="librarySelectedCount">已选 0 篇</strong>
+                <select id="libraryBulkAction" aria-label="批量操作">
+                  <option value="">选择操作</option>
+                  <option value="star">标为重点</option>
+                  <option value="add_tags">添加标签</option>
+                  <option value="add_collection">加入文件夹</option>
+                  <option value="add_project">加入项目</option>
+                  <option value="export_bibtex">导出所选 BibTeX</option>
+                  <option value="export_ris">导出所选 RIS</option>
+                  <option value="archive">移入回收站</option>
+                  <option value="restore">恢复</option>
+                  <option value="delete">永久删除</option>
+                </select>
+                <button id="applyLibraryBulk" class="secondary" type="button">应用</button>
+                <button id="compareLibrarySelection" class="secondary" type="button">对照阅读</button>
+                <button id="clearLibrarySelection" class="quiet-button" type="button">清除选择</button>
+              </div>
+              <div id="libraryList" class="library-list" aria-live="polite"></div>
+            </section>
+            <aside id="libraryDetail" class="library-detail" aria-label="文献详情">
+              <div class="library-detail-empty">
+                <i data-lucide="book-open" aria-hidden="true"></i>
+                <p>选择一篇文献查看详情</p>
+              </div>
+            </aside>
+          </div>
+
+          <section id="libraryComparePanel" class="library-compare-panel" hidden>
+            <header>
+              <div>
+                <p class="eyebrow">Compare & ask</p>
+                <h3>文献对照与管理助手</h3>
+              </div>
+              <button id="closeLibraryCompare" class="icon-button bordered" type="button" aria-label="关闭对照视图">
+                <i data-lucide="x" aria-hidden="true"></i>
+              </button>
+            </header>
+            <div id="libraryCompareTable" class="library-compare-table"></div>
+            <form id="libraryAssistantForm" class="library-assistant-form">
+              <label class="field" for="libraryAssistantQuestion">
+                <span>向选中文献提问</span>
+                <textarea id="libraryAssistantQuestion" rows="3" placeholder="例如：这些研究使用了哪些方法？主要结论有什么差异？"></textarea>
+              </label>
+              <button class="primary" type="submit">整理回答</button>
+            </form>
+            <div id="libraryAssistantAnswer" class="library-assistant-answer" hidden></div>
+          </section>
         </section>
 
         <section id="projectView" class="project-view" hidden>

@@ -47,6 +47,45 @@ def _tool_name(serialized: dict[str, Any]) -> str:
     return "unknown-tool"
 
 
+def _message_diagnostics(response: Any) -> dict[str, Any]:
+    """Extract tool-call details that LLMResult serialization can omit."""
+    generations = getattr(response, "generations", [])
+    generation = generations[0][0] if generations and generations[0] else None
+    message = getattr(generation, "message", None)
+    generation_info = getattr(generation, "generation_info", None) or {}
+    response_metadata = (
+        getattr(message, "response_metadata", None) or {} if message is not None else {}
+    )
+    tool_calls = getattr(message, "tool_calls", None) or [] if message is not None else []
+    invalid_tool_calls = (
+        getattr(message, "invalid_tool_calls", None) or [] if message is not None else []
+    )
+    additional_kwargs = (
+        getattr(message, "additional_kwargs", None) or {} if message is not None else {}
+    )
+    finish_reason = response_metadata.get("finish_reason") or generation_info.get(
+        "finish_reason"
+    )
+    raw_provider_response = generation_info.get("raw_provider_response")
+    parse_status = "parsed_tool_calls" if tool_calls else "no_tool_calls"
+    if invalid_tool_calls:
+        parse_status = "invalid_tool_calls"
+    elif finish_reason == "tool_calls" and not tool_calls:
+        parse_status = "tool_call_finish_without_parsed_calls"
+    return {
+        "content": getattr(message, "content", None) if message is not None else None,
+        "tool_calls": tool_calls,
+        "invalid_tool_calls": invalid_tool_calls,
+        "additional_kwargs": additional_kwargs,
+        "response_metadata": response_metadata,
+        "generation_info": generation_info,
+        "finish_reason": finish_reason,
+        "parse_status": parse_status,
+        "raw_provider_response_captured": raw_provider_response is not None,
+        "raw_provider_response": raw_provider_response,
+    }
+
+
 class ResearchRunLogger(BaseCallbackHandler):
     """LangChain callback that prints progress and writes a complete run transcript."""
 
@@ -145,10 +184,12 @@ class ResearchRunLogger(BaseCallbackHandler):
         self.emit("llm.thinking", "LLM正在分析当前上下文")
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        diagnostics = _message_diagnostics(response)
         self.transcript(
             "llm.response",
             {
                 "response": response,
+                "message_diagnostics": diagnostics,
                 "run_id": kwargs.get("run_id"),
                 "parent_run_id": kwargs.get("parent_run_id"),
             },
@@ -168,6 +209,20 @@ class ResearchRunLogger(BaseCallbackHandler):
                 )
             else:
                 self.emit("llm.tool_choice", f"LLM决定调用：{names[0]}", tool_calls)
+            return
+        if diagnostics["invalid_tool_calls"]:
+            self.emit(
+                "llm.invalid_tool_calls",
+                "LLM返回了无法解析的工具调用",
+                diagnostics,
+            )
+            return
+        if diagnostics["parse_status"] == "tool_call_finish_without_parsed_calls":
+            self.emit(
+                "llm.tool_call_parse_gap",
+                "模型声明工具调用，但LangChain未解析出tool_calls",
+                diagnostics,
+            )
             return
         content = getattr(message, "content", "") if message is not None else ""
         if content:
