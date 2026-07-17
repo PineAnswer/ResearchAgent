@@ -77,6 +77,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             return (
                 await client.get("/"),
+                await client.get("/ui-assets/favicon.svg"),
                 await client.get("/ui-assets/styles.css"),
                 await client.get("/ui-assets/app.js"),
                 await client.get("/ui-assets/vendor/lucide.min.js"),
@@ -94,6 +95,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
 
     (
         index,
+        favicon,
         styles,
         script,
         lucide,
@@ -111,12 +113,21 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
 
     assert index.status_code == 200
     assert "文献研究工作台" in index.text
+    assert favicon.status_code == 200
+    assert "#245b48" in favicon.text
     assert "continueButtonLabel" in index.text
+    assert 'id="runVisualizer"' in index.text
+    assert 'id="runPhaseTitle"' in index.text
     assert "vendor/marked.umd.js" in index.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
+    assert "@keyframes run-orbit" in styles.text
+    assert ".stage-stepper.is-running" in styles.text
     assert script.status_code == 200
     assert "submitFeedback" in script.text
+    assert "deriveStepperState" in script.text
+    assert "startRunPolling" in script.text
+    assert "syncRunningSnapshot" in script.text
     assert "继续生成综述" in script.text
     assert "成果待补全" in script.text
     assert "写作待恢复" in script.text
