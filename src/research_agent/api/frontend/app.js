@@ -19,6 +19,89 @@ STAGE_LABELS.INCONCLUSIVE = "证据不足";
 STAGE_LABELS.OUTLINED = "提纲设计";
 STAGE_LABELS.NARRATED = "综述已生成";
 
+const RUN_PHASES = {
+  thinking: {
+    title: "正在理解研究问题",
+    detail: "分析研究目标、边界与下一步行动。",
+    icon: "brain",
+  },
+  searching: {
+    title: "正在检索研究文献",
+    detail: "组合检索词并比对候选论文。",
+    icon: "search",
+  },
+  reading: {
+    title: "正在精读入选论文",
+    detail: "读取方法、数据、发现与研究限制。",
+    icon: "book-open",
+  },
+  synthesizing: {
+    title: "正在综合证据",
+    detail: "连接跨论文发现并识别一致与冲突之处。",
+    icon: "network",
+  },
+  reviewing: {
+    title: "正在审查证据链",
+    detail: "核对结论是否由可追踪证据支持。",
+    icon: "shield-check",
+  },
+  outlining: {
+    title: "正在设计综述结构",
+    detail: "组织章节顺序、论证路径与引用范围。",
+    icon: "list-tree",
+  },
+  writing: {
+    title: "正在撰写文献综述",
+    detail: "依据提纲逐节整合正文与引用。",
+    icon: "pen-line",
+  },
+  verifying: {
+    title: "正在核查最终综述",
+    detail: "逐节检查事实、证据引用与结论边界。",
+    icon: "file-check-2",
+  },
+  done: {
+    title: "研究执行已完成",
+    detail: "研究产物已经保存，正在整理最终界面。",
+    icon: "check-circle-2",
+  },
+  stopped: {
+    title: "研究流程已停止",
+    detail: "系统正在保存停止原因与已有研究产物。",
+    icon: "circle-alert",
+  },
+};
+
+const STAGE_RUN_PHASES = {
+  CREATED: "searching",
+  SEARCHED: "searching",
+  SEARCH_REVIEW_PENDING: "reviewing",
+  SCREENED: "reading",
+  EXTRACTED: "synthesizing",
+  SYNTHESIZED: "reviewing",
+  REVIEW_PENDING: "reviewing",
+  REVIEWED: "outlining",
+  OUTLINED: "writing",
+  NARRATED: "verifying",
+  COMPLETED: "done",
+  INCONCLUSIVE: "stopped",
+};
+
+const ACTOR_LABELS = {
+  "literature-scout": "文献检索 Agent",
+  "human-search-review": "人工检索审核",
+  "research-supervisor": "研究调度器",
+  "paper-reader": "论文精读 Agent",
+  "research-synthesizer": "证据综合 Agent",
+  "evidence-reviewer": "证据审查 Agent",
+  "research-outliner": "提纲设计 Agent",
+  "narrative-writer": "综述写作 Agent",
+  "chief-editor": "综述主编 Agent",
+  "chief-editor-fallback": "综述主编恢复流程",
+  "fact-checker": "事实核查 Agent",
+  "workflow-recovery": "工作流恢复器",
+};
+
 const ARTIFACT_LABELS = {
   SearchReport: "检索结果",
   SupplementalSearchReport: "补充检索结果",
@@ -61,6 +144,16 @@ const state = {
   selectedLibraryIds: new Set(),
   libraryView: "all",
   libraryCollectionId: null,
+  runStartedAt: null,
+  runClockTimer: null,
+  runPollTimer: null,
+  runPollInFlight: false,
+  runKnownEvents: new Set(),
+  runKnownArtifacts: new Set(),
+  runSnapshotSignature: "",
+  runLastActivity: "",
+  runPhase: "thinking",
+  runSessionId: 0,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -133,7 +226,11 @@ const elements = {
   resultHighlights: byId("resultHighlights"),
   primaryOutcome: byId("primaryOutcome"),
   runPanel: byId("runPanel"),
+  runVisualizer: byId("runVisualizer"),
+  runPhaseIcon: byId("runPhaseIcon"),
+  runPhaseTitle: byId("runPhaseTitle"),
   runStatusText: byId("runStatusText"),
+  runElapsed: byId("runElapsed"),
   activityLog: byId("activityLog"),
   reviewPanel: byId("reviewPanel"),
   candidateCount: byId("candidateCount"),
@@ -373,6 +470,8 @@ function notify(message, isError = false) {
 
 function setBusy(busy) {
   state.busy = busy;
+  elements.runPanel.setAttribute("aria-busy", String(busy));
+  elements.stageStepper.classList.toggle("is-running", busy);
   [
     elements.refineReview,
     elements.acceptReview,
@@ -1472,20 +1571,105 @@ function stageIndex(stage) {
   return STAGES.findIndex(([key]) => key === stage);
 }
 
-function renderStepper(stage) {
+function orderedWorkflowEvents(events = []) {
+  return [...events].sort((left, right) => {
+    const leftId = Number(left?.event_id);
+    const rightId = Number(right?.event_id);
+    if (Number.isFinite(leftId) && Number.isFinite(rightId)) return leftId - rightId;
+    return String(left?.created_at || "").localeCompare(String(right?.created_at || ""));
+  });
+}
+
+function eventIdentity(event, index = 0) {
+  return event?.event_id != null
+    ? `event:${event.event_id}`
+    : `event:${event?.from_stage || ""}:${event?.to_stage || ""}:${event?.actor || ""}:${event?.created_at || index}`;
+}
+
+function artifactIdentity(artifact, index = 0) {
+  return artifact?.artifact_id != null
+    ? `artifact:${artifact.artifact_id}`
+    : `artifact:${artifact?.kind || ""}:${artifact?.created_at || index}`;
+}
+
+function deriveStepperState(stage, events = [], actualStage = stage) {
+  const ordered = orderedWorkflowEvents(events);
+  const latestEvent = ordered.at(-1) || null;
+  const stopEvent = [...ordered].reverse().find((event) => event.to_stage === "INCONCLUSIVE");
+  const terminal = stage === "INCONCLUSIVE";
+  const activeStage = terminal
+    ? stopEvent?.from_stage || latestEvent?.from_stage || "CREATED"
+    : stage;
+  const visited = new Set();
+
+  if (ordered.length) {
+    visited.add("CREATED");
+    ordered.forEach((event) => {
+      if (stageIndex(event.from_stage) >= 0) visited.add(event.from_stage);
+      if (stageIndex(event.to_stage) >= 0) visited.add(event.to_stage);
+    });
+  } else {
+    const current = stageIndex(activeStage);
+    for (let index = 0; index <= current; index += 1) {
+      visited.add(STAGES[index][0]);
+    }
+  }
+  if (stageIndex(activeStage) >= 0) visited.add(activeStage);
+
+  return {
+    activeStage,
+    terminal,
+    latestEvent,
+    visitedStages: [...visited],
+    aligned: !latestEvent || latestEvent.to_stage === actualStage,
+  };
+}
+
+function renderStepper(stage, events = [], actualStage = stage) {
   elements.stageStepper.replaceChildren();
-  const current = stageIndex(stage);
+  const progress = deriveStepperState(stage, events, actualStage);
+  const current = stageIndex(progress.activeStage);
+  const visited = new Set(progress.visitedStages);
+  const visitCounts = new Map();
+  orderedWorkflowEvents(events).forEach((event) => {
+    visitCounts.set(event.to_stage, (visitCounts.get(event.to_stage) || 0) + 1);
+  });
+  elements.stageStepper.classList.toggle("is-running", state.busy);
+  elements.stageStepper.classList.toggle("is-syncing", !progress.aligned);
+  elements.stageStepper.setAttribute(
+    "aria-label",
+    progress.aligned ? "研究进度" : "研究进度正在与事件记录同步",
+  );
   STAGES.forEach(([key, label], index) => {
     const item = document.createElement("li");
     item.className = "stage-step";
-    if (current >= 0 && index < current) item.classList.add("is-complete");
-    if (index === current) item.classList.add("is-current");
+    item.dataset.stage = key;
+    if (
+      index > 0
+      && visited.has(key)
+      && visited.has(STAGES[index - 1][0])
+    ) {
+      item.classList.add("has-complete-connector");
+    }
+    if (visited.has(key) && index !== current) {
+      item.classList.add(current >= 0 && index > current ? "is-revisited" : "is-complete");
+    }
+    if (index === current) {
+      item.classList.add("is-current");
+      item.setAttribute("aria-current", "step");
+      if (progress.terminal) item.classList.add("is-terminal");
+    }
+    const visits = visitCounts.get(key) || (key === "CREATED" ? 1 : 0);
+    if (visits > 1) item.title = `${label}，已到达 ${visits} 次`;
+    if (index === current && progress.terminal) {
+      item.title = `流程停止于${label}，项目状态为证据不足`;
+    }
     item.textContent = label;
     elements.stageStepper.append(item);
   });
 }
 
-function renderProjectHeader(project) {
+function renderProjectHeader(project, events = state.snapshot?.events || []) {
   state.project = project;
   state.projectId = project.project_id;
   showWorkspace("project");
@@ -1500,7 +1684,7 @@ function renderProjectHeader(project) {
   if (project.stage === "INCONCLUSIVE") {
     elements.stageBadge.classList.add("is-terminal");
   }
-  renderStepper(project.stage);
+  renderStepper(project.stage, events);
   renderProjectList();
   refreshIcons();
 }
@@ -2407,7 +2591,11 @@ function renderProjectSummary(snapshot) {
         : "旧流程提前结束了项目；点击下方按钮可复用现有证据补全最终综述。";
     elements.stageBadge.textContent = operationalRecovery ? "写作待恢复" : "成果待补全";
     elements.stageBadge.className = "stage-badge is-warning";
-    renderStepper(effectiveRecoveryStage(snapshot));
+    renderStepper(
+      effectiveRecoveryStage(snapshot),
+      snapshot?.events || [],
+      project.stage,
+    );
   }
   elements.nextActionTitle.textContent = title;
   elements.nextActionText.textContent = text;
@@ -2454,13 +2642,21 @@ function renderDetails(snapshot) {
     empty.textContent = "尚无状态变化";
     elements.eventTimeline.append(empty);
   } else {
-    events.forEach((event) => {
+    orderedWorkflowEvents(events).forEach((event) => {
       const item = document.createElement("li");
       item.className = "event-item";
+      const fromIndex = stageIndex(event.from_stage);
+      const toIndex = stageIndex(event.to_stage);
+      if (event.to_stage === "INCONCLUSIVE") item.classList.add("is-terminal");
+      if (fromIndex >= 0 && toIndex >= 0 && toIndex < fromIndex) {
+        item.classList.add("is-return");
+      }
       const transition = document.createElement("strong");
       transition.textContent = `${STAGE_LABELS[event.from_stage] || event.from_stage} 至 ${STAGE_LABELS[event.to_stage] || event.to_stage}`;
       const meta = document.createElement("span");
-      meta.textContent = `${event.actor} · ${formatDate(event.created_at)}`;
+      const actor = ACTOR_LABELS[event.actor] || event.actor;
+      const verdict = event.review_verdict ? ` · ${event.review_verdict}` : "";
+      meta.textContent = `${actor}${verdict} · ${formatDate(event.created_at)}`;
       item.append(transition, meta);
       elements.eventTimeline.append(item);
     });
@@ -2573,6 +2769,30 @@ function renderStagePanels(snapshot) {
   refreshIcons();
 }
 
+function snapshotSignature(snapshot) {
+  const artifacts = snapshot?.artifacts || [];
+  const events = snapshot?.events || [];
+  const latestArtifact = artifacts.at(-1);
+  const latestEvent = events.at(-1);
+  return [
+    snapshot?.project?.updated_at || "",
+    snapshot?.project?.stage || "",
+    artifacts.length,
+    latestArtifact?.artifact_id || "",
+    events.length,
+    latestEvent?.event_id || "",
+  ].join(":");
+}
+
+function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector = true } = {}) {
+  state.snapshot = snapshot;
+  renderProjectHeader(snapshot.project, snapshot.events || []);
+  renderProjectSummary(snapshot);
+  renderStagePanels(snapshot);
+  if (renderInspector) renderDetails(snapshot);
+  elements.runPanel.hidden = !keepRunPanel;
+}
+
 async function loadProject(projectId, quiet = false, force = false) {
   if (!projectId) return;
   if (state.busy && !force) {
@@ -2582,13 +2802,8 @@ async function loadProject(projectId, quiet = false, force = false) {
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
     const snapshot = payload.data;
-    state.snapshot = snapshot;
     await loadProjectLibrary(projectId);
-    renderProjectHeader(snapshot.project);
-    renderProjectSummary(snapshot);
-    renderStagePanels(snapshot);
-    renderDetails(snapshot);
-    elements.runPanel.hidden = true;
+    applyProjectSnapshot(snapshot);
     if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
       const reviewPayload = await api(
         `/api/projects/${encodeURIComponent(projectId)}/search-review`,
@@ -2878,9 +3093,12 @@ async function submitFeedback(action) {
       );
     } else if (action === "accept" && result.ready_to_continue) {
       elements.reviewPanel.hidden = true;
-      elements.runPanel.hidden = false;
-      elements.activityLog.replaceChildren();
-      addActivity("候选集已确认，正在直接进入论文精读");
+      beginRunSession({
+        stage: "SCREENED",
+        message: "候选集已确认，正在直接进入论文精读",
+        snapshot: state.snapshot,
+      });
+      startRunPolling();
       await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
         method: "POST",
         body: "{}",
@@ -2898,16 +3116,198 @@ async function submitFeedback(action) {
     notify(`提交失败：${error.message}`, true);
     await loadProject(state.projectId, true, true);
   } finally {
+    if (state.runStartedAt) finishRunSession();
+    elements.runPanel.hidden = true;
     setBusy(false);
   }
 }
 
-function addActivity(message) {
+function formatRunElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateRunClock() {
+  if (!state.runStartedAt) return;
+  elements.runElapsed.textContent = formatRunElapsed(Date.now() - state.runStartedAt);
+}
+
+function setRunPhase(phaseName, detail = "") {
+  const phase = RUN_PHASES[phaseName] || RUN_PHASES.thinking;
+  const changed = state.runPhase !== phaseName;
+  state.runPhase = phaseName;
+  elements.runVisualizer.dataset.phase = phaseName;
+  elements.runPhaseTitle.textContent = phase.title;
+  elements.runStatusText.textContent = detail || phase.detail;
+  elements.runPhaseIcon.replaceChildren(iconNode(phase.icon));
+  refreshIcons();
+  return changed;
+}
+
+function markCurrentActivityComplete() {
+  const current = elements.activityLog.querySelector("li.is-current");
+  if (!current) return;
+  current.classList.remove("is-current");
+  current.classList.add("is-complete");
+  const marker = current.querySelector(".activity-marker");
+  if (marker) marker.replaceChildren(iconNode("check"));
+}
+
+function addActivity(message, { updateStatus = true, kind = "progress" } = {}) {
+  if (!message) return;
+  if (message === state.runLastActivity) {
+    if (updateStatus) elements.runStatusText.textContent = message;
+    return;
+  }
+  markCurrentActivityComplete();
   const item = document.createElement("li");
-  item.textContent = message;
+  item.className = kind === "complete" ? "is-complete" : `is-current is-${kind}`;
+  const marker = document.createElement("span");
+  marker.className = "activity-marker";
+  marker.append(iconNode(
+    kind === "complete" ? "check" : kind === "error" ? "circle-alert" : "circle",
+  ));
+  const text = document.createElement("span");
+  text.className = "activity-text";
+  text.textContent = message;
+  item.append(marker, text);
   elements.activityLog.append(item);
+  while (elements.activityLog.children.length > 7) {
+    elements.activityLog.firstElementChild?.remove();
+  }
   elements.activityLog.scrollTop = elements.activityLog.scrollHeight;
-  elements.runStatusText.textContent = message;
+  state.runLastActivity = message;
+  if (updateStatus) elements.runStatusText.textContent = message;
+  refreshIcons();
+}
+
+function stopRunTimers() {
+  if (state.runClockTimer) window.clearInterval(state.runClockTimer);
+  if (state.runPollTimer) window.clearInterval(state.runPollTimer);
+  state.runClockTimer = null;
+  state.runPollTimer = null;
+}
+
+function beginRunSession({ stage = "CREATED", message = "", snapshot = null, phase = "" } = {}) {
+  stopRunTimers();
+  state.runSessionId += 1;
+  state.runStartedAt = Date.now();
+  state.runKnownEvents = new Set(
+    (snapshot?.events || []).map((event, index) => eventIdentity(event, index)),
+  );
+  state.runKnownArtifacts = new Set(
+    (snapshot?.artifacts || []).map((artifact, index) => artifactIdentity(artifact, index)),
+  );
+  state.runSnapshotSignature = snapshot ? snapshotSignature(snapshot) : "";
+  state.runLastActivity = "";
+  elements.activityLog.replaceChildren();
+  elements.runPanel.hidden = false;
+  elements.runElapsed.textContent = "00:00";
+  const activePhase = phase || STAGE_RUN_PHASES[stage] || "thinking";
+  setRunPhase(activePhase, message);
+  addActivity(message || RUN_PHASES[activePhase].detail);
+  state.runClockTimer = window.setInterval(updateRunClock, 1000);
+}
+
+function finishRunSession() {
+  stopRunTimers();
+  state.runSessionId += 1;
+  markCurrentActivityComplete();
+  refreshIcons();
+  state.runStartedAt = null;
+}
+
+function transitionActivity(event) {
+  const labels = {
+    SEARCHED: "初步文献检索已完成",
+    SEARCH_REVIEW_PENDING: "候选论文已提交人工审核",
+    SCREENED: "候选论文已确认",
+    EXTRACTED: "论文精读与证据提取已完成",
+    SYNTHESIZED: "跨论文证据综合已完成",
+    REVIEW_PENDING: "综合结论已提交证据审查",
+    REVIEWED: "证据审查已完成",
+    OUTLINED: "综述提纲已生成",
+    NARRATED: "综述正文已生成",
+    COMPLETED: "事实核查完成，研究已结束",
+    INCONCLUSIVE: "研究因证据不足停止",
+  };
+  return labels[event?.to_stage]
+    || `${STAGE_LABELS[event?.from_stage] || event?.from_stage}进入${STAGE_LABELS[event?.to_stage] || event?.to_stage}`;
+}
+
+function artifactActivity(artifact) {
+  const payload = artifact?.payload || {};
+  if (artifact?.kind === "PaperCard") {
+    return payload.title ? `论文精读完成：${payload.title}` : "一篇论文已完成精读";
+  }
+  if (artifact?.kind === "SectionDraft") {
+    const title = payload.title || payload.section_title || payload.section_id;
+    return title ? `章节草稿已生成：${title}` : "一个章节草稿已生成";
+  }
+  if (artifact?.kind === "FactCheckReport") {
+    return "一个综述章节已完成事实核查";
+  }
+  return "";
+}
+
+function syncRunningSnapshot(snapshot) {
+  const signature = snapshotSignature(snapshot);
+  if (signature === state.runSnapshotSignature) return;
+
+  (snapshot?.artifacts || []).forEach((artifact, index) => {
+    const identity = artifactIdentity(artifact, index);
+    if (state.runKnownArtifacts.has(identity)) return;
+    state.runKnownArtifacts.add(identity);
+    const message = artifactActivity(artifact);
+    if (message) addActivity(message, { updateStatus: false, kind: "complete" });
+  });
+
+  orderedWorkflowEvents(snapshot?.events || []).forEach((event, index) => {
+    const identity = eventIdentity(event, index);
+    if (state.runKnownEvents.has(identity)) return;
+    state.runKnownEvents.add(identity);
+    addActivity(transitionActivity(event), { updateStatus: false, kind: "complete" });
+  });
+
+  state.runSnapshotSignature = signature;
+  applyProjectSnapshot(snapshot, {
+    keepRunPanel: true,
+    renderInspector: state.inspectorOpen,
+  });
+  const stage = snapshot?.project?.stage;
+  setRunPhase(STAGE_RUN_PHASES[stage] || "thinking");
+}
+
+async function pollRunningProject() {
+  if (
+    state.runPollInFlight
+    || !state.projectId
+    || state.projectId.includes("正在")
+    || !state.busy
+  ) {
+    return;
+  }
+  const sessionId = state.runSessionId;
+  state.runPollInFlight = true;
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}`);
+    if (sessionId !== state.runSessionId || !state.runStartedAt || !state.busy) return;
+    syncRunningSnapshot(payload.data);
+  } catch {
+    // The main request owns error reporting; polling remains best-effort.
+  } finally {
+    state.runPollInFlight = false;
+  }
+}
+
+function startRunPolling() {
+  if (state.runPollTimer || !state.projectId || state.projectId.includes("正在")) return;
+  void pollRunningProject();
+  state.runPollTimer = window.setInterval(() => {
+    void pollRunningProject();
+  }, 1200);
 }
 
 function findProject(value, depth = 0) {
@@ -2922,27 +3322,67 @@ function findProject(value, depth = 0) {
   return null;
 }
 
-function streamUpdateLabel(eventName, payload) {
+function streamPhase(eventName, payload) {
+  if (eventName === "done") return "done";
+  if (eventName === "error" || eventName === "fallback") return "stopped";
+  if (eventName === "awaiting_input") return "reviewing";
+  const serialized = JSON.stringify(payload || {}).toLowerCase();
+  if (serialized.includes("fact-checker")) return "verifying";
+  if (serialized.includes("narrative-writer") || serialized.includes("chief-editor")) return "writing";
+  if (serialized.includes("research-outliner")) return "outlining";
+  if (serialized.includes("evidence-reviewer")) return "reviewing";
+  if (serialized.includes("research-synthesizer")) return "synthesizing";
+  if (serialized.includes("paper-reader")) return "reading";
+  if (
+    serialized.includes("literature-scout")
+    || serialized.includes("openalex")
+    || serialized.includes("crossref")
+  ) {
+    return "searching";
+  }
+  const keys = payload && typeof payload === "object" ? Object.keys(payload) : [];
+  if (keys.some((key) => key.toLowerCase().includes("model"))) return "thinking";
+  return state.runPhase || "thinking";
+}
+
+function streamUpdateLabel(eventName, payload, phaseName = "thinking") {
   if (eventName === "awaiting_input") return "初次检索完成，等待人工审核";
   if (eventName === "done") return "本轮 Agent 执行结束";
   if (eventName === "fallback") return "模型不可用，已进入降级流程";
   if (eventName === "error") return payload?.message || "Agent 执行失败";
-  const keys = payload && typeof payload === "object" ? Object.keys(payload) : [];
-  const name = keys[0] || "Agent";
-  if (name.includes("tool")) return "正在执行工具并整理结果";
-  return `收到 ${name} 阶段更新`;
+  const labels = {
+    thinking: "正在分析当前材料并规划下一步",
+    searching: "正在扩展检索词并查找候选论文",
+    reading: "正在读取论文并提取结构化信息",
+    synthesizing: "正在比较研究发现并组织证据",
+    reviewing: "正在核对结论与证据引用",
+    outlining: "正在规划综述章节与论证顺序",
+    writing: "正在整合章节正文与参考文献",
+    verifying: "正在逐节执行事实核查",
+  };
+  return labels[phaseName] || "正在执行研究任务";
 }
 
 async function handleStreamEvent(eventName, payload) {
-  addActivity(streamUpdateLabel(eventName, payload));
   const project = findProject(payload);
+  let phaseName = streamPhase(eventName, payload);
   if (project) {
     state.projectId = project.project_id;
-    renderProjectHeader(project);
+    renderProjectHeader(project, state.snapshot?.events || []);
     renderProjectSummary({
       project,
       artifacts: state.snapshot?.artifacts || [],
       events: state.snapshot?.events || [],
+    });
+    phaseName = STAGE_RUN_PHASES[project.stage] || phaseName;
+    startRunPolling();
+  }
+  const label = streamUpdateLabel(eventName, payload, phaseName);
+  const phaseChanged = setRunPhase(phaseName, label);
+  if (phaseChanged || eventName !== "update") {
+    addActivity(label, {
+      updateStatus: false,
+      kind: eventName === "error" ? "error" : "progress",
     });
   }
   if (eventName === "awaiting_input" && payload?.data) {
@@ -2962,8 +3402,6 @@ async function startResearch(topic, question, reviewLimits = {}) {
   elements.reviewPanel.hidden = true;
   elements.continuePanel.hidden = true;
   elements.projectDetails.hidden = true;
-  elements.runPanel.hidden = false;
-  elements.activityLog.replaceChildren();
   const pendingProject = {
     project_id: "正在创建项目…",
     topic,
@@ -2972,7 +3410,11 @@ async function startResearch(topic, question, reviewLimits = {}) {
   };
   renderProjectHeader(pendingProject);
   renderProjectSummary({ project: pendingProject, artifacts: [], events: [] });
-  addActivity("正在创建项目并准备检索");
+  beginRunSession({
+    stage: "CREATED",
+    phase: "thinking",
+    message: "正在创建项目并分析研究问题",
+  });
   if (reviewLimits.max_search_rounds) {
     addActivity(
       `系统将自动执行最多 ${reviewLimits.max_search_rounds} 轮检索-筛选，再交给你最终手筛`,
@@ -3035,6 +3477,7 @@ async function startResearch(topic, question, reviewLimits = {}) {
       await loadProject(state.projectId, true, true);
     }
   } finally {
+    finishRunSession();
     elements.runPanel.hidden = true;
     setBusy(false);
   }
@@ -3056,13 +3499,14 @@ async function continueResearch() {
     return;
   }
   setBusy(true);
-  elements.runPanel.hidden = false;
-  elements.activityLog.replaceChildren();
-  addActivity(
-    mode === "screening"
+  beginRunSession({
+    stage: state.snapshot?.project?.stage || "SCREENED",
+    message: mode === "screening"
       ? "正在恢复项目并启动论文精读"
       : "正在恢复写作阶段并生成缺失的综述产物",
-  );
+    snapshot: state.snapshot,
+  });
+  startRunPolling();
   try {
     await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
       method: "POST",
@@ -3076,6 +3520,7 @@ async function continueResearch() {
     notify(`继续执行失败：${error.message}`, true);
     await loadProject(state.projectId, true, true);
   } finally {
+    finishRunSession();
     elements.runPanel.hidden = true;
     setBusy(false);
   }

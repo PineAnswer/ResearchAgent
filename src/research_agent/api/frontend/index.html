@@ -8,6 +8,7 @@
       content="Evidence Research Agent 的本地文献研究工作台"
     />
     <title>文献研究工作台</title>
+    <link rel="icon" href="/ui-assets/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/ui-assets/styles.css" />
     <script src="/ui-assets/vendor/lucide.min.js" defer></script>
     <script src="/ui-assets/vendor/marked.umd.js" defer></script>
@@ -367,15 +368,39 @@
             <div id="resultHighlights" class="metric-strip" aria-label="项目关键指标"></div>
           </section>
 
-          <section id="runPanel" class="run-panel" hidden>
-            <div class="section-heading-row">
-              <div>
-                <p class="eyebrow">Research in progress</p>
-                <h3>正在执行研究</h3>
+          <section
+            id="runPanel"
+            class="run-panel"
+            aria-labelledby="runPhaseTitle"
+            aria-busy="true"
+            hidden
+          >
+            <div class="run-status-layout">
+              <div id="runVisualizer" class="run-visualizer" data-phase="thinking" aria-hidden="true">
+                <span class="run-orbit run-orbit-outer"></span>
+                <span class="run-orbit run-orbit-inner"></span>
+                <span class="run-scan-line"></span>
+                <span class="run-particle run-particle-one"></span>
+                <span class="run-particle run-particle-two"></span>
+                <span class="run-particle run-particle-three"></span>
+                <span id="runPhaseIcon" class="run-phase-icon">
+                  <i data-lucide="brain" aria-hidden="true"></i>
+                </span>
               </div>
-              <span class="loading-spinner" aria-hidden="true"></span>
+
+              <div class="run-status-copy">
+                <div class="run-status-meta">
+                  <p class="eyebrow">Research in progress</p>
+                  <span id="runElapsed" class="run-elapsed">00:00</span>
+                </div>
+                <h3 id="runPhaseTitle">正在理解研究问题</h3>
+                <p id="runStatusText">正在初始化研究上下文...</p>
+                <div class="run-signal" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span>
+                </div>
+              </div>
             </div>
-            <p id="runStatusText">正在初始化...</p>
             <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
           </section>
 
