@@ -87,6 +87,42 @@ def test_supervisor_loads_aws_credentials_csv(tmp_path) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("configured_model", "expected_model"),
+    [
+        ("gpt-5.6", "gpt-5.6"),
+        ("openai:gpt-5.6", "gpt-5.6"),
+    ],
+)
+def test_custom_base_url_accepts_raw_or_provider_prefixed_model(
+    tmp_path, monkeypatch, configured_model: str, expected_model: str
+) -> None:
+    captured: dict = {}
+
+    def fake_chat_model(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(supervisor_module, "ObservableChatOpenAI", fake_chat_model)
+    supervisor = object.__new__(ResearchSupervisor)
+    supervisor.settings = Settings(
+        model=configured_model,
+        data_dir=tmp_path,
+        database_path=tmp_path / "agent.db",
+        filesystem_root=tmp_path / "filesystem",
+        base_url="https://relay.example/v1",
+    )
+
+    supervisor._build_model()
+
+    assert captured == {
+        "model": expected_model,
+        "api_key": "test-key",
+        "base_url": "https://relay.example/v1",
+    }
+
+
 def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> None:
     captured: dict = {}
     agent_configs: list[dict] = []

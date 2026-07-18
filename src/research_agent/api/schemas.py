@@ -4,13 +4,21 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from research_agent.domain.models import SearchFeedback
+from research_agent.domain.models import SearchConstraints, SearchFeedback
 
 
-class ResearchRequest(BaseModel):
+class ResearchRequest(SearchConstraints):
     topic: str = Field(min_length=1)
     research_question: str = Field(min_length=1)
     thread_id: str | None = None
+    min_papers: int | None = Field(default=None, ge=1)
+    max_papers: int | None = Field(default=None, ge=1)
+    max_search_rounds: int | None = Field(default=None, ge=0)
+
+
+class CreateConversationRequest(SearchConstraints):
+    topic: str = Field(min_length=1)
+    research_question: str = Field(min_length=1)
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
     max_search_rounds: int | None = Field(default=None, ge=0)
@@ -39,6 +47,20 @@ class LibraryPaperRequest(BaseModel):
     doi: str = ""
     url: str | None = None
     source: str = "user"
+    venue: str = ""
+    venue_type: Literal["journal", "conference"] | None = None
+    venue_acronym: str = ""
+    ccf_rank: str | None = None
+    ccf_category: str | None = None
+    ccf_year: int | None = None
+    sci_quartile: Literal["Q1", "Q2", "Q3", "Q4"] | None = None
+    index_name: str | None = None
+    impact_factor: float | None = None
+    impact_factor_year: int | None = None
+    nature_portfolio: bool = False
+    venue_rating_explanation: str = ""
+    venue_rating_source_url: str | None = None
+    venue_rating_source_label: str | None = None
     tags: list[str] = Field(default_factory=list)
     starred: bool = False
 
@@ -57,6 +79,20 @@ class LibraryPaperUpdateRequest(BaseModel):
     doi: str | None = None
     url: str | None = None
     source: str | None = None
+    venue: str | None = None
+    venue_type: Literal["journal", "conference"] | None = None
+    venue_acronym: str | None = None
+    ccf_rank: str | None = None
+    ccf_category: str | None = None
+    ccf_year: int | None = None
+    sci_quartile: Literal["Q1", "Q2", "Q3", "Q4"] | None = None
+    index_name: str | None = None
+    impact_factor: float | None = None
+    impact_factor_year: int | None = None
+    nature_portfolio: bool | None = None
+    venue_rating_explanation: str | None = None
+    venue_rating_source_url: str | None = None
+    venue_rating_source_label: str | None = None
     tags: list[str] | None = None
     starred: bool | None = None
     saved: bool | None = None

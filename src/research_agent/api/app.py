@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,9 +14,11 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from research_agent.agents.supervisor import ResearchSupervisor
+from research_agent.api.background_runs import ConversationRunManager
 from research_agent.api.schemas import (
     ApiEnvelope,
     ContinueProjectRequest,
+    CreateConversationRequest,
     LibraryAssistantRequest,
     LibraryAttachmentRequest,
     LibraryBulkRequest,
@@ -34,6 +37,9 @@ from research_agent.application.research_service import WorkflowPrerequisiteErro
 from research_agent.domain.models import LibraryAttachment
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.sqlite_repository import (
+    ActiveConversationRunError,
+    ConversationNotFound,
+    ConversationRunNotFound,
     LibraryCollectionNotFound,
     LibraryPaperNotFound,
     ProjectNotFound,
@@ -59,17 +65,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         load_dotenv()
     supervisor = ResearchSupervisor(settings)
+    run_manager = ConversationRunManager(supervisor)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await run_manager.shutdown()
+
     app = FastAPI(
         title="Evidence Research Agent",
         version="0.2.0",
         description="Deep Agents evidence-driven literature research API",
+        lifespan=lifespan,
     )
     app.state.supervisor = supervisor
+    app.state.run_manager = run_manager
     app.mount(
         "/ui-assets",
         StaticFiles(directory=FRONTEND_DIR),
         name="research-ui-assets",
     )
+
+    @app.middleware("http")
+    async def isolate_user_session(request: Request, call_next):
+        raw_token = request.cookies.get("research_agent_session")
+        user, new_token = supervisor.repository.resolve_user_session(
+            raw_token,
+            create_isolated_user=supervisor.settings.multi_user_mode,
+        )
+        request.state.user_id = user.user_id
+        with supervisor.repository.user_scope(user.user_id):
+            response = await call_next(request)
+        if new_token:
+            response.set_cookie(
+                "research_agent_session",
+                new_token,
+                httponly=True,
+                samesite="lax",
+                secure=False,
+                max_age=60 * 60 * 24 * 365,
+            )
+        return response
 
     @app.get("/", include_in_schema=False)
     async def research_console() -> FileResponse:
@@ -81,10 +117,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data={
                 "status": "ok" if supervisor.graph is not None else "degraded",
                 "model": supervisor.settings.model,
+                "user_mode": (
+                    "multi_user"
+                    if supervisor.settings.multi_user_mode
+                    else "local_shared"
+                ),
                 "agent_available": supervisor.graph is not None,
                 "initialization_error": supervisor.initialization_error,
+                "venue_rankings": supervisor.venue_rankings.stats(),
             }
         )
+
+    @app.get("/api/venues/lookup", response_model=ApiEnvelope)
+    async def lookup_venue(
+        q: str = Query(min_length=1, max_length=300),
+        venue_type: str | None = Query(default=None),
+    ) -> ApiEnvelope:
+        ranking = supervisor.venue_rankings.lookup(q, venue_type)
+        return ApiEnvelope(
+            message="venue_found" if ranking else "venue_not_found",
+            data=ranking,
+        )
+
+    @app.get("/api/users/me", response_model=ApiEnvelope)
+    async def current_user() -> ApiEnvelope:
+        user = supervisor.repository.get_current_user()
+        return ApiEnvelope(data=user.model_dump(mode="json"))
+
+    @app.post("/api/conversations", response_model=ApiEnvelope, status_code=202)
+    async def create_conversation(
+        request: CreateConversationRequest,
+        raw_request: Request,
+    ) -> ApiEnvelope:
+        if (
+            request.min_papers is not None
+            and request.max_papers is not None
+            and request.min_papers > request.max_papers
+        ):
+            raise HTTPException(status_code=422, detail="min_papers_exceeds_max_papers")
+        conversation, project = supervisor.service.create_conversation(
+            request.topic,
+            request.research_question,
+        )
+        try:
+            run = await run_manager.start_initial(
+                conversation.conversation_id,
+                raw_request.state.user_id,
+                min_papers=request.min_papers,
+                max_papers=request.max_papers,
+                max_search_rounds=request.max_search_rounds,
+                year_from=request.year_from,
+                year_to=request.year_to,
+                quality_venues_only=request.quality_venues_only,
+            )
+        except ActiveConversationRunError as exc:
+            raise HTTPException(status_code=409, detail="conversation_already_running") from exc
+        snapshot = supervisor.service.get_snapshot(project.project_id)
+        return ApiEnvelope(
+            message="conversation_started",
+            data={
+                **_json_safe(snapshot),
+                "run": run.model_dump(mode="json"),
+            },
+        )
+
+    @app.get("/api/conversations", response_model=ApiEnvelope)
+    async def list_conversations(
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> ApiEnvelope:
+        rows = supervisor.service.list_conversations(limit)
+        data = []
+        for conversation in rows:
+            active_run = supervisor.repository.get_active_conversation_run(
+                conversation.conversation_id
+            )
+            project = supervisor.service.get_project(conversation.project_id)
+            data.append(
+                {
+                    **conversation.model_dump(mode="json"),
+                    "project": project.model_dump(mode="json"),
+                    "active_run": (
+                        active_run.model_dump(mode="json")
+                        if active_run is not None
+                        else None
+                    ),
+                }
+            )
+        return ApiEnvelope(data=data)
+
+    @app.get("/api/conversations/{conversation_id}", response_model=ApiEnvelope)
+    async def get_conversation(conversation_id: str) -> ApiEnvelope:
+        try:
+            conversation = supervisor.service.get_conversation(conversation_id)
+            snapshot = supervisor.service.get_snapshot(conversation.project_id)
+        except (ConversationNotFound, ProjectNotFound) as exc:
+            raise HTTPException(status_code=404, detail="conversation_not_found") from exc
+        return ApiEnvelope(data=_json_safe(snapshot))
+
+    @app.post(
+        "/api/conversations/{conversation_id}/continue",
+        response_model=ApiEnvelope,
+        status_code=202,
+    )
+    async def continue_conversation(
+        conversation_id: str,
+        request: Request,
+    ) -> ApiEnvelope:
+        try:
+            run = await run_manager.start_continue(
+                conversation_id,
+                request.state.user_id,
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(status_code=404, detail="conversation_not_found") from exc
+        except ActiveConversationRunError as exc:
+            raise HTTPException(status_code=409, detail="conversation_already_running") from exc
+        return ApiEnvelope(
+            message="conversation_resumed",
+            data=run.model_dump(mode="json"),
+        )
+
+    @app.get("/api/runs/{run_id}", response_model=ApiEnvelope)
+    async def get_conversation_run(run_id: str) -> ApiEnvelope:
+        try:
+            run = supervisor.repository.get_conversation_run(run_id)
+        except ConversationRunNotFound as exc:
+            raise HTTPException(status_code=404, detail="run_not_found") from exc
+        return ApiEnvelope(data=run.model_dump(mode="json"))
 
     @app.post("/api/research/invoke", response_model=ApiEnvelope)
     async def invoke_research(request: ResearchRequest) -> ApiEnvelope:
@@ -96,6 +255,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 min_papers=request.min_papers,
                 max_papers=request.max_papers,
                 max_search_rounds=request.max_search_rounds,
+                year_from=request.year_from,
+                year_to=request.year_to,
+                quality_venues_only=request.quality_venues_only,
             )
             return ApiEnvelope(data=_json_safe(result))
         except Exception as exc:
@@ -120,6 +282,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     min_papers=request.min_papers,
                     max_papers=request.max_papers,
                     max_search_rounds=request.max_search_rounds,
+                    year_from=request.year_from,
+                    year_to=request.year_to,
+                    quality_venues_only=request.quality_venues_only,
                 ):
                     payload = json.dumps(_json_safe(event), ensure_ascii=False)
                     event_name = (
@@ -154,7 +319,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         limit: int = Query(default=20, ge=1, le=100),
     ) -> ApiEnvelope:
         projects = supervisor.service.list_projects(limit)
-        return ApiEnvelope(data=[item.model_dump(mode="json") for item in projects])
+        data = []
+        for project in projects:
+            item = project.model_dump(mode="json")
+            if project.conversation_id:
+                try:
+                    conversation = supervisor.service.get_conversation(
+                        project.conversation_id
+                    )
+                    active_run = supervisor.repository.get_active_conversation_run(
+                        conversation.conversation_id
+                    )
+                    item["conversation"] = conversation.model_dump(mode="json")
+                    item["active_run"] = (
+                        active_run.model_dump(mode="json")
+                        if active_run is not None
+                        else None
+                    )
+                except ConversationNotFound:
+                    pass
+            data.append(item)
+        return ApiEnvelope(data=data)
 
     @app.get("/api/library", response_model=ApiEnvelope)
     async def list_library_papers(

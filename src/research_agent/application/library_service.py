@@ -127,6 +127,22 @@ class LibraryService:
                 doi=doi,
                 url=payload.get("url") or None,
                 source=str(payload.get("source") or "user"),
+                venue=str(payload.get("venue") or ""),
+                venue_type=payload.get("venue_type"),
+                venue_acronym=str(payload.get("venue_acronym") or ""),
+                ccf_rank=payload.get("ccf_rank"),
+                ccf_category=payload.get("ccf_category"),
+                ccf_year=payload.get("ccf_year"),
+                sci_quartile=payload.get("sci_quartile"),
+                index_name=payload.get("index_name"),
+                impact_factor=payload.get("impact_factor"),
+                impact_factor_year=payload.get("impact_factor_year"),
+                nature_portfolio=bool(payload.get("nature_portfolio")),
+                venue_rating_explanation=str(
+                    payload.get("venue_rating_explanation") or ""
+                ),
+                venue_rating_source_url=payload.get("venue_rating_source_url"),
+                venue_rating_source_label=payload.get("venue_rating_source_label"),
                 tags=incoming_tags,
                 starred=bool(payload.get("starred", False)),
                 saved=saved,
@@ -145,6 +161,26 @@ class LibraryService:
             paper.url = paper.url or payload.get("url") or None
             if paper.source == "user" and payload.get("source"):
                 paper.source = str(payload["source"])
+            for field in (
+                "venue",
+                "venue_type",
+                "venue_acronym",
+                "ccf_rank",
+                "ccf_category",
+                "ccf_year",
+                "sci_quartile",
+                "index_name",
+                "impact_factor",
+                "impact_factor_year",
+                "venue_rating_explanation",
+                "venue_rating_source_url",
+                "venue_rating_source_label",
+            ):
+                value = payload.get(field)
+                if value not in (None, ""):
+                    setattr(paper, field, value)
+            if "nature_portfolio" in payload:
+                paper.nature_portfolio = bool(payload["nature_portfolio"])
             paper.tags = self._clean_tags([*paper.tags, *incoming_tags])
             paper.saved = paper.saved or saved
             if saved:
@@ -198,6 +234,20 @@ class LibraryService:
             "doi",
             "url",
             "source",
+            "venue",
+            "venue_type",
+            "venue_acronym",
+            "ccf_rank",
+            "ccf_category",
+            "ccf_year",
+            "sci_quartile",
+            "index_name",
+            "impact_factor",
+            "impact_factor_year",
+            "nature_portfolio",
+            "venue_rating_explanation",
+            "venue_rating_source_url",
+            "venue_rating_source_label",
             "tags",
             "starred",
             "saved",

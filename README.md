@@ -77,9 +77,22 @@ research-agent serve --host 127.0.0.1 --port 8000
 4. 确认候选集后，前端会直接进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作、总编整合和事实核查。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
 
-前端提交时会锁定按钮，降低重复发送风险。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口；多人测试时应避免同时修改同一项目。
+前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口。
 
 Swagger API 页面：<http://127.0.0.1:8000/docs>
+
+#### 多用户与并发对话
+
+Web 端现在把每次新建研究作为一个独立对话。对话、项目、运行记录、消息和用户归属均持久化到关系数据库 SQLite：
+
+- 本机默认使用单用户共享模式：Codex 内置页面、Chrome 和 Edge 会自动映射到同一个本地用户，因此能看到相同的历史记录。
+- 浏览器仍会获得只保存在 HttpOnly Cookie 中的随机会话令牌，数据库只保存令牌哈希。
+- 如需真正的多人隔离，将 `RESEARCH_AGENT_MULTI_USER_MODE=true`；此时项目、对话、运行记录和个人文献数据会严格按 `user_id` 隔离。
+- 每个对话使用独立的 `conversation_id`、`project_id` 和 LangGraph `thread_id`，因此状态和短期上下文不会串线。
+- 同一个对话一次只允许一个活动任务；不同对话可以同时调研。切换对话或新建对话不会取消已在后台运行的任务。
+- 服务异常重启时，未正常结束的运行会标记为 `interrupted`，项目和已经生成的产物仍可恢复。
+
+这是本机单服务部署，SQLite 使用短事务、外键约束和 30 秒忙等待。若以后部署为多台 API 服务器，建议迁移到 PostgreSQL，并用数据库 Row-Level Security 作为额外的用户隔离边界。
 
 ### 4. 可选：使用命令行运行
 
@@ -129,6 +142,12 @@ research-agent serve --host 127.0.0.1 --port 8000
 
 ```text
 GET  /health
+GET  /api/users/me
+POST /api/conversations
+GET  /api/conversations
+GET  /api/conversations/{conversation_id}
+POST /api/conversations/{conversation_id}/continue
+GET  /api/runs/{run_id}
 POST /api/research/invoke
 POST /api/research/stream
 GET  /api/projects
@@ -354,6 +373,22 @@ RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND=3
 - `extract_pdf_text` 只解析任务明确提供且已经存在于工作区的本地 PDF。
 - 全文不可用但摘要存在时，Reader 可以生成标明 `section="abstract"`、`page=null` 的摘要级 Evidence。
 - 全文与摘要都不可用时，`findings` 为空，并在 `limitations` 中说明证据缺失。
+
+## 年份、期刊与会议筛选
+
+网页端在开始调研前提供两个硬筛选条件：
+
+- 发表年份允许选择 `2000-2026`，默认 `2024-2026`。年份范围会同时传给 OpenAlex/Crossref，并在本地再次校验。
+- “仅 CCF-A、一区和 Nature 子刊”默认不勾选。勾选后采用并集规则，只保留 `CCF-A`、`JCR Q1` 或 `Nature Portfolio` 中至少命中一项的论文；不勾选时不限制来源级别。
+
+候选论文卡片会显示期刊或会议名称、CCF 评级、JCR 分区、影响因子及其数据年份。未可靠命中的来源会明确显示“暂无可靠评级数据”，不会根据名称猜测。也可以通过 `GET /api/venues/lookup?q=TPAMI&venue_type=journal` 单独查询本地评级库。
+
+评级数据在启动时导入同一个 SQLite 数据库，并通过规范化别名、精确匹配和全文候选重排完成快速检索。当前种子数据包括 CCF 2026 第七版全部 A 类会议和期刊、IEEE 官方 2026 title list 中的 Q1/Q2 期刊，以及 Nature Portfolio 官方 2025 指标页中的期刊：
+
+- CCF 目录是计算领域的推荐目录，不等同于单篇论文质量评价。
+- JCR 分区和影响因子属于特定年份、特定学科口径；界面始终展示数据年份。
+- Nature 官方指标页未提供 JCR 分区时，只显示 Nature Portfolio 身份和官方影响因子，不补猜“一区”。
+- 可运行 `python scripts/build_venue_seed.py --ccf-json <CCF_JSON> --ieee-pdf <IEEE_PDF>` 更新种子数据；生成文件位于 `src/research_agent/data/venue_rankings.json`。
 
 ## 运行时数据
 

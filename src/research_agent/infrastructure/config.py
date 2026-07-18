@@ -23,6 +23,7 @@ class Settings:
     aws_profile: str | None = None
     aws_credentials_csv: Path | None = None
     enable_fallback: bool = True
+    multi_user_mode: bool = False
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     openalex_api_key: str | None = None
@@ -61,6 +62,10 @@ class Settings:
             enable_fallback=_as_bool(
                 os.getenv("RESEARCH_AGENT_ENABLE_FALLBACK", "true"),
                 default=True,
+            ),
+            multi_user_mode=_as_bool(
+                os.getenv("RESEARCH_AGENT_MULTI_USER_MODE", "false"),
+                default=False,
             ),
             api_host=os.getenv("RESEARCH_AGENT_API_HOST", "127.0.0.1"),
             api_port=int(os.getenv("RESEARCH_AGENT_API_PORT", "8000")),

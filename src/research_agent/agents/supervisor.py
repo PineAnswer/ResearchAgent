@@ -46,6 +46,7 @@ from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
 from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
+from research_agent.infrastructure.venue_rankings import VenueRankingIndex
 from research_agent.infrastructure.workspace import WorkspaceBootstrapper
 from research_agent.tools.library_tools import build_library_tools
 from research_agent.tools.literature_tools import build_literature_tools, extract_pdf_pages
@@ -115,6 +116,7 @@ class ResearchSupervisor:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.from_env()
         self.repository = SqliteResearchRepository(self.settings.database_path)
+        self.venue_rankings = VenueRankingIndex(self.settings.database_path)
         self.exporter = JsonArtifactExporter(self.settings.data_dir / "outputs")
         self.service = ResearchService(self.repository, self.exporter)
         self.fallback = OfflineFallback(self.service)
@@ -125,6 +127,7 @@ class ResearchSupervisor:
             self.settings.filesystem_root,
             openalex_api_key=self.settings.openalex_api_key,
             contact_email=self.settings.openalex_email,
+            venue_index=self.venue_rankings,
             max_retries=self.settings.search_max_retries,
             backoff_seconds=self.settings.search_backoff_seconds,
             max_retry_wait_seconds=self.settings.search_max_retry_wait_seconds,
@@ -134,12 +137,13 @@ class ResearchSupervisor:
         }
         self.library_toolset = build_library_tools(self.service.library)
         self.library_tools = self.library_toolset.tools
-        self._search_review_options_by_thread: dict[str, dict[str, int]] = {}
+        self._search_review_options_by_thread: dict[str, dict[str, Any]] = {}
         self.search_review = SearchReviewService(
             self.service,
             self.literature_tools_by_name,
             max_rounds=self.settings.max_search_review_rounds,
             max_queries_per_round=self.settings.max_suggested_queries_per_round,
+            venue_index=self.venue_rankings,
         )
         self.workflow_guard = ResearchWorkflowGuardMiddleware(
             self.service, self.runtime_state
@@ -154,15 +158,16 @@ class ResearchSupervisor:
             self.initialization_error = str(exc)
 
     def _build_model(self):
-        provider, _, model_name = self.settings.model.partition(":")
+        provider, separator, model_name = self.settings.model.partition(":")
         if provider.lower() == "bedrock":
             return self._build_bedrock_model(model_name or self.settings.model)
 
         if not self.settings.base_url:
             return self.settings.model
 
+        resolved_model = model_name if separator else self.settings.model
         return ObservableChatOpenAI(
-            model=model_name,
+            model=resolved_model,
             api_key=os.getenv("OPENAI_API_KEY", "not-set"),
             base_url=self.settings.base_url,
         )
@@ -221,8 +226,15 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
-    ) -> dict[str, int]:
-        options: dict[str, int] = {}
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "year_from": year_from,
+            "year_to": year_to,
+            "quality_venues_only": quality_venues_only,
+        }
         if min_papers is not None:
             options["min_papers"] = min_papers
         if max_papers is not None:
@@ -237,14 +249,25 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
     ) -> None:
         options = self._search_review_options(
             min_papers=min_papers,
             max_papers=max_papers,
             max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
         )
-        if options:
-            self._search_review_options_by_thread[thread_id] = options
+        self._search_review_options_by_thread[thread_id] = options
+        self.runtime_state.set_search_constraints(
+            thread_id,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
+        )
 
     def _begin_search_review(self, project_id: str, thread_id: str) -> dict[str, Any]:
         options = self._search_review_options_by_thread.get(thread_id, {})
@@ -321,14 +344,23 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
     ) -> str:
-        limits: list[str] = []
+        limits: list[str] = [
+            f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
+        ]
         if min_papers is not None:
             limits.append(f"- 精读篇数下限：{min_papers}")
         if max_papers is not None:
             limits.append(f"- 精读篇数上限：{max_papers}")
         if max_search_rounds is not None:
             limits.append(f"- 系统检索-筛选迭代轮数上限：{max_search_rounds}")
+        if quality_venues_only:
+            limits.append(
+                "- 出版物质量：仅 CCF-A、JCR Q1 或 Nature Portfolio 期刊（后端强制过滤）"
+            )
         limit_text = ""
         if limits:
             limit_text = (
@@ -370,6 +402,37 @@ class ResearchSupervisor:
             "Ignore SearchReport/CandidateSetSnapshot candidates that are not included. "
             "If no included papers are available, finish with InsufficientEvidence."
             f"{context_text}"
+        )
+
+    @classmethod
+    def build_existing_project_prompt(
+        cls,
+        project_id: str,
+        topic: str,
+        research_question: str,
+        *,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
+    ) -> str:
+        base = cls.build_prompt(
+            topic,
+            research_question,
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
+        )
+        return (
+            f"系统已经为当前隔离对话创建科研项目：{project_id}\n"
+            "禁止再次调用create_research_project，也禁止切换或猜测其他project_id。"
+            "当前项目处于CREATED阶段，请直接委派literature-scout并继续证据驱动流程。\n\n"
+            + base.replace("请创建项目，并按证据驱动科研流程执行。", "请按证据驱动科研流程执行。")
         )
 
     @staticmethod
@@ -419,7 +482,7 @@ class ResearchSupervisor:
         research_question: str,
         thread_id: str,
         run_logger: ResearchRunLogger,
-        search_review_options: dict[str, int] | None = None,
+        search_review_options: dict[str, Any] | None = None,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -468,12 +531,18 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
         search_review_options = self._search_review_options(
             min_papers=min_papers,
             max_papers=max_papers,
             max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(
@@ -510,6 +579,9 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -520,6 +592,9 @@ class ResearchSupervisor:
             min_papers=min_papers,
             max_papers=max_papers,
             max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
@@ -580,7 +655,12 @@ class ResearchSupervisor:
                 continuation["context"],
             )
         active_thread_id = thread_id or uuid.uuid4().hex
-        self.runtime_state.register_project(active_thread_id, project_id)
+        self.runtime_state.register_project(
+            active_thread_id,
+            project_id,
+            user_id=project.user_id,
+            conversation_id=project.conversation_id,
+        )
         self.workflow_guard.bind_existing_project(active_thread_id)
         run_logger = self._new_run_logger(
             project.topic,
@@ -618,6 +698,88 @@ class ResearchSupervisor:
         result["run_status"] = summary["status"]
         return result
 
+    async def astart_project(
+        self,
+        project_id: str,
+        thread_id: str,
+        *,
+        min_papers: int | None = None,
+        max_papers: int | None = None,
+        max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
+    ) -> dict:
+        """Start research for a project pre-created by the conversation service."""
+        if self.graph is None:
+            raise AgentUnavailableError(
+                self.initialization_error or "Agent graph is unavailable"
+            )
+        project = self.service.get_project(project_id)
+        if project.stage.value != "CREATED":
+            raise ValueError(
+                f"Initial conversation run requires CREATED; current stage is {project.stage.value}"
+            )
+        options = self._search_review_options(
+            min_papers=min_papers,
+            max_papers=max_papers,
+            max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
+        )
+        self._register_search_review_options(thread_id, **options)
+        self.runtime_state.register_project(
+            thread_id,
+            project_id,
+            user_id=project.user_id,
+            conversation_id=project.conversation_id,
+        )
+        self.workflow_guard.bind_existing_project(thread_id)
+        run_logger = self._new_run_logger(
+            project.topic,
+            project.research_question,
+            thread_id,
+            False,
+        )
+        run_logger.project_id = project_id
+        config = self.build_config(thread_id)
+        config["callbacks"] = [run_logger]
+        try:
+            result = await self.graph.ainvoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": self.build_existing_project_prompt(
+                                project_id,
+                                project.topic,
+                                project.research_question,
+                                **options,
+                            ),
+                        }
+                    ]
+                },
+                config=config,
+            )
+            result["project_status"] = self.service.get_project(project_id).model_dump(
+                mode="json"
+            )
+        except Exception as exc:
+            status = {
+                "project_status": self.service.get_project(project_id).model_dump(
+                    mode="json"
+                )
+            }
+            run_logger.finish("error", result=status, error=str(exc))
+            raise AgentExecutionError(exc, project_id) from exc
+        finally:
+            self._search_review_options_by_thread.pop(thread_id, None)
+        summary = run_logger.finish("completed", result=result)
+        result["run_log_dir"] = str(run_logger.run_dir)
+        result["run_status"] = summary["status"]
+        return result
+
     async def astream(
         self,
         topic: str,
@@ -626,6 +788,9 @@ class ResearchSupervisor:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int = 2024,
+        year_to: int = 2026,
+        quality_venues_only: bool = False,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -636,6 +801,9 @@ class ResearchSupervisor:
             min_papers=min_papers,
             max_papers=max_papers,
             max_search_rounds=max_search_rounds,
+            year_from=year_from,
+            year_to=year_to,
+            quality_venues_only=quality_venues_only,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)

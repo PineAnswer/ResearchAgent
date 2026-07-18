@@ -7,6 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
+DEFAULT_USER_ID = "local-user"
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -37,6 +40,18 @@ class EvidenceConfidence(StrEnum):
     HIGH = "HIGH"
 
 
+class SearchConstraints(BaseModel):
+    year_from: int = Field(default=2024, ge=2000, le=2026)
+    year_to: int = Field(default=2026, ge=2000, le=2026)
+    quality_venues_only: bool = False
+
+    @model_validator(mode="after")
+    def validate_year_range(self) -> "SearchConstraints":
+        if self.year_from > self.year_to:
+            raise ValueError("year_from cannot be greater than year_to")
+        return self
+
+
 class PaperCandidate(BaseModel):
     paper_id: str
     title: str
@@ -47,6 +62,21 @@ class PaperCandidate(BaseModel):
     url: HttpUrl | None = None
     source: str
     library_id: str = ""
+    venue: str = ""
+    venue_type: Literal["journal", "conference"] | None = None
+    venue_acronym: str = ""
+    ccf_rank: str | None = None
+    ccf_category: str | None = None
+    ccf_year: int | None = None
+    sci_quartile: Literal["Q1", "Q2", "Q3", "Q4"] | None = None
+    index_name: str | None = None
+    impact_factor: float | None = None
+    impact_factor_year: int | None = None
+    nature_portfolio: bool = False
+    venue_rating_explanation: str = ""
+    venue_rating_source_url: str | None = None
+    venue_rating_source_label: str | None = None
+    venue_match_confidence: float | None = None
 
 
 class SearchReport(BaseModel):
@@ -105,6 +135,21 @@ class CandidateSetSnapshot(BaseModel):
     agent_review_note: str = ""
     user_comments: list[str] = Field(default_factory=list)
     search_failures: list[str] = Field(default_factory=list)
+    # Legacy candidate snapshots predate configurable year constraints. Keep
+    # their range unknown instead of relabelling preserved results as 2024-2026.
+    year_from: int | None = Field(default=None, ge=2000, le=2026)
+    year_to: int | None = Field(default=None, ge=2000, le=2026)
+    quality_venues_only: bool = False
+
+    @model_validator(mode="after")
+    def validate_year_range(self) -> "CandidateSetSnapshot":
+        if (
+            self.year_from is not None
+            and self.year_to is not None
+            and self.year_from > self.year_to
+        ):
+            raise ValueError("year_from cannot be greater than year_to")
+        return self
 
 
 class ScreeningDecision(BaseModel):
@@ -172,10 +217,66 @@ class ResearchProject(BaseModel):
     project_id: str
     topic: str
     research_question: str
+    user_id: str = DEFAULT_USER_ID
+    conversation_id: str = ""
     stage: ResearchStage = ResearchStage.CREATED
     current_review: ReviewResult | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class UserAccount(BaseModel):
+    user_id: str
+    display_name: str = "本地用户"
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ResearchConversation(BaseModel):
+    conversation_id: str
+    user_id: str = DEFAULT_USER_ID
+    project_id: str
+    thread_id: str
+    title: str
+    research_question: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ConversationRun(BaseModel):
+    run_id: str
+    user_id: str = DEFAULT_USER_ID
+    conversation_id: str
+    project_id: str
+    thread_id: str
+    kind: Literal["initial", "continue"] = "initial"
+    status: Literal[
+        "queued",
+        "running",
+        "awaiting_input",
+        "completed",
+        "inconclusive",
+        "failed",
+        "interrupted",
+        "cancelled",
+    ] = "queued"
+    phase: str = "thinking"
+    message: str = ""
+    error: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ConversationMessage(BaseModel):
+    message_id: int | None = None
+    conversation_id: str
+    user_id: str = DEFAULT_USER_ID
+    role: Literal["user", "assistant", "system"]
+    content: str
+    run_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class StateEvent(BaseModel):
@@ -209,6 +310,20 @@ class LibraryPaper(BaseModel):
     doi: str = ""
     url: HttpUrl | None = None
     source: str = "user"
+    venue: str = ""
+    venue_type: Literal["journal", "conference"] | None = None
+    venue_acronym: str = ""
+    ccf_rank: str | None = None
+    ccf_category: str | None = None
+    ccf_year: int | None = None
+    sci_quartile: Literal["Q1", "Q2", "Q3", "Q4"] | None = None
+    index_name: str | None = None
+    impact_factor: float | None = None
+    impact_factor_year: int | None = None
+    nature_portfolio: bool = False
+    venue_rating_explanation: str = ""
+    venue_rating_source_url: str | None = None
+    venue_rating_source_label: str | None = None
     tags: list[str] = Field(default_factory=list)
     starred: bool = False
     saved: bool = True

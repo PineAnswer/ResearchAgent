@@ -85,7 +85,7 @@
     </header>
 
     <div id="appShell" class="app-shell" data-sidebar="expanded">
-      <aside id="projectSidebar" class="sidebar" aria-label="项目导航">
+      <aside id="projectSidebar" class="sidebar" aria-label="对话导航">
         <div class="sidebar-primary">
           <button id="newProjectToggle" class="primary sidebar-new" type="button" title="新建研究">
             <i data-lucide="file-plus-2" aria-hidden="true"></i>
@@ -100,14 +100,14 @@
         <div class="sidebar-heading">
           <div class="sidebar-heading-label">
             <i data-lucide="library-big" aria-hidden="true"></i>
-            <h2 class="sidebar-label">项目库</h2>
+            <h2 class="sidebar-label">研究对话</h2>
           </div>
           <button
             id="refreshProjects"
             class="icon-button sidebar-label"
             type="button"
-            aria-label="刷新项目列表"
-            title="刷新项目列表"
+            aria-label="刷新对话列表"
+            title="刷新对话列表"
           >
             <i data-lucide="refresh-cw" aria-hidden="true"></i>
           </button>
@@ -188,6 +188,21 @@
               <label class="field" for="initialMaxSearchRounds">
                 <span>检索轮次</span>
                 <input id="initialMaxSearchRounds" type="number" min="1" value="3" />
+              </label>
+              <label class="field" for="initialYearFrom">
+                <span>起始年份</span>
+                <input id="initialYearFrom" type="number" min="2000" max="2026" value="2024" />
+              </label>
+              <label class="field" for="initialYearTo">
+                <span>结束年份</span>
+                <input id="initialYearTo" type="number" min="2000" max="2026" value="2026" />
+              </label>
+              <label class="quality-filter-option" for="initialQualityVenuesOnly">
+                <input id="initialQualityVenuesOnly" type="checkbox" />
+                <span>
+                  <strong>仅 CCF-A、一区和 Nature 子刊</strong>
+                  <small>勾选后只保留 CCF-A、JCR Q1 或 Nature Portfolio 论文；不勾选则不限制出版物等级。</small>
+                </span>
               </label>
             </fieldset>
 
@@ -424,6 +439,8 @@
                 <div><strong id="roundCount">0 / 3</strong><span>轮次</span></div>
               </div>
             </div>
+
+            <p id="reviewConstraints" class="review-constraints"></p>
 
             <div class="review-toolbar">
               <label class="search-field" for="candidateFilter">

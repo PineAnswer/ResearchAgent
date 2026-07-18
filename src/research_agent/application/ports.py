@@ -4,6 +4,8 @@ from typing import Any, Protocol
 
 from research_agent.domain.models import (
     ArtifactRecord,
+    ConversationMessage,
+    ConversationRun,
     LibraryAttachment,
     LibraryArtifact,
     LibraryChunk,
@@ -11,23 +13,81 @@ from research_agent.domain.models import (
     LibraryNote,
     LibraryPaper,
     ProjectPaper,
+    ResearchConversation,
     ResearchProject,
     ResearchStage,
     ReviewResult,
     StateEvent,
+    UserAccount,
 )
 
 
 class ResearchRepositoryPort(Protocol):
     """Persistence contract required by the application service."""
 
-    def create_project(self, topic: str, research_question: str) -> ResearchProject: ...
+    def create_project(
+        self,
+        topic: str,
+        research_question: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str = "",
+    ) -> ResearchProject: ...
 
     def get_project(self, project_id: str) -> ResearchProject: ...
 
     def list_projects(self, limit: int = 20) -> list[ResearchProject]: ...
 
     def delete_project(self, project_id: str) -> None: ...
+
+    def get_current_user(self) -> UserAccount: ...
+
+    def create_conversation(
+        self,
+        topic: str,
+        research_question: str,
+    ) -> tuple[ResearchConversation, ResearchProject]: ...
+
+    def get_conversation(self, conversation_id: str) -> ResearchConversation: ...
+
+    def get_project_conversation(self, project_id: str) -> ResearchConversation: ...
+
+    def list_conversations(self, limit: int = 50) -> list[ResearchConversation]: ...
+
+    def create_conversation_run(
+        self,
+        conversation_id: str,
+        kind: str,
+    ) -> ConversationRun: ...
+
+    def get_conversation_run(self, run_id: str) -> ConversationRun: ...
+
+    def list_conversation_runs(self, conversation_id: str) -> list[ConversationRun]: ...
+
+    def get_active_conversation_run(
+        self,
+        conversation_id: str,
+    ) -> ConversationRun | None: ...
+
+    def update_conversation_run(
+        self,
+        run_id: str,
+        **changes: Any,
+    ) -> ConversationRun: ...
+
+    def append_conversation_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        *,
+        run_id: str | None = None,
+    ) -> ConversationMessage: ...
+
+    def list_conversation_messages(
+        self,
+        conversation_id: str,
+    ) -> list[ConversationMessage]: ...
 
     def get_library_paper(self, library_id: str) -> LibraryPaper: ...
 
