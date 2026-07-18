@@ -46,6 +46,7 @@ class PaperCandidate(BaseModel):
     doi: str | None = None
     url: HttpUrl | None = None
     source: str
+    library_id: str = ""
 
 
 class SearchReport(BaseModel):
@@ -245,9 +246,74 @@ class LibraryAttachment(BaseModel):
     name: str
     url: str
     media_type: str = "application/pdf"
-    full_text_status: Literal["unavailable", "linked", "ready"] = "linked"
+    full_text_status: Literal[
+        "unavailable",
+        "linked",
+        "uploaded",
+        "extracting",
+        "indexed",
+        "failed",
+        "ready",
+    ] = "linked"
+    page_count: int = 0
+    chunk_count: int = 0
+    error: str = ""
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryChunk(BaseModel):
+    """Page-aware text fragment extracted from one library attachment."""
+
+    chunk_id: str
+    library_id: str
+    attachment_id: str
+    page: int | None = None
+    chunk_index: int = 0
+    text: str
+    content_hash: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryFinding(BaseModel):
+    """A claim grounded in an exact quote from an indexed library source."""
+
+    claim: str
+    quote: str
+    page: int | None = None
+    section: str | None = None
+
+
+class LibraryPaperAnalysis(BaseModel):
+    """Reusable AI reading result for a paper stored outside project history."""
+
+    summary: str = ""
+    methods: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    findings: list[LibraryFinding] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+
+
+class LibraryArtifact(BaseModel):
+    """Versioned library-level output such as an AI paper analysis."""
+
+    artifact_id: str
+    library_id: str
+    attachment_id: str | None = None
+    kind: str
+    payload: dict[str, Any]
+    mode: Literal["agent", "extractive"] = "agent"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class LibraryAgentResponse(BaseModel):
+    """Structured final response emitted by the tool-using library Agent."""
+
+    answer: str
+    cited_source_ids: list[str] = Field(default_factory=list)
+    used_library_ids: list[str] = Field(default_factory=list)
+    coverage_note: str = ""
 
 
 class ProjectPaper(BaseModel):

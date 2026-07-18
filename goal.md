@@ -1,4 +1,93 @@
-# 文献研究工作台桌面端视觉重构
+# ResearchAgent P0：文献库 Agent 化
+
+## 当前状态
+
+**三个 P0 已于 2026-07-17 完成实现并通过全量回归测试。**
+
+| 优先级 | 功能 | 状态 | 可验收结果 |
+| --- | --- | --- | --- |
+| P0 | AI 精读入库 | 已完成 | 上传 PDF 后自动分页、分块、索引并生成库级 PaperCard；结论只保留能在对应页找到的原文引文 |
+| P0 | 文献库优先研究 | 已完成 | literature-scout 被程序强制先查本地库；paper-reader 对库内论文优先复用全文索引和历史证据 |
+| P0 | Ask Library Agent | 已完成 | 无需手选论文，可对全库执行多轮工具检索；回答仅接受本轮真实来源 ID，并展示页码和原文 |
+
+## P0-1：AI 精读入库
+
+### 实现
+
+- PDF 上传后依次进入 `uploaded → extracting → indexed`，失败进入 `failed`，不再把“文件已保存”误报为“全文可用”。
+- 使用 `pypdf` 按真实页码提取文本，最多解析 100 页；按页切成带重叠的稳定文本块。
+- SQLite 新增 `library_chunks` 和 `library_artifacts`，保存页码、附件、内容哈希、分块序号和版本化精读产物。
+- AI 精读结构包含 `summary`、`methods`、`datasets`、`findings`、`limitations` 和 `keywords`。
+- 每条 finding 必须带原文 `quote` 和 `page`。程序会再次校验：规范化空白后，引用必须真实出现在该页；不匹配、无页码或空引用会被丢弃。
+- 文献详情页新增“AI 精读卡”，展示方法、数据集、局限、结论、页码和原文；附件状态展示页数、分块数、错误原因及“重试解析”。
+- 重复解析会替换该附件的全文索引，同时保留版本化精读卡，便于审核历史结果。
+
+### 降级与边界
+
+- 模型不可用时仍完成本地分页和全文索引，并保存 `extractive` 精读卡；不会伪造方法或结论。
+- 扫描版 PDF 当前没有 OCR。无法提取文本时状态为 `failed`，原文件仍可下载并可重试。
+- 单文件上传上限保持 30 MB；页数上限为 100 页，防止一次请求无界消耗资源。
+
+## P0-2：文献库优先研究
+
+### 实现
+
+- literature-scout 新增 `search_library`，统一搜索论文元数据、摘要、笔记、AI 精读卡、PDF 全文分块和历史项目 PaperCard 证据。
+- `ExecutedSearchTrackingMiddleware` 会在程序层阻止尚未执行本地检索的 OpenAlex/Crossref 调用，不能只靠提示词绕过。
+- 本地检索完成后，Agent 只能针对明确的 `coverage_gaps` 改写外部查询；与本地查询重复的检索意图仍会被去重。
+- 候选论文新增 `library_id`。库内候选会把该 ID 一直传到筛选上下文和 paper-reader；外部候选保持空值。
+- paper-reader 遇到 `library_id` 时优先调用 `retrieve_library_passages`，复用带页码全文、AI 精读、笔记和历史证据，不再重复下载和阅读同一论文。
+- 本地与外部结果继续进入同一 SearchReport、人工检索审核和后续证据状态机，不另建旁路流程。
+
+### 成本与质量保证
+
+- 本地库已覆盖的问题可以不调用 OpenAlex/Crossref，降低检索费用和重复阅读。
+- 本地库覆盖不足时仍允许联网补缺，不会为了省调用而隐藏证据空白。
+- 本地来源和外部来源共享真实 paper_id/DOI 去重逻辑，并保留 `source=library` 供前端辨识。
+
+## P0-3：真正的 Ask Library Agent
+
+### 实现
+
+- 文献库工具栏新增“询问文献库”，不选择论文即可检索整个文献库；“对照阅读”仍可把范围限制在选中的 2–8 篇。
+- Ask Agent 可串行调用 `search_library`、`retrieve_library_passages` 和 `get_library_paper_context`，完成问题拆解、候选定位、追加检索和证据核对。
+- 每次运行都有独立 `source_registry`。模型只能提交本轮工具实际返回的 `source_id`，不能把标题、DOI、library_id 或虚构编号当作引用。
+- 回答中的事实行必须包含 `[[source_id]]`；后端验证后再转换为 `[1]`、`[2]`，并返回标题、页码、来源类型和原文摘录。
+- 出现未登记来源、无有效引用、未逐行标注来源或空回答时，结果不会作为 Agent 答案返回，而是安全降级为本地相关原文列表。
+- 前端使用 Markdown 渲染回答，单独展示覆盖说明和可点击引用来源；点击来源可回到对应文献详情。
+
+### 降级行为
+
+- 模型、网络或结构化输出不可用时，Ask Library 自动返回本地检索最相关的摘要、全文、笔记或历史证据，并明确标记 `mode=extractive`。
+- 文献库没有可用材料时明确说明证据不足，不调用外部网络替用户补写答案。
+
+## 使用路径
+
+1. **AI 精读**：打开“文献库” → 选择论文 → “上传 PDF”。等待附件显示“已索引”，随后查看“AI 精读卡”。失败时悬停状态查看原因并点击“重试解析”。
+2. **本地优先研究**：直接发起新研究。检索 Agent 会先查本地库；在候选审核中，库内论文显示 `source=library`，确认后继续即可复用全文索引。
+3. **全库提问**：打开“文献库” → “询问文献库” → 输入问题 → “开始检索”。不需要勾选论文。
+4. **限定范围提问**：勾选 2–8 篇文献 → “对照阅读” → 在对照面板提问，Agent 只可访问选中范围。
+
+## 数据与接口
+
+- 新增库级模型：`LibraryChunk`、`LibraryFinding`、`LibraryPaperAnalysis`、`LibraryArtifact`、`LibraryAgentResponse`。
+- 新增接口：`POST /api/library/attachments/{attachment_id}/ingest`。
+- `POST /api/library/assistant` 的 `library_ids` 现在可为空；空列表表示全库，最多可限定 50 篇。
+- 上传接口会在保存文件后自动执行解析和索引；附件内容接口在解析失败时仍允许下载原文件。
+- 数据库启动时自动创建新增表；旧附件和旧文献记录通过 Pydantic 默认字段向后兼容。
+
+## 验收结果
+
+- [x] 全量 Python 测试：`121 passed`。
+- [x] Ruff：`ruff check --no-cache src tests` 通过。
+- [x] 前端 JavaScript：Node `--check` 通过。
+- [x] `git diff --check` 通过，无补丁空白错误。
+- [x] 未启动用户服务，未改动用户现有运行数据库，未创建新的 Conda 环境。
+- [x] 采用独立功能分支和 Pull Request 发布，不直接修改远端 `main`。
+
+---
+
+# 历史目标：文献研究工作台桌面端视觉重构
 
 ## 目标
 

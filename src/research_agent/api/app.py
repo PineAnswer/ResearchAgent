@@ -440,7 +440,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name=safe_name,
             url=f"/api/library/attachments/{attachment_id}/content",
             media_type=media_type or "application/pdf",
-            full_text_status="ready",
+            full_text_status="uploaded",
         )
         try:
             attachment = await asyncio.to_thread(
@@ -450,10 +450,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             file_path.unlink(missing_ok=True)
             raise
+        ingestion = await supervisor.ingest_library_attachment(attachment.attachment_id)
         return ApiEnvelope(
-            message="library_attachment_uploaded",
-            data=attachment.model_dump(mode="json"),
+            message="library_attachment_indexed"
+            if ingestion["mode"] != "failed"
+            else "library_attachment_uploaded_but_unreadable",
+            data=ingestion["attachment"],
         )
+
+    @app.post(
+        "/api/library/attachments/{attachment_id}/ingest",
+        response_model=ApiEnvelope,
+    )
+    async def ingest_library_attachment(attachment_id: str) -> ApiEnvelope:
+        try:
+            attachment = await asyncio.to_thread(
+                supervisor.repository.get_library_attachment,
+                attachment_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="library_attachment_not_found") from exc
+        if not attachment.url.startswith("/api/library/attachments/"):
+            raise HTTPException(status_code=400, detail="only_uploaded_pdf_can_be_ingested")
+        result = await supervisor.ingest_library_attachment(attachment_id)
+        return ApiEnvelope(message="library_attachment_ingestion_finished", data=result)
 
     @app.get("/api/library/attachments/{attachment_id}/content")
     async def get_library_attachment_content(attachment_id: str) -> FileResponse:
@@ -464,13 +484,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="library_attachment_not_found") from exc
-        file_path = (
-            Path(supervisor.settings.data_dir)
-            / "library-attachments"
-            / attachment.library_id
-            / attachment.attachment_id
-        )
-        if attachment.full_text_status != "ready" or not file_path.is_file():
+        try:
+            file_path = await asyncio.to_thread(
+                supervisor._library_attachment_path,
+                attachment_id,
+            )
+        except FileNotFoundError:
             raise HTTPException(status_code=404, detail="library_attachment_content_not_found")
         return FileResponse(
             file_path,
@@ -480,24 +499,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/library/attachments/{attachment_id}", response_model=ApiEnvelope)
     async def delete_library_attachment(attachment_id: str) -> ApiEnvelope:
+        file_path: Path | None = None
         try:
             attachment = await asyncio.to_thread(
                 supervisor.repository.get_library_attachment,
                 attachment_id,
             )
+            if attachment.url.startswith("/api/library/attachments/"):
+                try:
+                    file_path = await asyncio.to_thread(
+                        supervisor._library_attachment_path,
+                        attachment.attachment_id,
+                    )
+                except FileNotFoundError:
+                    file_path = None
             await asyncio.to_thread(
                 supervisor.repository.delete_library_attachment,
                 attachment_id,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="library_attachment_not_found") from exc
-        if attachment.full_text_status == "ready":
-            file_path = (
-                Path(supervisor.settings.data_dir)
-                / "library-attachments"
-                / attachment.library_id
-                / attachment.attachment_id
-            )
+        if file_path is not None:
             await asyncio.to_thread(file_path.unlink, missing_ok=True)
         return ApiEnvelope(message="library_attachment_deleted", data={"attachment_id": attachment_id})
 

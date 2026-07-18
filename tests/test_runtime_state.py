@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
 
+from langchain.agents.middleware import ToolCallRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from research_agent.agents.runtime_state import (
+    ExecutedSearchTrackingMiddleware,
     PaperFetchGuardMiddleware,
     ResearchRuntimeState,
     recording_runnable,
@@ -208,6 +210,68 @@ def test_search_terms_deduplicate_same_token_intent() -> None:
     assert state.search_terms("thread-a") == [
         "large small model collaboration AIOps limitations"
     ]
+
+
+def test_runtime_state_preserves_local_library_identity_and_search_order() -> None:
+    state = ResearchRuntimeState()
+    state.store_search_results(
+        "thread-a",
+        json.dumps(
+            [
+                {
+                    "paper_id": "W-local",
+                    "library_id": "LP-local",
+                    "title": "Local evidence",
+                    "source": "library",
+                }
+            ]
+        ),
+    )
+
+    assert state.get_search_results("thread-a")[0]["library_id"] == "LP-local"
+    assert state.has_search_source("thread-a", "search_library") is False
+    state.mark_search_source("thread-a", "search_library")
+    assert state.has_search_source("thread-a", "search_library") is True
+
+
+def test_search_middleware_blocks_external_search_until_library_was_queried() -> None:
+    state = ResearchRuntimeState()
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+
+    def request(name: str, query: str, call_id: str) -> ToolCallRequest:
+        return ToolCallRequest(
+            tool_call={"name": name, "args": {"query": query}, "id": call_id},
+            tool=None,
+            state={},
+            runtime=runtime,
+        )
+
+    blocked = middleware.wrap_tool_call(
+        request("search_openalex", "external gap", "call-1"),
+        lambda _request: "should not execute",
+    )
+    local = middleware.wrap_tool_call(
+        request("search_library", "local topic", "call-2"),
+        lambda _request: ToolMessage(
+            content="[]",
+            tool_call_id="call-2",
+            name="search_library",
+        ),
+    )
+    external = middleware.wrap_tool_call(
+        request("search_openalex", "specific uncovered direction", "call-3"),
+        lambda _request: ToolMessage(
+            content="[]",
+            tool_call_id="call-3",
+            name="search_openalex",
+        ),
+    )
+
+    assert blocked.status == "error"
+    assert "local_library_search_required" in blocked.content
+    assert local.status == "success"
+    assert external.status == "success"
 
 
 def test_rejected_result_is_consumed_and_retry_count_resets_on_success() -> None:

@@ -69,13 +69,21 @@ def build_subagent_registry(
     if missing_skills:
         raise ValueError("Missing subagent Skills: " + ", ".join(missing_skills))
 
-    scout_tools = [tools_by_name["search_openalex"]]
+    scout_tools = [
+        tools_by_name["search_library"],
+        tools_by_name["search_openalex"],
+    ]
     if max_crossref_searches > 0:
         scout_tools.append(tools_by_name["search_crossref"])
-    scout_model_limit = max(4, max_openalex_searches + max_crossref_searches + 3)
+    scout_model_limit = max(6, max_openalex_searches + max_crossref_searches + 5)
     scout_middleware = [
         SerialToolExecutionMiddleware(),
         ModelCallLimitMiddleware(run_limit=scout_model_limit, exit_behavior="end"),
+        ToolCallLimitMiddleware(
+            tool_name="search_library",
+            run_limit=2,
+            exit_behavior="end",
+        ),
         ToolCallLimitMiddleware(
             tool_name="search_openalex",
             run_limit=max_openalex_searches,
@@ -109,11 +117,20 @@ def build_subagent_registry(
             "paper-reader",
             "获取开放全文或使用摘要证据，并生成一篇 PaperCard。",
             inject_skill(READER_PROMPT, "paper-reading", skill_contents["paper-reading"]),
-            [tools_by_name["fetch_paper_text"], tools_by_name["extract_pdf_text"]],
+            [
+                tools_by_name["retrieve_library_passages"],
+                tools_by_name["fetch_paper_text"],
+                tools_by_name["extract_pdf_text"],
+            ],
             PaperCard,
             [
                 SerialToolExecutionMiddleware(),
                 ModelCallLimitMiddleware(run_limit=4, exit_behavior="end"),
+                ToolCallLimitMiddleware(
+                    tool_name="retrieve_library_passages",
+                    run_limit=1,
+                    exit_behavior="end",
+                ),
                 ToolCallLimitMiddleware(
                     tool_name="extract_pdf_text",
                     run_limit=1,

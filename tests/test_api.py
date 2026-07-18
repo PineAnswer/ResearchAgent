@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import research_agent.agents.supervisor as supervisor_module
 
 from research_agent.api.app import create_app
 from research_agent.domain.models import ResearchStage
@@ -245,6 +246,13 @@ def test_library_management_api_supports_organizing_notes_and_compare(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        supervisor_module,
+        "extract_pdf_pages",
+        lambda _path, _limit: [
+            {"page": 1, "text": "Traceability improved through linked evidence."}
+        ],
+    )
     settings = Settings(
         model="openai:gpt-4.1-mini",
         data_dir=tmp_path,
@@ -338,9 +346,12 @@ def test_library_management_api_supports_organizing_notes_and_compare(
     assert note.status_code == 200
     assert attachment.status_code == 200
     assert uploaded.status_code == 200
+    assert uploaded.json()["data"]["full_text_status"] == "indexed"
     assert downloaded.content == b"%PDF-1.4 test content"
     assert detail.json()["data"]["notes"][0]["content"] == "Reusable note"
     assert len(detail.json()["data"]["attachments"]) == 2
+    assert detail.json()["data"]["indexed_chunk_count"] == 1
+    assert detail.json()["data"]["analyses"][0]["kind"] == "PaperCard"
     assert len(comparison.json()["data"]["rows"]) == 2
     assert "Traceability improved" in answer.json()["data"]["answer"]
     assert overview.json()["data"]["collections"][0]["paper_count"] == 2

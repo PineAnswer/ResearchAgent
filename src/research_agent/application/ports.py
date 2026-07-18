@@ -5,6 +5,8 @@ from typing import Any, Protocol
 from research_agent.domain.models import (
     ArtifactRecord,
     LibraryAttachment,
+    LibraryArtifact,
+    LibraryChunk,
     LibraryCollection,
     LibraryNote,
     LibraryPaper,
@@ -87,6 +89,30 @@ class ResearchRepositoryPort(Protocol):
     def list_library_attachments(self, library_id: str) -> list[LibraryAttachment]: ...
 
     def delete_library_attachment(self, attachment_id: str) -> None: ...
+
+    def replace_library_chunks(
+        self,
+        library_id: str,
+        attachment_id: str,
+        chunks: list[LibraryChunk],
+    ) -> list[LibraryChunk]: ...
+
+    def list_library_chunks(
+        self,
+        *,
+        library_ids: list[str] | None = None,
+        attachment_id: str | None = None,
+        chunk_ids: list[str] | None = None,
+        limit: int = 5000,
+    ) -> list[LibraryChunk]: ...
+
+    def save_library_artifact(self, artifact: LibraryArtifact) -> LibraryArtifact: ...
+
+    def list_library_artifacts(
+        self,
+        library_id: str,
+        kind: str | None = None,
+    ) -> list[LibraryArtifact]: ...
 
     def merge_library_papers(
         self,
