@@ -124,9 +124,13 @@ function artifactLabel(kind) {
 
 const state = {
   projects: [],
+  projectsLoading: false,
   projectId: null,
   project: null,
   snapshot: null,
+  conversation: null,
+  activeRun: null,
+  activeRunId: null,
   review: null,
   candidates: [],
   selectedIds: new Set(),
@@ -210,6 +214,9 @@ const elements = {
   initialMinPapers: byId("initialMinPapers"),
   initialMaxPapers: byId("initialMaxPapers"),
   initialMaxSearchRounds: byId("initialMaxSearchRounds"),
+  initialYearFrom: byId("initialYearFrom"),
+  initialYearTo: byId("initialYearTo"),
+  initialQualityVenuesOnly: byId("initialQualityVenuesOnly"),
   emptyState: byId("emptyState"),
   projectView: byId("projectView"),
   stageBadge: byId("stageBadge"),
@@ -239,6 +246,7 @@ const elements = {
   candidateCount: byId("candidateCount"),
   selectedCount: byId("selectedCount"),
   roundCount: byId("roundCount"),
+  reviewConstraints: byId("reviewConstraints"),
   candidateFilter: byId("candidateFilter"),
   candidateGrid: byId("candidateGrid"),
   selectAll: byId("selectAll"),
@@ -1634,8 +1642,11 @@ function renderProjectList() {
   }
 
   state.projects.forEach((project) => {
+    const isRunning = ["queued", "running"].includes(project.active_run?.status);
     const displayStage =
-      project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery"
+      isRunning
+        ? "调研中"
+        : project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery"
         ? recoverableOperationalFailure(state.snapshot)
           ? "写作待恢复"
           : "成果待补全"
@@ -1650,7 +1661,16 @@ function renderProjectList() {
 
     const icon = document.createElement("span");
     icon.className = "project-list-icon";
-    icon.append(iconNode(project.project_id === state.projectId ? "folder-open" : "folder"));
+    icon.append(
+      iconNode(
+        isRunning
+          ? "loader-circle"
+          : project.project_id === state.projectId
+            ? "folder-open"
+            : "folder",
+      ),
+    );
+    icon.classList.toggle("is-running", isRunning);
 
     const content = document.createElement("span");
     content.className = "project-list-content";
@@ -1676,6 +1696,8 @@ function renderProjectList() {
 }
 
 async function loadProjects() {
+  if (state.projectsLoading) return;
+  state.projectsLoading = true;
   try {
     const payload = await api("/api/projects?limit=30");
     state.projects = payload.data || [];
@@ -1685,13 +1707,19 @@ async function loadProjects() {
     message.className = "muted small sidebar-label";
     message.textContent = `项目载入失败：${error.message}`;
     elements.projectList.replaceChildren(message);
+  } finally {
+    state.projectsLoading = false;
   }
 }
 
 function clearProjectView() {
+  stopRunTimers();
   state.projectId = null;
   state.project = null;
   state.snapshot = null;
+  state.conversation = null;
+  state.activeRun = null;
+  state.activeRunId = null;
   state.review = null;
   state.candidates = [];
   state.selectedIds = new Set();
@@ -2944,20 +2972,78 @@ function snapshotSignature(snapshot) {
   ].join(":");
 }
 
+function activeSnapshotRun(snapshot) {
+  const run = snapshot?.active_run;
+  return run && ["queued", "running"].includes(run.status) ? run : null;
+}
+
+function conversationIdForSnapshot(snapshot = state.snapshot) {
+  return snapshot?.conversation?.conversation_id
+    || snapshot?.project?.conversation_id
+    || state.conversation?.conversation_id
+    || null;
+}
+
 function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector = true } = {}) {
   state.snapshot = snapshot;
+  state.conversation = snapshot.conversation || null;
+  const projectIndex = state.projects.findIndex(
+    (project) => project.project_id === snapshot.project?.project_id,
+  );
+  if (projectIndex >= 0) {
+    state.projects[projectIndex] = {
+      ...state.projects[projectIndex],
+      ...snapshot.project,
+      conversation: snapshot.conversation || state.projects[projectIndex].conversation,
+      active_run: snapshot.active_run || null,
+    };
+    renderProjectList();
+  }
   renderProjectHeader(snapshot.project, snapshot.events || []);
   renderProjectSummary(snapshot);
   renderStagePanels(snapshot);
   if (renderInspector) renderDetails(snapshot);
+  const activeRun = activeSnapshotRun(snapshot);
+  if (activeRun) {
+    const isNewRun = activeRun.run_id !== state.activeRunId;
+    state.activeRun = activeRun;
+    state.activeRunId = activeRun.run_id;
+    if (isNewRun || !state.runStartedAt) {
+      beginRunSession({
+        stage: snapshot.project?.stage || "CREATED",
+        phase: activeRun.phase || "",
+        message: activeRun.message || "研究正在后台运行",
+        snapshot,
+      });
+    } else {
+      setRunPhase(
+        activeRun.phase || STAGE_RUN_PHASES[snapshot.project?.stage] || "thinking",
+        activeRun.message || "",
+      );
+    }
+    setBusy(true);
+    elements.runPanel.hidden = false;
+    startRunPolling();
+    return;
+  }
+  if (state.activeRunId || state.busy) {
+    if (state.runStartedAt) finishRunSession();
+    state.activeRun = null;
+    state.activeRunId = null;
+    setBusy(false);
+  }
   elements.runPanel.hidden = !keepRunPanel;
 }
 
 async function loadProject(projectId, quiet = false, force = false) {
   if (!projectId) return;
-  if (state.busy && !force) {
-    notify("当前操作尚未结束，请稍候", true);
-    return;
+  if (projectId !== state.projectId) {
+    stopRunTimers();
+    state.runSessionId += 1;
+    state.runStartedAt = null;
+    state.activeRun = null;
+    state.activeRunId = null;
+    setBusy(false);
   }
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
@@ -2983,6 +3069,10 @@ function candidateMatches(candidate, query) {
     candidate.title,
     candidate.doi,
     candidate.paper_id,
+    candidate.venue,
+    candidate.venue_acronym,
+    candidate.ccf_rank,
+    candidate.sci_quartile,
     ...(candidate.authors || []),
   ]
     .filter(Boolean)
@@ -3067,6 +3157,61 @@ function renderCandidateCards() {
       meta.append(badge);
     }
 
+    const venue = document.createElement("div");
+    venue.className = "candidate-venue";
+    const venueHeading = document.createElement("div");
+    venueHeading.className = "candidate-venue-heading";
+    const venueType = document.createElement("span");
+    venueType.className = "candidate-venue-type";
+    venueType.textContent = candidate.venue_type === "conference"
+      ? "会议"
+      : candidate.venue_type === "journal"
+        ? "期刊"
+        : "出版物";
+    const venueName = document.createElement("strong");
+    venueName.textContent = candidate.venue || "期刊或会议信息未返回";
+    venueHeading.append(venueType, venueName);
+
+    const ratingBadges = document.createElement("div");
+    ratingBadges.className = "candidate-rating-badges";
+    const addRatingBadge = (text, className = "") => {
+      if (!text) return;
+      const badge = document.createElement("span");
+      badge.className = `candidate-rating-badge ${className}`.trim();
+      badge.textContent = text;
+      ratingBadges.append(badge);
+    };
+    if (candidate.ccf_rank) {
+      addRatingBadge(`CCF-${candidate.ccf_rank} · ${candidate.ccf_year || "年份未知"}版`, "is-ccf");
+    }
+    if (candidate.sci_quartile) {
+      addRatingBadge(
+        `JCR ${candidate.sci_quartile}${candidate.index_name ? ` · ${candidate.index_name}` : ""}`,
+        candidate.sci_quartile === "Q1" ? "is-q1" : "",
+      );
+    }
+    if (candidate.nature_portfolio) addRatingBadge("Nature Portfolio", "is-nature");
+    if (candidate.impact_factor != null) {
+      addRatingBadge(`IF ${candidate.impact_factor} · ${candidate.impact_factor_year || "年份未知"}`);
+    }
+
+    const venueExplanation = document.createElement("p");
+    venueExplanation.className = "candidate-venue-explanation";
+    venueExplanation.textContent = candidate.venue_rating_explanation
+      || "评级库未提供可靠匹配，不推断分区、影响因子或会议评级。";
+    const ratingSourceUrl = safeHttpUrl(candidate.venue_rating_source_url);
+    if (ratingSourceUrl) {
+      const sourceLink = document.createElement("a");
+      sourceLink.href = ratingSourceUrl;
+      sourceLink.target = "_blank";
+      sourceLink.rel = "noopener noreferrer";
+      sourceLink.textContent = candidate.venue_rating_source_label || "查看评级来源";
+      venueExplanation.append(document.createTextNode(" · "), sourceLink);
+    }
+    venue.append(venueHeading);
+    if (ratingBadges.childElementCount) venue.append(ratingBadges);
+    venue.append(venueExplanation);
+
     const authors = document.createElement("p");
     authors.className = "candidate-authors";
     authors.textContent = (candidate.authors || []).length
@@ -3107,7 +3252,7 @@ function renderCandidateCards() {
     libraryButton.addEventListener("click", () => saveCandidateToLibrary(candidate));
     identifiers.append(libraryButton);
 
-    card.append(head, meta, authors);
+    card.append(head, meta, venue, authors);
     if (agentReason) card.append(reason);
     card.append(abstract, identifiers);
     elements.candidateGrid.append(card);
@@ -3139,6 +3284,19 @@ function renderReview(review) {
   elements.minPapers.value = snapshot.min_papers ?? 1;
   elements.maxPapers.value = snapshot.max_papers ?? 8;
   elements.maxSearchRounds.value = snapshot.max_search_rounds ?? 3;
+  const yearConstraint = snapshot.year_from != null && snapshot.year_to != null
+    ? `年份 ${snapshot.year_from}-${snapshot.year_to}`
+    : snapshot.year_from != null
+      ? `年份 ${snapshot.year_from} 起`
+      : snapshot.year_to != null
+        ? `年份截至 ${snapshot.year_to}`
+        : "历史候选 · 年份范围未记录";
+  elements.reviewConstraints.textContent = [
+    yearConstraint,
+    snapshot.quality_venues_only
+      ? "仅 CCF-A、JCR Q1 或 Nature Portfolio"
+      : "出版物等级不限",
+  ].join(" · ");
   renderProjectHeader(review.project);
   renderProjectSummary({
     project: review.project,
@@ -3233,6 +3391,7 @@ async function submitFeedback(action) {
   }
 
   setBusy(true);
+  let backgroundStarted = false;
   try {
     const payload = await api(
       `/api/projects/${encodeURIComponent(state.projectId)}/search-feedback`,
@@ -3258,15 +3417,22 @@ async function submitFeedback(action) {
         message: "候选集已确认，正在直接进入论文精读",
         snapshot: state.snapshot,
       });
+      const conversationId = conversationIdForSnapshot();
+      if (!conversationId) throw new Error("当前项目没有独立对话记录");
+      const runPayload = await api(
+        `/api/conversations/${encodeURIComponent(conversationId)}/continue`,
+        {
+          method: "POST",
+          body: "{}",
+        },
+      );
+      backgroundStarted = true;
+      state.activeRun = runPayload.data;
+      state.activeRunId = runPayload.data.run_id;
+      if (state.snapshot) state.snapshot.active_run = runPayload.data;
       startRunPolling();
-      await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
-        method: "POST",
-        body: "{}",
-      });
-      addActivity("后续研究执行结束，正在刷新项目状态");
       await loadProjects();
-      await loadProject(state.projectId, true, true);
-      notify("候选集已确认，并已完成本轮后续研究");
+      notify("候选集已确认，后续研究正在后台运行");
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -3276,9 +3442,11 @@ async function submitFeedback(action) {
     notify(`提交失败：${error.message}`, true);
     await loadProject(state.projectId, true, true);
   } finally {
-    if (state.runStartedAt) finishRunSession();
-    elements.runPanel.hidden = true;
-    setBusy(false);
+    if (!backgroundStarted) {
+      if (state.runStartedAt) finishRunSession();
+      elements.runPanel.hidden = true;
+      setBusy(false);
+    }
   }
 }
 
@@ -3436,6 +3604,11 @@ function syncRunningSnapshot(snapshot) {
     keepRunPanel: true,
     renderInspector: state.inspectorOpen,
   });
+  if (!state.busy) {
+    elements.runPanel.hidden = true;
+    void loadProjects();
+    return;
+  }
   const stage = snapshot?.project?.stage;
   setRunPhase(STAGE_RUN_PHASES[stage] || "thinking");
 }
@@ -3554,7 +3727,7 @@ async function handleStreamEvent(eventName, payload) {
   }
 }
 
-async function startResearch(topic, question, reviewLimits = {}) {
+async function startResearchLegacy(topic, question, reviewLimits = {}) {
   state.projectId = null;
   state.snapshot = null;
   state.review = null;
@@ -3643,7 +3816,7 @@ async function startResearch(topic, question, reviewLimits = {}) {
   }
 }
 
-async function continueResearch() {
+async function continueResearchLegacy() {
   if (!state.projectId || state.busy) return;
   if (!state.agentAvailable) {
     notify("Agent 当前不可用，请先检查模型配置", true);
@@ -3686,6 +3859,95 @@ async function continueResearch() {
   }
 }
 
+async function startResearch(topic, question, reviewLimits = {}) {
+  stopRunTimers();
+  state.runSessionId += 1;
+  state.projectId = null;
+  state.project = null;
+  state.snapshot = null;
+  state.conversation = null;
+  state.activeRun = null;
+  state.activeRunId = null;
+  state.review = null;
+  showWorkspace("project");
+  elements.reviewPanel.hidden = true;
+  elements.continuePanel.hidden = true;
+  elements.projectDetails.hidden = true;
+  const pendingProject = {
+    project_id: "正在创建对话…",
+    topic,
+    research_question: question,
+    stage: "CREATED",
+  };
+  renderProjectHeader(pendingProject);
+  renderProjectSummary({ project: pendingProject, artifacts: [], events: [] });
+  beginRunSession({
+    stage: "CREATED",
+    phase: "thinking",
+    message: "正在创建独立对话并启动后台调研",
+  });
+  setBusy(true);
+
+  try {
+    const payload = await api("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({
+        topic,
+        research_question: question,
+        ...reviewLimits,
+      }),
+    });
+    const snapshot = payload.data;
+    applyProjectSnapshot(snapshot, { keepRunPanel: true });
+    await loadProjects();
+    startRunPolling();
+    notify("调研已在后台启动；你可以新建或切换到其他对话");
+  } catch (error) {
+    if (state.runStartedAt) finishRunSession();
+    elements.runPanel.hidden = true;
+    setBusy(false);
+    notify(`研究启动失败：${error.message}`, true);
+  }
+}
+
+async function continueResearch() {
+  if (!state.projectId || state.busy) return;
+  if (!state.agentAvailable) {
+    notify("Agent 当前不可用，请先检查模型配置", true);
+    return;
+  }
+  const conversationId = conversationIdForSnapshot();
+  if (!conversationId) {
+    notify("旧项目没有独立对话记录，请重新创建一个研究对话", true);
+    return;
+  }
+  if (!window.confirm("将从已保存进度继续，并在后台运行。确认开始吗？")) return;
+
+  setBusy(true);
+  beginRunSession({
+    stage: state.snapshot?.project?.stage || "SCREENED",
+    message: "正在从已保存进度恢复研究",
+    snapshot: state.snapshot,
+  });
+  try {
+    const payload = await api(
+      `/api/conversations/${encodeURIComponent(conversationId)}/continue`,
+      { method: "POST", body: "{}" },
+    );
+    state.activeRun = payload.data;
+    state.activeRunId = payload.data.run_id;
+    if (state.snapshot) state.snapshot.active_run = payload.data;
+    await loadProjects();
+    startRunPolling();
+    notify("后续研究已在后台启动；可以切换到其他对话");
+  } catch (error) {
+    if (state.runStartedAt) finishRunSession();
+    elements.runPanel.hidden = true;
+    setBusy(false);
+    notify(`继续执行失败：${error.message}`, true);
+  }
+}
+
 function toggleNewProject(show) {
   if (show) {
     closeMenus();
@@ -3725,7 +3987,6 @@ elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false
 elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
 elements.newProjectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (state.busy) return;
   const topic = byId("topicInput").value.trim();
   const question = byId("questionInput").value.trim();
   if (!topic || !question) return;
@@ -3733,9 +3994,20 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
     min_papers: numberInputValue(elements.initialMinPapers, 2),
     max_papers: numberInputValue(elements.initialMaxPapers, 6),
     max_search_rounds: numberInputValue(elements.initialMaxSearchRounds, 3),
+    year_from: numberInputValue(elements.initialYearFrom, 2024),
+    year_to: numberInputValue(elements.initialYearTo, 2026),
+    quality_venues_only: elements.initialQualityVenuesOnly.checked,
   };
   if (reviewLimits.min_papers > reviewLimits.max_papers) {
     notify("精读篇数下限不能大于上限", true);
+    return;
+  }
+  if (
+    reviewLimits.year_from < 2000
+    || reviewLimits.year_to > 2026
+    || reviewLimits.year_from > reviewLimits.year_to
+  ) {
+    notify("论文年份需在 2000-2026 之间，且起始年份不能晚于结束年份", true);
     return;
   }
   toggleNewProject(false);
@@ -3855,3 +4127,6 @@ async function initialize() {
 }
 
 initialize();
+window.setInterval(() => {
+  if (document.visibilityState === "visible") void loadProjects();
+}, 4000);

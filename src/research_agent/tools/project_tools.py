@@ -35,7 +35,12 @@ def build_project_tools(
     ) -> str:
         """Create a research project and return its structured state as JSON."""
         project = service.create_project(topic, research_question)
-        state.register_project(thread_id_from_config(runtime.config), project.project_id)
+        state.register_project(
+            thread_id_from_config(runtime.config),
+            project.project_id,
+            user_id=project.user_id,
+            conversation_id=project.conversation_id,
+        )
         return project.model_dump_json()
 
     @tool

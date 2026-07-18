@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -212,6 +213,7 @@ def build_literature_tools(
     *,
     openalex_api_key: str | None = None,
     contact_email: str | None = None,
+    venue_index: Any | None = None,
     max_retries: int = 3,
     backoff_seconds: float = 1.0,
     max_retry_wait_seconds: float = 30.0,
@@ -245,18 +247,62 @@ def build_literature_tools(
     def recoverable_error(error: AcademicApiError) -> str:
         return json.dumps(error.to_payload(), ensure_ascii=False)
 
+    def prepare_candidates(
+        candidates: list[dict[str, Any]],
+        *,
+        limit: int,
+        year_from: int | None,
+        year_to: int | None,
+        quality_venues_only: bool,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for candidate in candidates:
+            year = candidate.get("year")
+            if year_from is not None and (year is None or int(year) < year_from):
+                continue
+            if year_to is not None and (year is None or int(year) > year_to):
+                continue
+            enriched = (
+                venue_index.enrich_candidate(candidate)
+                if venue_index is not None
+                else dict(candidate)
+            )
+            if quality_venues_only and (
+                venue_index is None
+                or not venue_index.qualifies_for_quality_filter(enriched)
+            ):
+                continue
+            prepared.append(enriched)
+            if len(prepared) >= limit:
+                break
+        return prepared
+
     @tool
-    def search_openalex(query: str, limit: int = 5) -> str:
-        """Search OpenAlex and return paper metadata or a recoverable error JSON."""
+    def search_openalex(
+        query: str,
+        limit: int = 5,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
+    ) -> str:
+        """Search OpenAlex with enforced year and venue-quality constraints."""
         limit = max(1, min(limit, 20))
+        upstream_limit = min(50, max(limit, limit * 5 if quality_venues_only else limit))
         params = {
             "search": query,
-            "per-page": limit,
+            "per-page": upstream_limit,
             "select": (
                 "id,title,authorships,publication_year,doi,primary_location,"
                 "best_oa_location,abstract_inverted_index"
             ),
         }
+        filters: list[str] = []
+        if year_from is not None:
+            filters.append(f"from_publication_date:{max(2000, year_from)}-01-01")
+        if year_to is not None:
+            filters.append(f"to_publication_date:{min(2026, year_to)}-12-31")
+        if filters:
+            params["filter"] = ",".join(filters)
         if openalex_api_key:
             params["api_key"] = openalex_api_key
         if contact_email:
@@ -270,6 +316,7 @@ def build_literature_tools(
         for item in data.get("results", []):
             best_oa = item.get("best_oa_location") or {}
             primary = item.get("primary_location") or {}
+            venue_source = primary.get("source") or best_oa.get("source") or {}
             works.append(
                 {
                     "paper_id": item.get("id", ""),
@@ -289,15 +336,40 @@ def build_literature_tools(
                         or primary.get("landing_page_url")
                     ),
                     "source": "OpenAlex",
+                    "venue": venue_source.get("display_name", ""),
+                    "venue_type": venue_source.get("type"),
                 }
             )
-        return json.dumps(works, ensure_ascii=False)
+        return json.dumps(
+            prepare_candidates(
+                works,
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+                quality_venues_only=quality_venues_only,
+            ),
+            ensure_ascii=False,
+        )
 
     @tool
-    def search_crossref(query: str, limit: int = 5) -> str:
-        """Search Crossref and return DOI records or a recoverable error JSON."""
+    def search_crossref(
+        query: str,
+        limit: int = 5,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
+    ) -> str:
+        """Search Crossref with enforced year and venue-quality constraints."""
         limit = max(1, min(limit, 20))
-        params = {"query": query, "rows": limit}
+        upstream_limit = min(50, max(limit, limit * 5 if quality_venues_only else limit))
+        params = {"query": query, "rows": upstream_limit}
+        filters: list[str] = []
+        if year_from is not None:
+            filters.append(f"from-pub-date:{max(2000, year_from)}-01-01")
+        if year_to is not None:
+            filters.append(f"until-pub-date:{min(2026, year_to)}-12-31")
+        if filters:
+            params["filter"] = ",".join(filters)
         if contact_email:
             params["mailto"] = contact_email
         url = "https://api.crossref.org/works?" + urlencode(params)
@@ -308,6 +380,26 @@ def build_literature_tools(
         records = []
         for item in data.get("message", {}).get("items", []):
             title = (item.get("title") or [""])[0]
+            date = (
+                item.get("published-print")
+                or item.get("published-online")
+                or item.get("issued")
+                or {}
+            )
+            date_parts = date.get("date-parts") or []
+            year = (
+                date_parts[0][0]
+                if date_parts and isinstance(date_parts[0], list) and date_parts[0]
+                else None
+            )
+            item_type = str(item.get("type") or "")
+            venue_type = (
+                "conference"
+                if item_type in {"proceedings-article", "proceedings"}
+                else "journal"
+                if item_type in {"journal-article", "journal"}
+                else None
+            )
             records.append(
                 {
                     "paper_id": item.get("DOI", ""),
@@ -320,9 +412,21 @@ def build_literature_tools(
                     "doi": item.get("DOI"),
                     "url": item.get("URL"),
                     "source": "Crossref",
+                    "year": year,
+                    "venue": (item.get("container-title") or [""])[0],
+                    "venue_type": venue_type,
                 }
             )
-        return json.dumps(records, ensure_ascii=False)
+        return json.dumps(
+            prepare_candidates(
+                records,
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+                quality_venues_only=quality_venues_only,
+            ),
+            ensure_ascii=False,
+        )
 
     def openalex_pdf_urls(paper_id: str, doi: str) -> list[str]:
         identifier = paper_id.strip()

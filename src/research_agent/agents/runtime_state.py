@@ -267,21 +267,36 @@ class ResearchRuntimeState:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._project_ids: dict[str, str] = {}
+        self._user_ids: dict[str, str] = {}
+        self._conversation_ids: dict[str, str] = {}
         self._search_terms: dict[str, list[str]] = {}
         self._search_keys: dict[str, set[str]] = {}
         self._search_sources: dict[str, set[str]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
+        self._search_constraints: dict[str, dict[str, Any]] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
 
-    def register_project(self, thread_id: str, project_id: str) -> None:
+    def register_project(
+        self,
+        thread_id: str,
+        project_id: str,
+        *,
+        user_id: str = "",
+        conversation_id: str = "",
+    ) -> None:
         with self._lock:
             self._project_ids[thread_id] = project_id
+            if user_id:
+                self._user_ids[thread_id] = user_id
+            if conversation_id:
+                self._conversation_ids[thread_id] = conversation_id
             self._search_terms[thread_id] = []
             self._search_keys[thread_id] = set()
             self._search_sources[thread_id] = set()
             self._raw_search_results[thread_id] = []
+            self._search_constraints.setdefault(thread_id, {})
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
             for key in [item for item in self._rejections if item[0] == thread_id]:
@@ -292,6 +307,33 @@ class ResearchRuntimeState:
     def project_id(self, thread_id: str) -> str | None:
         with self._lock:
             return self._project_ids.get(thread_id)
+
+    def user_id(self, thread_id: str) -> str | None:
+        with self._lock:
+            return self._user_ids.get(thread_id)
+
+    def conversation_id(self, thread_id: str) -> str | None:
+        with self._lock:
+            return self._conversation_ids.get(thread_id)
+
+    def set_search_constraints(
+        self,
+        thread_id: str,
+        *,
+        year_from: int,
+        year_to: int,
+        quality_venues_only: bool,
+    ) -> None:
+        with self._lock:
+            self._search_constraints[thread_id] = {
+                "year_from": int(year_from),
+                "year_to": int(year_to),
+                "quality_venues_only": bool(quality_venues_only),
+            }
+
+    def search_constraints(self, thread_id: str) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._search_constraints.get(thread_id, {}))
 
     def record_search(self, thread_id: str, query: str) -> bool:
         query = query.strip()
@@ -349,6 +391,23 @@ class ResearchRuntimeState:
                     "url": item.get("url"),
                     "source": str(item.get("source", "")),
                     "library_id": str(item.get("library_id", "")),
+                    "venue": str(item.get("venue", "")),
+                    "venue_type": item.get("venue_type"),
+                    "venue_acronym": str(item.get("venue_acronym", "")),
+                    "ccf_rank": item.get("ccf_rank"),
+                    "ccf_category": item.get("ccf_category"),
+                    "ccf_year": item.get("ccf_year"),
+                    "sci_quartile": item.get("sci_quartile"),
+                    "index_name": item.get("index_name"),
+                    "impact_factor": item.get("impact_factor"),
+                    "impact_factor_year": item.get("impact_factor_year"),
+                    "nature_portfolio": bool(item.get("nature_portfolio")),
+                    "venue_rating_explanation": str(
+                        item.get("venue_rating_explanation", "")
+                    ),
+                    "venue_rating_source_url": item.get("venue_rating_source_url"),
+                    "venue_rating_source_label": item.get("venue_rating_source_label"),
+                    "venue_match_confidence": item.get("venue_match_confidence"),
                 }
             )
         with self._lock:
@@ -457,6 +516,12 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
                 status="error",
             )
         args = request.tool_call.get("args", {})
+        if name in {"search_openalex", "search_crossref"} and isinstance(args, dict):
+            args.update(
+                self.state.search_constraints(
+                    thread_id_from_config(request.runtime.config)
+                )
+            )
         query = str(args.get("query", ""))
         if self.state.record_search(thread_id, query):
             return None

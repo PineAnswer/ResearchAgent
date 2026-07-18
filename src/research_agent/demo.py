@@ -4,7 +4,10 @@ import json
 import tempfile
 from pathlib import Path
 
-from research_agent.application.research_service import ResearchService
+from research_agent.application.research_service import (
+    ResearchService,
+    WorkflowPrerequisiteError,
+)
 from research_agent.domain.models import ResearchStage, ReviewResult, ReviewVerdict
 from research_agent.domain.workflow import InvalidTransition
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
@@ -27,7 +30,7 @@ def run_offline_demo(database_path: Path | None = None) -> dict:
     premature_completion_blocked = False
     try:
         service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
-    except InvalidTransition:
+    except (InvalidTransition, WorkflowPrerequisiteError):
         premature_completion_blocked = True
 
     service.save_artifact(
@@ -141,6 +144,69 @@ def run_offline_demo(database_path: Path | None = None) -> dict:
         ResearchStage.REVIEWED,
         actor="evidence-reviewer",
         review=review,
+    )
+
+    section_id = "demo-findings"
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "ReviewOutline",
+        {
+            "title": "离线演示综述",
+            "narrative_arc": "仅验证写作与事实核查流程",
+            "sections": [
+                {
+                    "section_id": section_id,
+                    "heading": "演示结论",
+                    "assigned_paper_ids": ["DEMO-PAPER"],
+                    "assigned_evidence_ids": ["DEMO-PAPER:E1"],
+                    "key_claims": ["该离线项目只验证流程，不提供科研结论"],
+                    "target_words": 100,
+                }
+            ],
+        },
+        ResearchStage.OUTLINED,
+        actor="research-outliner",
+    )
+    section_content = "该离线项目只验证流程，不提供科研结论 [DEMO-PAPER:E1]。"
+    service.save_artifact(
+        project.project_id,
+        "SectionDraft",
+        {
+            "section_id": section_id,
+            "heading": "演示结论",
+            "content": section_content,
+            "cited_evidence": ["DEMO-PAPER:E1"],
+        },
+    )
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "NarrativeReview",
+        {
+            "title": "离线演示综述",
+            "abstract": "该综述仅用于验证离线工作流。",
+            "sections": [
+                {
+                    "section_id": section_id,
+                    "heading": "演示结论",
+                    "content": section_content,
+                    "cited_evidence": ["DEMO-PAPER:E1"],
+                }
+            ],
+            "references": [],
+            "word_count": len(section_content),
+            "evidence_chain": {"DEMO-PAPER:E1": [section_id]},
+        },
+        ResearchStage.NARRATED,
+        actor="chief-editor",
+    )
+    service.save_artifact(
+        project.project_id,
+        "FactCheckReport",
+        {
+            "section_id": section_id,
+            "verdict": "PASS",
+            "issues": [],
+        },
     )
     project = service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
 

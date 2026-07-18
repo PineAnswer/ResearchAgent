@@ -60,6 +60,7 @@ class SearchReviewService:
         search_limit: int = 10,
         min_papers: int = 1,
         max_papers: int = 8,
+        venue_index: Any | None = None,
     ) -> None:
         self.service = service
         self.tools = literature_tools
@@ -68,6 +69,7 @@ class SearchReviewService:
         self.search_limit = max(1, min(search_limit, 20))
         self.min_papers = max(1, min_papers)
         self.max_papers = max(self.min_papers, max_papers)
+        self.venue_index = venue_index
 
     def _latest_snapshot(self, project_id: str) -> CandidateSetSnapshot:
         artifacts = self.service.repository.list_artifacts(
@@ -188,6 +190,9 @@ class SearchReviewService:
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
     ) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         if project.stage is not ResearchStage.SEARCHED:
@@ -205,16 +210,37 @@ class SearchReviewService:
             max_search_rounds=max_search_rounds,
         )
         min_papers, max_papers, max_rounds = self._resolve_limits(feedback=config)
-        candidates = [
-            PaperCandidate.model_validate(item)
-            for item in report.get("candidates", [])
-        ]
+        resolved_year_from = 2000 if year_from is None else year_from
+        resolved_year_to = 2026 if year_to is None else year_to
+        enforce_year_range = year_from is not None or year_to is not None
+        candidates = []
+        for item in report.get("candidates", []):
+            payload = (
+                self.venue_index.enrich_candidate(item)
+                if self.venue_index is not None
+                else item
+            )
+            candidate = PaperCandidate.model_validate(payload)
+            if enforce_year_range and (
+                candidate.year is None
+                or not resolved_year_from <= candidate.year <= resolved_year_to
+            ):
+                continue
+            if quality_venues_only and (
+                self.venue_index is None
+                or not self.venue_index.qualifies_for_quality_filter(payload)
+            ):
+                continue
+            candidates.append(candidate)
         snapshot = CandidateSetSnapshot(
             candidates=candidates,
             executed_queries=report.get("search_terms", []),
             max_search_rounds=max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
+            year_from=resolved_year_from,
+            year_to=resolved_year_to,
+            quality_venues_only=quality_venues_only,
             **self._agent_review_fields(
                 candidates,
                 decisions=report.get("screening_decisions", {}),
@@ -248,12 +274,21 @@ class SearchReviewService:
     def _search_queries(
         self,
         queries: Sequence[str],
+        snapshot: CandidateSetSnapshot,
     ) -> tuple[list[PaperCandidate], list[str]]:
         candidates: list[PaperCandidate] = []
         failures: list[str] = []
         search_tool = self.tools["search_openalex"]
         for query in queries:
-            raw = search_tool.invoke({"query": query, "limit": self.search_limit})
+            raw = search_tool.invoke(
+                {
+                    "query": query,
+                    "limit": self.search_limit,
+                    "year_from": snapshot.year_from,
+                    "year_to": snapshot.year_to,
+                    "quality_venues_only": snapshot.quality_venues_only,
+                }
+            )
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and parsed.get("ok") is False:
                 failures.append(f"{query}: {parsed.get('error_code', 'search_failed')}")
@@ -351,7 +386,7 @@ class SearchReviewService:
         manual_candidates = [
             self._resolve_manual_paper(item) for item in feedback.added_papers
         ]
-        searched_candidates, failures = self._search_queries(new_queries)
+        searched_candidates, failures = self._search_queries(new_queries, snapshot)
         excluded_ids = {
             *(normalize_paper_id(item) for item in snapshot.excluded_paper_ids),
             *(
@@ -379,6 +414,9 @@ class SearchReviewService:
             max_search_rounds=max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
+            year_from=snapshot.year_from,
+            year_to=snapshot.year_to,
+            quality_venues_only=snapshot.quality_venues_only,
             **self._agent_review_fields(
                 candidates,
                 decisions=prior_status,

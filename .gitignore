@@ -6,6 +6,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .research-agent/
+server_out.txt
+server_err.txt
 dist/
 build/
 *.egg-info/

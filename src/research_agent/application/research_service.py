@@ -97,10 +97,39 @@ class ResearchService:
         if self.exporter is not None:
             self.exporter.export_snapshot(project_id, self.get_snapshot(project_id))
 
-    def create_project(self, topic: str, research_question: str):
-        project = self.repository.create_project(topic, research_question)
+    def create_project(
+        self,
+        topic: str,
+        research_question: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str = "",
+    ):
+        project = self.repository.create_project(
+            topic,
+            research_question,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
         self._export_snapshot(project.project_id)
         return project
+
+    def create_conversation(self, topic: str, research_question: str):
+        conversation, project = self.repository.create_conversation(
+            topic,
+            research_question,
+        )
+        self._export_snapshot(project.project_id)
+        return conversation, project
+
+    def get_conversation(self, conversation_id: str):
+        return self.repository.get_conversation(conversation_id)
+
+    def get_project_conversation(self, project_id: str):
+        return self.repository.get_project_conversation(project_id)
+
+    def list_conversations(self, limit: int = 50):
+        return self.repository.list_conversations(limit)
 
     def get_project(self, project_id: str):
         return self.repository.get_project(project_id)
@@ -114,7 +143,7 @@ class ResearchService:
             self.exporter.delete_project(project_id)
 
     def get_snapshot(self, project_id: str) -> dict[str, Any]:
-        return {
+        snapshot = {
             "project": self.repository.get_project(project_id).model_dump(mode="json"),
             "artifacts": [
                 item.model_dump(mode="json")
@@ -124,6 +153,31 @@ class ResearchService:
                 item.model_dump(mode="json") for item in self.repository.list_events(project_id)
             ],
         }
+        try:
+            conversation = self.repository.get_project_conversation(project_id)
+        except KeyError:
+            return snapshot
+        runs = self.repository.list_conversation_runs(conversation.conversation_id)
+        active_run = next(
+            (run for run in runs if run.status in {"queued", "running"}),
+            None,
+        )
+        snapshot.update(
+            {
+                "conversation": conversation.model_dump(mode="json"),
+                "runs": [run.model_dump(mode="json") for run in runs],
+                "active_run": (
+                    active_run.model_dump(mode="json") if active_run is not None else None
+                ),
+                "messages": [
+                    item.model_dump(mode="json")
+                    for item in self.repository.list_conversation_messages(
+                        conversation.conversation_id
+                    )
+                ],
+            }
+        )
+        return snapshot
 
     def get_agent_context(self, project_id: str) -> dict[str, Any]:
         """Return only the current-stage artifacts a subagent needs."""
@@ -578,8 +632,25 @@ class ResearchService:
                     "ScreeningDecision includes papers missing from candidate metadata: "
                     + paper_id
                 )
-            normalized = dict(match)
-            normalized["paper_id"] = normalize_paper_id(str(normalized.get("paper_id", "")))
+            normalized = {
+                field: match.get(field)
+                for field in (
+                    "paper_id",
+                    "title",
+                    "authors",
+                    "year",
+                    "abstract",
+                    "doi",
+                    "url",
+                    "source",
+                    "library_id",
+                )
+            }
+            normalized["paper_id"] = normalize_paper_id(
+                str(normalized.get("paper_id", ""))
+            )
+            normalized["authors"] = normalized.get("authors") or []
+            normalized["library_id"] = normalized.get("library_id") or ""
             included_papers.append(normalized)
 
         return {
