@@ -1,6 +1,7 @@
 import pytest
 
 from research_agent.application.library_service import LibraryService
+from research_agent.domain.models import LibraryFinding, LibraryPaperAnalysis
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 
 
@@ -253,3 +254,76 @@ def test_library_notes_attachments_merge_and_comparison(tmp_path) -> None:
         "Which study mentions traceability?",
     )
     assert merged.title in answer["answer"]
+
+
+def test_pdf_pages_are_indexed_and_retrieved_with_stable_page_sources(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    paper = service.upsert_paper(
+        {
+            "paper_id": "W-LOCAL",
+            "title": "Sparse routing evaluation",
+            "abstract": "A study of routing stability.",
+        }
+    )
+    attachment = service.add_attachment(
+        paper.library_id,
+        name="routing.pdf",
+        url="https://example.test/routing.pdf",
+    )
+
+    chunks = service.index_attachment_pages(
+        paper.library_id,
+        attachment.attachment_id,
+        [
+            {"page": 1, "text": "We evaluate sparse routing on Dataset Alpha."},
+            {"page": 2, "text": "The proposed gate improves routing stability by design."},
+        ],
+    )
+    artifact = service.save_paper_analysis(
+        paper.library_id,
+        attachment.attachment_id,
+        LibraryPaperAnalysis(
+            summary="The paper evaluates sparse routing.",
+            methods=["sparse mixture routing"],
+            datasets=["Dataset Alpha"],
+            findings=[
+                LibraryFinding(
+                    claim="The gate improves routing stability.",
+                    quote="The proposed gate improves routing stability by design.",
+                    page=2,
+                )
+            ],
+            limitations=["Single dataset"],
+        ),
+    )
+
+    sources = service.retrieve_library_sources(
+        "routing stability",
+        library_ids=[paper.library_id],
+    )
+    detail = service.get_paper(paper.library_id)
+
+    assert len(chunks) == 2
+    assert any(source["source_type"] == "pdf" and source["page"] == 2 for source in sources)
+    assert any(source["source_id"] == chunks[1].chunk_id for source in sources)
+    assert artifact.kind == "PaperCard"
+    assert detail["indexed_chunk_count"] == 2
+    assert detail["analyses"][0]["payload"]["datasets"] == ["Dataset Alpha"]
+
+
+def test_library_search_and_extract_fallback_cover_the_full_library(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    first = service.upsert_paper(
+        {"title": "Traceable synthesis", "abstract": "Evidence links improve traceability."}
+    )
+    service.upsert_paper({"title": "Unrelated baseline", "abstract": "A baseline."})
+
+    results = service.search_library("evidence traceability")
+    answer = service.answer_library_question([], "Which work improves traceability?")
+
+    assert results[0]["library_id"] == first.library_id
+    assert answer["mode"] == "extractive"
+    assert answer["citations"][0]["library_id"] == first.library_id
+    assert "Traceable synthesis" in answer["answer"]

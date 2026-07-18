@@ -269,6 +269,7 @@ class ResearchRuntimeState:
         self._project_ids: dict[str, str] = {}
         self._search_terms: dict[str, list[str]] = {}
         self._search_keys: dict[str, set[str]] = {}
+        self._search_sources: dict[str, set[str]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str], int] = {}
@@ -279,6 +280,7 @@ class ResearchRuntimeState:
             self._project_ids[thread_id] = project_id
             self._search_terms[thread_id] = []
             self._search_keys[thread_id] = set()
+            self._search_sources[thread_id] = set()
             self._raw_search_results[thread_id] = []
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
@@ -309,6 +311,14 @@ class ResearchRuntimeState:
         with self._lock:
             return list(self._search_terms.get(thread_id, []))
 
+    def mark_search_source(self, thread_id: str, source: str) -> None:
+        with self._lock:
+            self._search_sources.setdefault(thread_id, set()).add(source)
+
+    def has_search_source(self, thread_id: str, source: str) -> bool:
+        with self._lock:
+            return source in self._search_sources.get(thread_id, set())
+
     def store_search_results(self, thread_id: str, results_json: str) -> None:
         """Persist raw search tool output so the LLM does not need to
         reproduce full paper metadata in its structured_response."""
@@ -338,6 +348,7 @@ class ResearchRuntimeState:
                     "doi": item.get("doi"),
                     "url": item.get("url"),
                     "source": str(item.get("source", "")),
+                    "library_id": str(item.get("library_id", "")),
                 }
             )
         with self._lock:
@@ -423,13 +434,31 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
 
     def _reserve(self, request: ToolCallRequest) -> ToolMessage | None:
         name = str(request.tool_call.get("name", ""))
-        if name not in {"search_openalex", "search_crossref"}:
+        if name not in {"search_library", "search_openalex", "search_crossref"}:
             return None
+        thread_id = thread_id_from_config(request.runtime.config)
+        if name != "search_library" and not self.state.has_search_source(
+            thread_id,
+            "search_library",
+        ):
+            return ToolMessage(
+                content=json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "local_library_search_required",
+                        "instruction": (
+                            "必须先调用 search_library；只有确认本地覆盖缺口后才能联网检索。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_call_id=str(request.tool_call.get("id", "library-first-search")),
+                name=name,
+                status="error",
+            )
         args = request.tool_call.get("args", {})
         query = str(args.get("query", ""))
-        if self.state.record_search(
-            thread_id_from_config(request.runtime.config), query
-        ):
+        if self.state.record_search(thread_id, query):
             return None
         return ToolMessage(
             content=json.dumps(
@@ -448,12 +477,14 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
 
     def _capture_result(self, request: ToolCallRequest, result: Any) -> None:
         name = str(request.tool_call.get("name", ""))
-        if name not in {"search_openalex", "search_crossref"}:
+        if name not in {"search_library", "search_openalex", "search_crossref"}:
             return
         content = getattr(result, "content", result)
         if isinstance(content, str):
+            thread_id = thread_id_from_config(request.runtime.config)
+            self.state.mark_search_source(thread_id, name)
             self.state.store_search_results(
-                thread_id_from_config(request.runtime.config), content
+                thread_id, content
             )
 
     def wrap_tool_call(

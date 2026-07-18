@@ -12,6 +12,8 @@ from typing import Any, Iterator
 from research_agent.domain.models import (
     ArtifactRecord,
     LibraryAttachment,
+    LibraryArtifact,
+    LibraryChunk,
     LibraryCollection,
     LibraryNote,
     LibraryPaper,
@@ -150,6 +152,36 @@ class SqliteResearchRepository:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS library_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    library_id TEXT NOT NULL,
+                    attachment_id TEXT NOT NULL,
+                    page INTEGER,
+                    chunk_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(library_id) REFERENCES library_papers(library_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(attachment_id) REFERENCES library_attachments(attachment_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS library_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    library_id TEXT NOT NULL,
+                    attachment_id TEXT,
+                    kind TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(library_id) REFERENCES library_papers(library_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(attachment_id) REFERENCES library_attachments(attachment_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_library_papers_saved_updated
                     ON library_papers(saved, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_project_papers_library
@@ -160,6 +192,10 @@ class SqliteResearchRepository:
                     ON library_notes(library_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_library_attachments_paper
                     ON library_attachments(library_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_library_chunks_paper
+                    ON library_chunks(library_id, attachment_id, page, chunk_index);
+                CREATE INDEX IF NOT EXISTS idx_library_artifacts_paper
+                    ON library_artifacts(library_id, kind, created_at DESC);
                 """
             )
 
@@ -339,6 +375,8 @@ class SqliteResearchRepository:
             connection.execute("DELETE FROM project_papers WHERE library_id = ?", (library_id,))
             connection.execute("DELETE FROM library_collection_papers WHERE library_id = ?", (library_id,))
             connection.execute("DELETE FROM library_notes WHERE library_id = ?", (library_id,))
+            connection.execute("DELETE FROM library_chunks WHERE library_id = ?", (library_id,))
+            connection.execute("DELETE FROM library_artifacts WHERE library_id = ?", (library_id,))
             connection.execute("DELETE FROM library_attachments WHERE library_id = ?", (library_id,))
             connection.execute("DELETE FROM library_papers WHERE library_id = ?", (library_id,))
 
@@ -542,6 +580,129 @@ class SqliteResearchRepository:
             if cursor.rowcount == 0:
                 raise KeyError(attachment_id)
 
+    def replace_library_chunks(
+        self,
+        library_id: str,
+        attachment_id: str,
+        chunks: list[LibraryChunk],
+    ) -> list[LibraryChunk]:
+        self.get_library_paper(library_id)
+        attachment = self.get_library_attachment(attachment_id)
+        if attachment.library_id != library_id:
+            raise ValueError("Attachment does not belong to the requested paper")
+        if any(
+            chunk.library_id != library_id or chunk.attachment_id != attachment_id
+            for chunk in chunks
+        ):
+            raise ValueError("Chunk ownership does not match its attachment")
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM library_chunks WHERE attachment_id = ?",
+                (attachment_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO library_chunks(
+                    chunk_id, library_id, attachment_id, page, chunk_index,
+                    text, content_hash, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chunk.chunk_id,
+                        chunk.library_id,
+                        chunk.attachment_id,
+                        chunk.page,
+                        chunk.chunk_index,
+                        chunk.text,
+                        chunk.content_hash,
+                        chunk.model_dump_json(),
+                        chunk.created_at.isoformat(),
+                    )
+                    for chunk in chunks
+                ],
+            )
+        return chunks
+
+    def list_library_chunks(
+        self,
+        *,
+        library_ids: list[str] | None = None,
+        attachment_id: str | None = None,
+        chunk_ids: list[str] | None = None,
+        limit: int = 5000,
+    ) -> list[LibraryChunk]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if library_ids:
+            placeholders = ",".join("?" for _ in library_ids)
+            clauses.append(f"library_id IN ({placeholders})")
+            params.extend(library_ids)
+        if attachment_id:
+            clauses.append("attachment_id = ?")
+            params.append(attachment_id)
+        if chunk_ids:
+            placeholders = ",".join("?" for _ in chunk_ids)
+            clauses.append(f"chunk_id IN ({placeholders})")
+            params.extend(chunk_ids)
+        sql = "SELECT payload_json FROM library_chunks"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY library_id, attachment_id, page, chunk_index LIMIT ?"
+        params.append(max(1, min(int(limit), 20_000)))
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [LibraryChunk.model_validate_json(row["payload_json"]) for row in rows]
+
+    def save_library_artifact(self, artifact: LibraryArtifact) -> LibraryArtifact:
+        self.get_library_paper(artifact.library_id)
+        if artifact.attachment_id:
+            attachment = self.get_library_attachment(artifact.attachment_id)
+            if attachment.library_id != artifact.library_id:
+                raise ValueError("Artifact attachment belongs to another paper")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO library_artifacts(
+                    artifact_id, library_id, attachment_id, kind, mode,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                    library_id = excluded.library_id,
+                    attachment_id = excluded.attachment_id,
+                    kind = excluded.kind,
+                    mode = excluded.mode,
+                    payload_json = excluded.payload_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    artifact.artifact_id,
+                    artifact.library_id,
+                    artifact.attachment_id,
+                    artifact.kind,
+                    artifact.mode,
+                    artifact.model_dump_json(),
+                    artifact.created_at.isoformat(),
+                ),
+            )
+        return artifact
+
+    def list_library_artifacts(
+        self,
+        library_id: str,
+        kind: str | None = None,
+    ) -> list[LibraryArtifact]:
+        self.get_library_paper(library_id)
+        params: list[Any] = [library_id]
+        sql = "SELECT payload_json FROM library_artifacts WHERE library_id = ?"
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY created_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [LibraryArtifact.model_validate_json(row["payload_json"]) for row in rows]
+
     def merge_library_papers(
         self,
         primary: LibraryPaper,
@@ -609,6 +770,28 @@ class SqliteResearchRepository:
                         attachment.model_dump_json(),
                         row["attachment_id"],
                     ),
+                )
+            chunk_rows = connection.execute(
+                "SELECT chunk_id, payload_json FROM library_chunks WHERE library_id = ?",
+                (duplicate_id,),
+            ).fetchall()
+            for row in chunk_rows:
+                chunk = LibraryChunk.model_validate_json(row["payload_json"])
+                chunk.library_id = primary.library_id
+                connection.execute(
+                    "UPDATE library_chunks SET library_id = ?, payload_json = ? WHERE chunk_id = ?",
+                    (primary.library_id, chunk.model_dump_json(), row["chunk_id"]),
+                )
+            artifact_rows = connection.execute(
+                "SELECT artifact_id, payload_json FROM library_artifacts WHERE library_id = ?",
+                (duplicate_id,),
+            ).fetchall()
+            for row in artifact_rows:
+                artifact = LibraryArtifact.model_validate_json(row["payload_json"])
+                artifact.library_id = primary.library_id
+                connection.execute(
+                    "UPDATE library_artifacts SET library_id = ?, payload_json = ? WHERE artifact_id = ?",
+                    (primary.library_id, artifact.model_dump_json(), row["artifact_id"]),
                 )
             connection.execute("DELETE FROM project_papers WHERE library_id = ?", (duplicate_id,))
             connection.execute("DELETE FROM library_collection_papers WHERE library_id = ?", (duplicate_id,))

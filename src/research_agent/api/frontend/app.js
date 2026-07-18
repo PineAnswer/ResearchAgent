@@ -144,6 +144,7 @@ const state = {
   selectedLibraryIds: new Set(),
   libraryView: "all",
   libraryCollectionId: null,
+  libraryAssistantScope: "all",
   runStartedAt: null,
   runClockTimer: null,
   runPollTimer: null,
@@ -171,6 +172,7 @@ const elements = {
   libraryView: byId("libraryView"),
   librarySearch: byId("librarySearch"),
   refreshLibrary: byId("refreshLibrary"),
+  askLibrary: byId("askLibrary"),
   libraryList: byId("libraryList"),
   libraryCount: byId("libraryCount"),
   libraryDetail: byId("libraryDetail"),
@@ -190,6 +192,7 @@ const elements = {
   libraryCompareTable: byId("libraryCompareTable"),
   libraryAssistantForm: byId("libraryAssistantForm"),
   libraryAssistantQuestion: byId("libraryAssistantQuestion"),
+  libraryAssistantScopeLabel: byId("libraryAssistantScopeLabel"),
   libraryAssistantAnswer: byId("libraryAssistantAnswer"),
   libraryImportFormat: byId("libraryImportFormat"),
   libraryImportContent: byId("libraryImportContent"),
@@ -959,6 +962,62 @@ function renderLibraryDetail(detail) {
     evidence.append(cardNode);
   });
 
+  const analyses = document.createElement("section");
+  analyses.className = "library-detail-section";
+  const analysisArtifacts = detail.analyses || [];
+  const analysesTitle = document.createElement("h4");
+  analysesTitle.textContent = `AI 精读卡（${analysisArtifacts.length}）`;
+  analyses.append(analysesTitle);
+  if (!analysisArtifacts.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "上传可提取文本的 PDF 后，将在这里生成方法、数据集、结论、局限和带页码原文。";
+    analyses.append(empty);
+  } else {
+    const latest = analysisArtifacts[0];
+    const payload = latest.payload || {};
+    const card = document.createElement("article");
+    card.className = "library-analysis-card";
+    const mode = document.createElement("span");
+    mode.className = "library-analysis-mode";
+    mode.textContent = latest.mode === "agent" ? "AI 精读" : "本地索引";
+    const summary = document.createElement("p");
+    summary.textContent = payload.summary || "尚未生成摘要。";
+    card.append(mode, summary);
+    const dimensions = [
+      ["方法", payload.methods || []],
+      ["数据集", payload.datasets || []],
+      ["局限", payload.limitations || []],
+    ];
+    dimensions.forEach(([label, values]) => {
+      if (!values.length) return;
+      const row = document.createElement("div");
+      row.className = "library-analysis-row";
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      const text = document.createElement("span");
+      text.textContent = values.join("；");
+      row.append(strong, text);
+      card.append(row);
+    });
+    if ((payload.findings || []).length) {
+      const findingsTitle = document.createElement("strong");
+      findingsTitle.textContent = "可审核结论";
+      const findings = document.createElement("ol");
+      findings.className = "library-analysis-findings";
+      payload.findings.forEach((finding) => {
+        const item = document.createElement("li");
+        const claim = document.createElement("p");
+        claim.textContent = finding.claim || "结论";
+        const quote = document.createElement("blockquote");
+        quote.textContent = `${finding.quote || ""}${finding.page ? `（第 ${finding.page} 页）` : ""}`;
+        item.append(claim, quote);
+        findings.append(item);
+      });
+      card.append(findingsTitle, findings);
+    }
+    analyses.append(card);
+  }
+
   const projects = document.createElement("section");
   projects.className = "library-detail-section";
   const projectsTitle = document.createElement("h4");
@@ -1015,7 +1074,43 @@ function renderLibraryDetail(detail) {
     link.rel = "noopener noreferrer";
     link.textContent = attachment.name;
     const statusText = document.createElement("span");
-    statusText.textContent = attachment.full_text_status === "ready" ? "全文可用" : "已链接";
+    const statusLabels = {
+      linked: "已链接",
+      uploaded: "等待解析",
+      extracting: "正在解析与精读",
+      indexed: `已索引 · ${attachment.page_count || 0} 页 / ${attachment.chunk_count || 0} 段`,
+      failed: "解析失败",
+      ready: "待升级索引",
+      unavailable: "不可用",
+    };
+    statusText.textContent = statusLabels[attachment.full_text_status] || attachment.full_text_status;
+    if (attachment.error) statusText.title = attachment.error;
+    const rowActions = document.createElement("div");
+    rowActions.className = "library-attachment-row-actions";
+    const isUploaded = String(attachment.url || "").startsWith("/api/library/attachments/");
+    if (isUploaded && ["uploaded", "failed", "ready"].includes(attachment.full_text_status)) {
+      const ingest = document.createElement("button");
+      ingest.type = "button";
+      ingest.className = "quiet-button";
+      ingest.append(iconNode("scan-text"));
+      ingest.append(document.createTextNode(attachment.full_text_status === "failed" ? "重试解析" : "解析全文"));
+      ingest.addEventListener("click", async () => {
+        ingest.disabled = true;
+        try {
+          const payload = await api(`/api/library/attachments/${encodeURIComponent(attachment.attachment_id)}/ingest`, {
+            method: "POST",
+          });
+          const status = payload.data?.attachment?.full_text_status;
+          notify(status === "indexed" ? "PDF 已完成索引与精读" : "PDF 解析未成功，请查看状态详情", status !== "indexed");
+          await selectLibraryPaper(paper.library_id);
+        } catch (error) {
+          notify(`解析失败：${error.message}`, true);
+        } finally {
+          ingest.disabled = false;
+        }
+      });
+      rowActions.append(ingest);
+    }
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "quiet-button";
@@ -1024,7 +1119,8 @@ function renderLibraryDetail(detail) {
       await api(`/api/library/attachments/${encodeURIComponent(attachment.attachment_id)}`, { method: "DELETE" });
       await selectLibraryPaper(paper.library_id);
     });
-    row.append(link, statusText, remove);
+    rowActions.append(remove);
+    row.append(link, statusText, rowActions);
     attachments.append(row);
   });
   const addAttachment = document.createElement("button");
@@ -1070,7 +1166,13 @@ function renderLibraryDetail(detail) {
       const payload = await response.json();
       if (!response.ok) throw new Error(errorMessage(payload, `上传失败（HTTP ${response.status}）`));
       await selectLibraryPaper(paper.library_id);
-      notify("PDF 已上传并关联到文献");
+      const status = payload.data?.full_text_status;
+      notify(
+        status === "indexed"
+          ? "PDF 已上传，并完成分页索引与精读"
+          : "PDF 已上传，但自动解析未成功；可查看错误后重试",
+        status !== "indexed",
+      );
     } catch (error) {
       notify(`上传失败：${error.message}`, true);
     } finally {
@@ -1131,6 +1233,7 @@ function renderLibraryDetail(detail) {
     collections,
     notes,
     evidence,
+    analyses,
     projects,
     attachments,
     actions,
@@ -1370,6 +1473,17 @@ function renderLibraryComparison(data) {
   elements.libraryCompareTable.append(table);
 }
 
+function openLibraryAssistant() {
+  state.libraryAssistantScope = "all";
+  elements.libraryAssistantScopeLabel.textContent = "向整个文献库提问";
+  elements.libraryCompareTable.replaceChildren();
+  elements.libraryAssistantAnswer.replaceChildren();
+  elements.libraryAssistantAnswer.hidden = true;
+  elements.libraryComparePanel.hidden = false;
+  elements.libraryComparePanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  window.setTimeout(() => elements.libraryAssistantQuestion.focus(), 250);
+}
+
 async function compareSelectedLibraryPapers() {
   const libraryIds = [...state.selectedLibraryIds];
   if (libraryIds.length < 2 || libraryIds.length > 8) return;
@@ -1379,6 +1493,8 @@ async function compareSelectedLibraryPapers() {
       body: JSON.stringify({ library_ids: libraryIds }),
     });
     renderLibraryComparison(payload.data);
+    state.libraryAssistantScope = "selected";
+    elements.libraryAssistantScopeLabel.textContent = `向选中的 ${libraryIds.length} 篇文献提问`;
     elements.libraryComparePanel.hidden = false;
     elements.libraryComparePanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
@@ -1390,15 +1506,59 @@ async function askLibraryAssistant(event) {
   event.preventDefault();
   const question = elements.libraryAssistantQuestion.value.trim();
   if (!question) return;
+  const submit = elements.libraryAssistantForm.querySelector('button[type="submit"]');
+  const libraryIds = state.libraryAssistantScope === "selected"
+    ? [...state.selectedLibraryIds]
+    : [];
   try {
+    submit.disabled = true;
+    elements.libraryAssistantAnswer.hidden = false;
+    elements.libraryAssistantAnswer.replaceChildren();
+    const working = document.createElement("p");
+    working.className = "library-assistant-working";
+    working.append(iconNode("loader-circle"), document.createTextNode(" Agent 正在拆解问题并迭代取证…"));
+    elements.libraryAssistantAnswer.append(working);
+    refreshIcons();
     const payload = await api("/api/library/assistant", {
       method: "POST",
-      body: JSON.stringify({ library_ids: [...state.selectedLibraryIds], question }),
+      body: JSON.stringify({ library_ids: libraryIds, question }),
     });
-    elements.libraryAssistantAnswer.hidden = false;
-    elements.libraryAssistantAnswer.textContent = payload.data.answer;
+    const data = payload.data || {};
+    elements.libraryAssistantAnswer.replaceChildren();
+    const resultHeader = document.createElement("div");
+    resultHeader.className = "library-assistant-result-header";
+    const badge = document.createElement("span");
+    badge.textContent = data.mode === "agent" ? "Agent 取证" : "本地检索";
+    const coverage = document.createElement("p");
+    coverage.textContent = data.coverage_note || "";
+    resultHeader.append(badge, coverage);
+    elements.libraryAssistantAnswer.append(
+      resultHeader,
+      renderMarkdown(data.answer || "没有形成可引用的回答。", "aw-markdown library-agent-answer"),
+    );
+    if ((data.citations || []).length) {
+      const sourcesTitle = document.createElement("h4");
+      sourcesTitle.textContent = `引用来源（${data.citations.length}）`;
+      const sources = document.createElement("div");
+      sources.className = "library-assistant-sources";
+      data.citations.forEach((citation) => {
+        const source = document.createElement("article");
+        const title = document.createElement("button");
+        title.type = "button";
+        title.className = "quiet-button";
+        title.textContent = `${citation.citation || ""} ${citation.title || "未命名文献"}${citation.page ? ` · 第 ${citation.page} 页` : ""}`;
+        title.addEventListener("click", () => citation.library_id && selectLibraryPaper(citation.library_id));
+        const quote = document.createElement("blockquote");
+        quote.textContent = citation.quote || "";
+        source.append(title, quote);
+        sources.append(source);
+      });
+      elements.libraryAssistantAnswer.append(sourcesTitle, sources);
+    }
   } catch (error) {
     notify(`整理回答失败：${error.message}`, true);
+  } finally {
+    submit.disabled = false;
   }
 }
 
@@ -3541,6 +3701,7 @@ elements.newProjectToggle.addEventListener("click", () => {
 });
 elements.libraryToggle.addEventListener("click", openLibrary);
 elements.refreshLibrary.addEventListener("click", loadLibrary);
+elements.askLibrary.addEventListener("click", openLibraryAssistant);
 elements.importLibrary.addEventListener("click", importLibraryRecords);
 elements.newCollection.addEventListener("click", () => createLibraryCollection());
 elements.findDuplicates.addEventListener("click", findLibraryDuplicates);

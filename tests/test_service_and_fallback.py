@@ -422,6 +422,7 @@ def test_screening_context_returns_small_included_paper_metadata(tmp_path) -> No
             "authors": [],
             "year": None,
             "source": "OpenAlex",
+            "library_id": "",
         }
     ]
 

@@ -110,5 +110,6 @@ class LibrarySelectionRequest(BaseModel):
     library_ids: list[str] = Field(min_length=2, max_length=8)
 
 
-class LibraryAssistantRequest(LibrarySelectionRequest):
+class LibraryAssistantRequest(BaseModel):
+    library_ids: list[str] = Field(default_factory=list, max_length=50)
     question: str = Field(min_length=1)

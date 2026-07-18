@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from csv import DictReader
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -13,6 +16,8 @@ import httpx
 from botocore.exceptions import BotoCoreError, ClientError
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -32,13 +37,18 @@ from research_agent.agents.workflow_guard import ResearchWorkflowGuardMiddleware
 from research_agent.application.fallback import OfflineFallback
 from research_agent.application.research_service import ResearchService
 from research_agent.application.search_review import SearchReviewService
+from research_agent.domain.models import (
+    LibraryAgentResponse,
+    LibraryPaperAnalysis,
+)
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
 from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 from research_agent.infrastructure.workspace import WorkspaceBootstrapper
-from research_agent.tools.literature_tools import build_literature_tools
+from research_agent.tools.library_tools import build_library_tools
+from research_agent.tools.literature_tools import build_literature_tools, extract_pdf_pages
 from research_agent.tools.project_tools import build_project_tools
 
 
@@ -72,6 +82,33 @@ FALLBACK_EXCEPTIONS = (
 )
 
 
+LIBRARY_READER_PROMPT = """
+你是文献库 AI 精读助手。只能依据输入的逐页 PDF 原文生成结构化精读卡。
+提取研究方法、数据集、主要结论、局限和关键词。每条 finding 必须包含：
+1. 简洁、忠于原文的 claim；
+2. 从同一页逐字复制的 quote，不得改写；
+3. quote 所在的真实 page 页码；
+4. 可识别时填写 section。
+无法由输入原文支持的内容不要输出，不得利用外部知识补全。
+""".strip()
+
+
+LIBRARY_AGENT_PROMPT = """
+你是可调用工具的 Ask Library Agent。你必须先拆解问题，再迭代检索文献库，必要时读取
+单篇上下文或追加更精确的段落检索。只允许依据工具返回的文献库材料回答，禁止使用外部
+知识补全事实。
+
+工作规则：
+1. 先调用 search_library 判断相关论文和覆盖情况；不能直接作答。
+2. 再调用 retrieve_library_passages 获取能够支撑答案的原文，复杂问题可换角度迭代检索。
+3. 需要论文整体方法、局限或历史证据时调用 get_library_paper_context。
+4. cited_source_ids 只能填写工具结果中真实出现的 source_id，按首次使用顺序排列。
+5. answer 中每个事实性结论后必须写 [[source_id]]；没有来源支撑就明确说材料不足。
+6. 不得把论文标题、DOI、library_id 或自行编造的编号当作 source_id。
+7. coverage_note 说明已覆盖的范围和仍缺失的证据。
+""".strip()
+
+
 class ResearchSupervisor:
     """Shared orchestration entry for CLI and API."""
 
@@ -95,6 +132,8 @@ class ResearchSupervisor:
         self.literature_tools_by_name = {
             tool.name: tool for tool in self.literature_tools
         }
+        self.library_toolset = build_library_tools(self.service.library)
+        self.library_tools = self.library_toolset.tools
         self._search_review_options_by_thread: dict[str, dict[str, int]] = {}
         self.search_review = SearchReviewService(
             self.service,
@@ -218,7 +257,7 @@ class ResearchSupervisor:
             self.runtime_state,
             on_search_committed=self._begin_search_review,
         )
-        all_tools = [*project_tools, *self.literature_tools]
+        all_tools = [*project_tools, *self.literature_tools, *self.library_tools]
         tools_by_name = {tool.name: tool for tool in all_tools}
         subagents = build_subagent_registry(
             tools_by_name,
@@ -240,6 +279,9 @@ class ResearchSupervisor:
             "extract_pdf_text",
             "fetch_paper_text",
             "verify_doi",
+            "search_library",
+            "retrieve_library_passages",
+            "get_library_paper_context",
         }
         supervisor_tools = [
             tool for tool in all_tools if tool.name not in hidden_supervisor_tools
@@ -688,84 +730,286 @@ class ResearchSupervisor:
             "run_log_dir": str(run_logger.run_dir),
         }
 
+    def _library_attachment_path(self, attachment_id: str) -> Path:
+        attachment = self.repository.get_library_attachment(attachment_id)
+        root = (Path(self.settings.data_dir) / "library-attachments").resolve()
+        expected = (root / attachment.library_id / attachment.attachment_id).resolve()
+        if expected.is_relative_to(root) and expected.is_file():
+            return expected
+        if root.is_dir():
+            for candidate in root.glob(f"*/{attachment.attachment_id}"):
+                resolved = candidate.resolve()
+                if resolved.is_relative_to(root) and resolved.is_file():
+                    return resolved
+        raise FileNotFoundError(attachment_id)
+
+    @staticmethod
+    def _extractive_library_analysis(
+        paper: dict[str, Any],
+        chunks: list[Any],
+        reason: str = "",
+    ) -> LibraryPaperAnalysis:
+        summary = str(paper.get("abstract") or "").strip()
+        if not summary and chunks:
+            summary = str(chunks[0].text).strip()[:1200]
+        limitations = ["当前精读卡由本地文本索引生成，尚未完成模型结构化抽取。"]
+        if reason:
+            limitations.append(f"AI 精读不可用：{reason[:300]}")
+        return LibraryPaperAnalysis(
+            summary=summary,
+            limitations=limitations,
+        )
+
+    @staticmethod
+    def _ground_library_analysis(
+        analysis: LibraryPaperAnalysis,
+        pages: list[dict[str, Any]],
+    ) -> LibraryPaperAnalysis:
+        page_text = {
+            int(item["page"]): re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+            for item in pages
+            if item.get("page") is not None
+        }
+        grounded = []
+        for finding in analysis.findings:
+            if finding.page is None or not finding.quote.strip():
+                continue
+            source = page_text.get(int(finding.page), "").casefold()
+            quote = re.sub(r"\s+", " ", finding.quote).strip().casefold()
+            if quote and quote in source:
+                grounded.append(finding)
+        return analysis.model_copy(update={"findings": grounded})
+
+    async def _generate_library_analysis(
+        self,
+        paper: dict[str, Any],
+        pages: list[dict[str, Any]],
+        chunks: list[Any],
+    ) -> tuple[LibraryPaperAnalysis, str]:
+        fallback = self._extractive_library_analysis(paper, chunks)
+        if self.graph is None or not chunks:
+            return fallback, "extractive"
+        source_parts: list[str] = []
+        total = 0
+        for item in pages:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            block = f"\n\n--- PAGE {item.get('page')} ---\n{text}"
+            if total + len(block) > 60_000:
+                break
+            source_parts.append(block)
+            total += len(block)
+        if not source_parts:
+            return fallback, "extractive"
+        try:
+            model = self._build_model()
+            if isinstance(model, str):
+                model = init_chat_model(model)
+            structured_model = model.with_structured_output(LibraryPaperAnalysis)
+            result = await structured_model.ainvoke(
+                [
+                    SystemMessage(content=LIBRARY_READER_PROMPT),
+                    HumanMessage(
+                        content=(
+                            f"论文标题：{paper.get('title', '')}\n"
+                            f"已有摘要：{paper.get('abstract', '')}\n"
+                            "以下是带真实页码的 PDF 原文："
+                            + "".join(source_parts)
+                        )
+                    ),
+                ]
+            )
+            analysis = LibraryPaperAnalysis.model_validate(result)
+            return self._ground_library_analysis(analysis, pages), "agent"
+        except Exception as exc:
+            return self._extractive_library_analysis(paper, chunks, str(exc)), "extractive"
+
+    async def ingest_library_attachment(self, attachment_id: str) -> dict[str, Any]:
+        """Extract, index, and structure one uploaded library PDF."""
+        attachment = self.repository.get_library_attachment(attachment_id)
+        paper = self.repository.get_library_paper(attachment.library_id)
+        attachment = attachment.model_copy(deep=True)
+        attachment.full_text_status = "extracting"
+        attachment.error = ""
+        attachment.updated_at = datetime.now(UTC)
+        await asyncio.to_thread(self.repository.save_library_attachment, attachment)
+        try:
+            path = await asyncio.to_thread(self._library_attachment_path, attachment_id)
+            pages = await asyncio.to_thread(extract_pdf_pages, path, 100)
+            if not any(str(item.get("text") or "").strip() for item in pages):
+                raise ValueError("PDF 中没有可提取文本，可能是扫描版或文件损坏")
+            chunks = await asyncio.to_thread(
+                self.service.library.index_attachment_pages,
+                paper.library_id,
+                attachment_id,
+                pages,
+            )
+            analysis, mode = await self._generate_library_analysis(
+                paper.model_dump(mode="json"),
+                pages,
+                chunks,
+            )
+            artifact = await asyncio.to_thread(
+                self.service.library.save_paper_analysis,
+                paper.library_id,
+                attachment_id,
+                analysis,
+                mode=mode,
+            )
+            attachment.full_text_status = "indexed"
+            attachment.page_count = len(pages)
+            attachment.chunk_count = len(chunks)
+            attachment.error = ""
+            attachment.updated_at = datetime.now(UTC)
+            await asyncio.to_thread(self.repository.save_library_attachment, attachment)
+            return {
+                "attachment": attachment.model_dump(mode="json"),
+                "analysis": analysis.model_dump(mode="json"),
+                "artifact": artifact.model_dump(mode="json"),
+                "mode": mode,
+            }
+        except Exception as exc:
+            attachment.full_text_status = "failed"
+            attachment.error = str(exc)[:1000]
+            attachment.updated_at = datetime.now(UTC)
+            await asyncio.to_thread(self.repository.save_library_attachment, attachment)
+            return {
+                "attachment": attachment.model_dump(mode="json"),
+                "analysis": None,
+                "artifact": None,
+                "mode": "failed",
+            }
+
+    @staticmethod
+    def _library_answer_is_traceable(answer: str, source_ids: set[str]) -> bool:
+        factual_lines = []
+        for raw_line in answer.splitlines():
+            line = re.sub(r"^\s*(?:#{1,6}|[-*+] |\d+[.)]\s*)", "", raw_line).strip()
+            if len(line) < 8 or line.endswith(("：", ":")):
+                continue
+            if any(
+                phrase in line
+                for phrase in ("材料不足", "证据不足", "未检索到", "无法回答")
+            ):
+                continue
+            factual_lines.append(line)
+        return bool(factual_lines) and all(
+            any(f"[[{source_id}]]" in line for source_id in source_ids)
+            for line in factual_lines
+        )
+
     async def answer_library_question(
         self,
         library_ids: list[str],
         question: str,
     ) -> dict[str, Any]:
-        """Answer over selected library records while preserving source attribution."""
+        """Run a scoped, tool-using Agent over selected papers or the full library."""
         fallback = self.service.library.answer_library_question(library_ids, question)
         if self.graph is None:
             return {**fallback, "mode": "extractive"}
-
-        comparison = self.service.library.compare_papers(library_ids)
-        citations: list[dict[str, str]] = []
-        source_blocks: list[str] = []
-        for index, row in enumerate(comparison["rows"], start=1):
-            paper = row["paper"]
-            citations.append(
+        toolset = build_library_tools(
+            self.service.library,
+            allowed_library_ids=library_ids or None,
+        )
+        try:
+            model = self._build_model()
+            if isinstance(model, str):
+                model = init_chat_model(model)
+            agent = create_agent(
+                model=model,
+                tools=toolset.tools,
+                system_prompt=LIBRARY_AGENT_PROMPT,
+                response_format=LibraryAgentResponse.model_json_schema(),
+                middleware=[
+                    SerialToolExecutionMiddleware(),
+                    ModelCallLimitMiddleware(run_limit=10, exit_behavior="end"),
+                    ToolCallLimitMiddleware(
+                        tool_name="search_library",
+                        run_limit=3,
+                        exit_behavior="end",
+                    ),
+                    ToolCallLimitMiddleware(
+                        tool_name="retrieve_library_passages",
+                        run_limit=5,
+                        exit_behavior="end",
+                    ),
+                    ToolCallLimitMiddleware(
+                        tool_name="get_library_paper_context",
+                        run_limit=4,
+                        exit_behavior="end",
+                    ),
+                ],
+                name="library-research-agent",
+            )
+            result = await agent.ainvoke(
                 {
-                    "citation": f"[{index}]",
-                    "library_id": paper["library_id"],
-                    "title": paper["title"],
+                    "messages": [
+                        HumanMessage(
+                            content=(
+                                f"用户问题：{question.strip()}\n"
+                                + (
+                                    f"检索范围仅限这些 library_id：{library_ids}"
+                                    if library_ids
+                                    else "检索范围：整个文献库"
+                                )
+                            )
+                        )
+                    ]
                 }
             )
-            findings = "\n".join(
-                f"- {item.get('claim') or item.get('quote') or ''}"
-                for item in row["findings"][:8]
-            )
-            notes = "\n".join(
-                f"- {item.get('content', '')}" for item in row["notes"][:8]
-            )
-            source_blocks.append(
-                f"""[{index}] {paper['title']}
-Year: {paper.get('year') or 'unknown'}
-Authors: {', '.join(paper.get('authors') or [])}
-Abstract: {(paper.get('abstract') or '')[:3000]}
-Methods: {', '.join(row['methods'][:12])}
-Datasets: {', '.join(row['datasets'][:12])}
-Findings:
-{findings or '- none'}
-Limitations: {'; '.join(row['limitations'][:12])}
-Reading notes:
-{notes or '- none'}"""
-            )
-
-        model = self._build_model()
-        if isinstance(model, str):
-            model = init_chat_model(model)
-        response = await model.ainvoke(
-            [
-                SystemMessage(
-                    content=(
-                        "你是科研文献管理助手。只能依据用户选中的文献材料回答，"
-                        "不得补充材料之外的事实。用简洁中文回答；涉及具体结论时在句末"
-                        "标注对应的 [1]、[2] 来源。如果材料不足，明确指出缺少什么。"
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        f"问题：{question.strip()}\n\n"
-                        "选中文献材料：\n\n" + "\n\n".join(source_blocks)
-                    )
-                ),
+            structured = result.get("structured_response") if isinstance(result, dict) else None
+            response = LibraryAgentResponse.model_validate(structured)
+            cited_ids = list(dict.fromkeys(response.cited_source_ids))
+            answer_markers = set(re.findall(r"\[\[([^\]]+)\]\]", response.answer))
+            valid_ids = [
+                item
+                for item in cited_ids
+                if item in toolset.source_registry and item in answer_markers
             ]
-        )
-        content = response.content
-        if isinstance(content, list):
-            content = "".join(
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in content
-            )
-        answer = str(content).strip()
-        if not answer:
-            return {**fallback, "mode": "extractive"}
-        return {
-            "question": question.strip(),
-            "answer": answer,
-            "citations": citations,
-            "mode": "model",
-        }
+            if answer_markers - set(valid_ids):
+                return {**fallback, "mode": "extractive"}
+            if (
+                not response.answer.strip()
+                or not valid_ids
+                or not self._library_answer_is_traceable(
+                    response.answer,
+                    set(valid_ids),
+                )
+            ):
+                return {**fallback, "mode": "extractive"}
+            citations: list[dict[str, Any]] = []
+            answer = response.answer.strip()
+            for index, source_id in enumerate(valid_ids, start=1):
+                source = toolset.source_registry[source_id]
+                answer = answer.replace(f"[[{source_id}]]", f"[{index}]")
+                quote = str(source.get("text") or "").strip()
+                citations.append(
+                    {
+                        "citation": f"[{index}]",
+                        "source_id": source_id,
+                        "source_type": source.get("source_type"),
+                        "library_id": source.get("library_id"),
+                        "title": source.get("title"),
+                        "page": source.get("page"),
+                        "attachment_id": source.get("attachment_id"),
+                        "quote": quote[:800],
+                    }
+                )
+            return {
+                "question": question.strip(),
+                "answer": answer,
+                "citations": citations,
+                "used_library_ids": response.used_library_ids,
+                "coverage_note": response.coverage_note,
+                "mode": "agent",
+            }
+        except Exception as exc:
+            return {
+                **fallback,
+                "mode": "extractive",
+                "coverage_note": f"Ask Library Agent 不可用，已返回本地检索结果：{str(exc)[:240]}",
+            }
 
     @staticmethod
     def should_fallback(error: BaseException) -> bool:

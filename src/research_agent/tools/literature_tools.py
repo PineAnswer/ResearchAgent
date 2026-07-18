@@ -117,6 +117,20 @@ def _safe_public_url(value: str) -> bool:
     return not (address.is_private or address.is_loopback or address.is_link_local)
 
 
+def extract_pdf_pages(path: str | Path, max_pages: int = 30) -> list[dict[str, str | int]]:
+    """Extract page-numbered text for both workspace tools and library ingestion."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(Path(path))
+    pages: list[dict[str, str | int]] = []
+    for index, page in enumerate(
+        reader.pages[: max(1, min(int(max_pages), 100))],
+        start=1,
+    ):
+        pages.append({"page": index, "text": page.extract_text() or ""})
+    return pages
+
+
 def _arxiv_id(value: str) -> str:
     candidate = value.strip().removesuffix(".pdf")
     modern = re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", candidate)
@@ -310,17 +324,6 @@ def build_literature_tools(
             )
         return json.dumps(records, ensure_ascii=False)
 
-    def extract_pages(path: Path, max_pages: int) -> list[dict[str, str | int]]:
-        from pypdf import PdfReader
-
-        reader = PdfReader(path)
-        pages = []
-        for index, page in enumerate(
-            reader.pages[: max(1, min(max_pages, 100))], start=1
-        ):
-            pages.append({"page": index, "text": page.extract_text() or ""})
-        return pages
-
     def openalex_pdf_urls(paper_id: str, doi: str) -> list[str]:
         identifier = paper_id.strip()
         if identifier.startswith("https://openalex.org/"):
@@ -410,7 +413,7 @@ def build_literature_tools(
         path = papers_dir / f"{digest}.pdf"
         if path.exists():
             try:
-                pages = extract_pages(path, max_pages)
+                pages = extract_pdf_pages(path, max_pages)
                 return json.dumps(
                     {
                         "available": True,
@@ -440,7 +443,7 @@ def build_literature_tools(
                     errors.append({"url": candidate, "error": "response_is_not_pdf"})
                     continue
                 path.write_bytes(content)
-                pages = extract_pages(path, max_pages)
+                pages = extract_pdf_pages(path, max_pages)
                 return json.dumps(
                     {
                         "available": True,
@@ -498,7 +501,7 @@ def build_literature_tools(
                 ensure_ascii=False,
             )
         try:
-            pages = extract_pages(path, max_pages)
+            pages = extract_pdf_pages(path, max_pages)
         except Exception as exc:  # PDF parser errors must remain recoverable tool results.
             return json.dumps(
                 {

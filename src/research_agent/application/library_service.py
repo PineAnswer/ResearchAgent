@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from datetime import UTC, datetime
@@ -15,15 +16,43 @@ from research_agent.application.paper_ids import (
 from research_agent.application.ports import ResearchRepositoryPort
 from research_agent.domain.models import (
     LibraryAttachment,
+    LibraryArtifact,
+    LibraryChunk,
     LibraryCollection,
     LibraryNote,
     LibraryPaper,
+    LibraryPaperAnalysis,
     ProjectPaper,
 )
 
 
 ProjectPaperStatus = Literal["candidate", "included", "excluded", "uncertain"]
 MAX_COLLECTION_DEPTH = 3
+LIBRARY_CHUNK_SIZE = 1800
+LIBRARY_CHUNK_OVERLAP = 180
+LIBRARY_SOURCE_LIMIT = 20_000
+QUERY_STOP_WORDS = {
+    "about",
+    "and",
+    "are",
+    "for",
+    "from",
+    "how",
+    "into",
+    "the",
+    "what",
+    "which",
+    "with",
+    "什么",
+    "哪些",
+    "如何",
+    "是否",
+    "这个",
+    "这些",
+    "研究",
+    "论文",
+    "文献",
+}
 
 
 class LibraryService:
@@ -204,6 +233,310 @@ class LibraryService:
         )
         return self.repository.save_library_paper(updated, key)
 
+    @staticmethod
+    def _split_page_text(
+        text: str,
+        *,
+        chunk_size: int = LIBRARY_CHUNK_SIZE,
+        overlap: int = LIBRARY_CHUNK_OVERLAP,
+    ) -> list[str]:
+        normalized = re.sub(r"[ \t]+", " ", str(text or ""))
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+        if not normalized:
+            return []
+        chunk_size = max(400, int(chunk_size))
+        overlap = max(0, min(int(overlap), chunk_size // 3))
+        chunks: list[str] = []
+        start = 0
+        while start < len(normalized):
+            hard_end = min(len(normalized), start + chunk_size)
+            end = hard_end
+            if hard_end < len(normalized):
+                floor = start + int(chunk_size * 0.6)
+                candidates = [
+                    normalized.rfind(marker, floor, hard_end)
+                    for marker in ("\n\n", "。", ". ", "; ", "；", " ")
+                ]
+                boundary = max(candidates)
+                if boundary > floor:
+                    end = boundary + 1
+            chunk = normalized[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(normalized):
+                break
+            start = max(start + 1, end - overlap)
+        return chunks
+
+    def index_attachment_pages(
+        self,
+        library_id: str,
+        attachment_id: str,
+        pages: list[dict[str, Any]],
+    ) -> list[LibraryChunk]:
+        paper = self.repository.get_library_paper(library_id)
+        attachment = self.repository.get_library_attachment(attachment_id)
+        if attachment.library_id != paper.library_id:
+            raise ValueError("Attachment does not belong to the requested paper")
+        chunks: list[LibraryChunk] = []
+        chunk_index = 0
+        for item in pages:
+            page = item.get("page")
+            page_number = int(page) if page is not None else None
+            for text in self._split_page_text(str(item.get("text") or "")):
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                chunk_key = f"{attachment_id}:{page_number}:{chunk_index}:{digest}"
+                chunks.append(
+                    LibraryChunk(
+                        chunk_id=f"LC-{hashlib.sha256(chunk_key.encode()).hexdigest()[:16]}",
+                        library_id=library_id,
+                        attachment_id=attachment_id,
+                        page=page_number,
+                        chunk_index=chunk_index,
+                        text=text,
+                        content_hash=digest,
+                    )
+                )
+                chunk_index += 1
+        return self.repository.replace_library_chunks(
+            library_id,
+            attachment_id,
+            chunks,
+        )
+
+    def save_paper_analysis(
+        self,
+        library_id: str,
+        attachment_id: str,
+        analysis: LibraryPaperAnalysis,
+        *,
+        mode: Literal["agent", "extractive"] = "agent",
+    ) -> LibraryArtifact:
+        artifact = LibraryArtifact(
+            artifact_id=f"LAR-{uuid.uuid4().hex[:12]}",
+            library_id=library_id,
+            attachment_id=attachment_id,
+            kind="PaperCard",
+            payload=analysis.model_dump(mode="json"),
+            mode=mode,
+        )
+        return self.repository.save_library_artifact(artifact)
+
+    @staticmethod
+    def _query_terms(query: str) -> set[str]:
+        normalized = str(query or "").casefold()
+        terms = {
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9_+.-]*|[\u4e00-\u9fff]{2,}", normalized)
+            if token not in QUERY_STOP_WORDS and len(token) > 1
+        }
+        for phrase in re.findall(r"[\u4e00-\u9fff]{4,}", normalized):
+            terms.update(
+                phrase[index : index + 2]
+                for index in range(len(phrase) - 1)
+                if phrase[index : index + 2] not in QUERY_STOP_WORDS
+            )
+        return terms
+
+    @classmethod
+    def _text_score(cls, text: str, terms: set[str]) -> float:
+        if not terms:
+            return 1.0
+        normalized = str(text or "").casefold()
+        score = 0.0
+        for term in terms:
+            occurrences = normalized.count(term)
+            if occurrences:
+                score += min(occurrences, 5) * max(1.0, min(len(term), 8) / 2)
+        return score
+
+    @staticmethod
+    def _source_id(prefix: str, *parts: Any) -> str:
+        digest = hashlib.sha256(
+            "|".join(str(part) for part in parts).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{prefix}-{digest}"
+
+    def _paper_sources(self, paper: LibraryPaper) -> list[dict[str, Any]]:
+        sources: list[dict[str, Any]] = []
+
+        def add_source(
+            source_id: str,
+            source_type: str,
+            text: str,
+            *,
+            page: int | None = None,
+            attachment_id: str | None = None,
+        ) -> None:
+            clean = str(text or "").strip()
+            if not clean:
+                return
+            sources.append(
+                {
+                    "source_id": source_id,
+                    "source_type": source_type,
+                    "library_id": paper.library_id,
+                    "title": paper.title,
+                    "page": page,
+                    "attachment_id": attachment_id,
+                    "text": clean[:4000],
+                }
+            )
+
+        add_source(f"ABSTRACT-{paper.library_id}", "abstract", paper.abstract)
+        for note in self.repository.list_library_notes(paper.library_id):
+            add_source(f"NOTE-{note.note_id}", "note", note.content)
+        artifacts = self.repository.list_library_artifacts(paper.library_id)
+        for artifact in [item for item in artifacts if item.kind in {"PaperCard", "PaperAnalysis"}][
+            :3
+        ]:
+            payload = artifact.payload
+            add_source(
+                self._source_id("ANALYSIS", artifact.artifact_id, "summary"),
+                "analysis-summary",
+                payload.get("summary", ""),
+                attachment_id=artifact.attachment_id,
+            )
+            for index, finding in enumerate(payload.get("findings", [])):
+                add_source(
+                    self._source_id("ANALYSIS", artifact.artifact_id, index),
+                    "analysis-finding",
+                    "\n".join(
+                        filter(
+                            None,
+                            [finding.get("claim", ""), finding.get("quote", "")],
+                        )
+                    ),
+                    page=finding.get("page"),
+                    attachment_id=artifact.attachment_id,
+                )
+        for card in self._paper_evidence(paper):
+            for finding in card.get("findings", []):
+                add_source(
+                    self._source_id(
+                        "EVIDENCE",
+                        paper.library_id,
+                        card.get("project_id"),
+                        finding.get("evidence_id"),
+                    ),
+                    "project-evidence",
+                    "\n".join(
+                        filter(
+                            None,
+                            [finding.get("claim", ""), finding.get("quote", "")],
+                        )
+                    ),
+                    page=finding.get("page"),
+                )
+        return sources
+
+    def retrieve_library_sources(
+        self,
+        query: str,
+        *,
+        library_ids: list[str] | None = None,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        allowed_ids = set(library_ids or [])
+        papers = self.repository.list_library_papers(limit=500)
+        if allowed_ids:
+            papers = [paper for paper in papers if paper.library_id in allowed_ids]
+        paper_map = {paper.library_id: paper for paper in papers}
+        sources = [source for paper in papers for source in self._paper_sources(paper)]
+        chunks = (
+            self.repository.list_library_chunks(
+                library_ids=list(paper_map),
+                limit=LIBRARY_SOURCE_LIMIT,
+            )
+            if paper_map
+            else []
+        )
+        for chunk in chunks:
+            paper = paper_map.get(chunk.library_id)
+            if paper is None:
+                continue
+            sources.append(
+                {
+                    "source_id": chunk.chunk_id,
+                    "source_type": "pdf",
+                    "library_id": chunk.library_id,
+                    "title": paper.title,
+                    "page": chunk.page,
+                    "attachment_id": chunk.attachment_id,
+                    "text": chunk.text,
+                }
+            )
+        terms = self._query_terms(query)
+        ranked = []
+        for source in sources:
+            score = self._text_score(source["text"], terms)
+            if terms and score <= 0:
+                continue
+            ranked.append({**source, "relevance_score": round(score, 3)})
+        ranked.sort(
+            key=lambda item: (
+                -float(item["relevance_score"]),
+                item["source_type"] != "pdf",
+                item["title"],
+                item.get("page") or 0,
+            )
+        )
+        return ranked[: max(1, min(int(limit), 50))]
+
+    def search_library(
+        self,
+        query: str,
+        *,
+        library_ids: list[str] | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        allowed_ids = set(library_ids or [])
+        papers = self.repository.list_library_papers(limit=500)
+        if allowed_ids:
+            papers = [paper for paper in papers if paper.library_id in allowed_ids]
+        terms = self._query_terms(query)
+        sources = self.retrieve_library_sources(
+            query,
+            library_ids=[paper.library_id for paper in papers],
+            limit=50,
+        )
+        sources_by_paper: dict[str, list[dict[str, Any]]] = {}
+        for source in sources:
+            sources_by_paper.setdefault(source["library_id"], []).append(source)
+        results = []
+        for paper in papers:
+            metadata_text = " ".join(
+                [
+                    paper.title,
+                    " ".join(paper.authors),
+                    paper.abstract,
+                    paper.doi,
+                    " ".join(paper.tags),
+                ]
+            )
+            score = self._text_score(metadata_text, terms) * 2
+            paper_sources = sources_by_paper.get(paper.library_id, [])
+            score += sum(float(item["relevance_score"]) for item in paper_sources[:3])
+            if terms and score <= 0:
+                continue
+            results.append(
+                {
+                    "paper_id": paper.paper_id or paper.doi or paper.library_id,
+                    "library_id": paper.library_id,
+                    "title": paper.title,
+                    "authors": paper.authors,
+                    "year": paper.year,
+                    "abstract": paper.abstract,
+                    "doi": paper.doi or None,
+                    "url": str(paper.url) if paper.url else None,
+                    "source": "library",
+                    "relevance_score": round(score, 3),
+                    "sources": paper_sources[:3],
+                }
+            )
+        results.sort(key=lambda item: (-float(item["relevance_score"]), item["title"]))
+        return results[: max(1, min(int(limit), 20))]
+
     def _paper_evidence(self, paper: LibraryPaper) -> list[dict[str, Any]]:
         evidence: list[dict[str, Any]] = []
         target_ids = {
@@ -235,6 +568,11 @@ class LibraryService:
 
     def get_paper(self, library_id: str) -> dict[str, Any]:
         paper = self.repository.get_library_paper(library_id)
+        artifacts = self.repository.list_library_artifacts(library_id)
+        chunks = self.repository.list_library_chunks(
+            library_ids=[library_id],
+            limit=LIBRARY_SOURCE_LIMIT,
+        )
         projects = []
         for relation in self.repository.list_library_paper_projects(library_id):
             project = self.repository.get_project(relation.project_id)
@@ -256,6 +594,8 @@ class LibraryService:
                 attachment.model_dump(mode="json")
                 for attachment in self.repository.list_library_attachments(library_id)
             ],
+            "analyses": [artifact.model_dump(mode="json") for artifact in artifacts],
+            "indexed_chunk_count": len(chunks),
             "evidence": self._paper_evidence(paper),
         }
 
@@ -604,28 +944,43 @@ class LibraryService:
         for library_id in library_ids:
             detail = self.get_paper(library_id)
             evidence = detail["evidence"]
+            analyses = [
+                artifact["payload"]
+                for artifact in detail.get("analyses", [])
+                if artifact.get("kind") in {"PaperCard", "PaperAnalysis"}
+            ]
+            reading_records = [*evidence, *analyses]
             rows.append(
                 {
                     "paper": detail["paper"],
                     "methods": sorted(
-                        {method for card in evidence for method in card.get("methods", [])}
+                        {
+                            method
+                            for card in reading_records
+                            for method in card.get("methods", [])
+                        }
                     ),
                     "datasets": sorted(
-                        {dataset for card in evidence for dataset in card.get("datasets", [])}
+                        {
+                            dataset
+                            for card in reading_records
+                            for dataset in card.get("datasets", [])
+                        }
                     ),
                     "findings": [
                         finding
-                        for card in evidence
+                        for card in reading_records
                         for finding in card.get("findings", [])
                     ],
                     "limitations": sorted(
                         {
                             limitation
-                            for card in evidence
+                            for card in reading_records
                             for limitation in card.get("limitations", [])
                         }
                     ),
                     "notes": detail["notes"],
+                    "analyses": detail.get("analyses", []),
                 }
             )
         return {"rows": rows}
@@ -636,36 +991,37 @@ class LibraryService:
         clean_question = question.strip()
         if not clean_question:
             raise ValueError("Question is required")
-        comparison = self.compare_papers(library_ids)
-        cited: list[dict[str, Any]] = []
+        sources = self.retrieve_library_sources(
+            clean_question,
+            library_ids=library_ids or None,
+            limit=8,
+        )
         snippets: list[str] = []
-        keywords = {
-            token
-            for token in re.findall(r"[\w\u4e00-\u9fff]+", clean_question.casefold())
-            if len(token) > 1
+        citations: list[dict[str, Any]] = []
+        for index, source in enumerate(sources, start=1):
+            excerpt = source["text"]
+            if len(excerpt) > 500:
+                excerpt = excerpt[:497].rstrip() + "…"
+            page = f"，第 {source['page']} 页" if source.get("page") else ""
+            snippets.append(f"[{index}]《{source['title']}》{page}：{excerpt}")
+            citations.append(
+                {
+                    "citation": f"[{index}]",
+                    **{key: value for key, value in source.items() if key != "text"},
+                    "quote": excerpt,
+                }
+            )
+        answer = (
+            "\n\n".join(snippets)
+            or "文献库中暂时没有可用于回答的全文、摘要、笔记或证据。"
+        )
+        return {
+            "question": clean_question,
+            "answer": answer,
+            "citations": citations,
+            "mode": "extractive",
+            "coverage_note": "模型不可用，当前展示与问题最相关的原始来源。",
         }
-        for row in comparison["rows"]:
-            paper = row["paper"]
-            candidates = [paper.get("abstract", "")]
-            candidates.extend(note.get("content", "") for note in row["notes"])
-            candidates.extend(
-                finding.get("claim", "") for finding in row["findings"]
-            )
-            ranked = sorted(
-                (text.strip() for text in candidates if text and text.strip()),
-                key=lambda text: sum(token in text.casefold() for token in keywords),
-                reverse=True,
-            )
-            if ranked:
-                excerpt = ranked[0]
-                if len(excerpt) > 500:
-                    excerpt = excerpt[:497].rstrip() + "…"
-                snippets.append(f"《{paper['title']}》：{excerpt}")
-                cited.append(
-                    {"library_id": paper["library_id"], "title": paper["title"]}
-                )
-        answer = "\n\n".join(snippets) or "选中文献中暂时没有可用于回答的摘要、笔记或证据。"
-        return {"question": clean_question, "answer": answer, "citations": cited}
 
     def list_project_papers(self, project_id: str) -> list[dict[str, Any]]:
         return [

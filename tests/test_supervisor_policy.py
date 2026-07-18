@@ -120,6 +120,8 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert "transition_project_stage" not in exposed_names
     assert "search_openalex" not in exposed_names
     assert "search_crossref" not in exposed_names
+    assert "search_library" not in exposed_names
+    assert "retrieve_library_passages" not in exposed_names
     assert "verify_doi" not in exposed_names
     assert "fetch_paper_text" not in exposed_names
     assert "get_active_research_project" not in exposed_names
@@ -141,17 +143,21 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     reader = next(config for config in agent_configs if config["name"] == "paper-reader")
     assert '<skill name="paper-reading">' in reader["system_prompt"]
     assert "摘要证据不能冒充全文实验细节" in reader["system_prompt"]
-    assert len(reader["middleware"]) == 4
+    assert len(reader["middleware"]) == 5
     assert isinstance(reader["middleware"][0], SerialToolExecutionMiddleware)
     assert isinstance(reader["middleware"][1], ModelCallLimitMiddleware)
     assert reader["middleware"][1].run_limit == 4
     assert reader["middleware"][1].exit_behavior == "end"
-    assert reader["middleware"][2].tool_name == "extract_pdf_text"
+    assert reader["middleware"][2].tool_name == "retrieve_library_passages"
     assert reader["middleware"][2].run_limit == 1
     assert reader["middleware"][2].exit_behavior == "end"
-    assert isinstance(reader["middleware"][3], PaperFetchGuardMiddleware)
-    assert reader["middleware"][3].max_attempts_per_paper == 2
+    assert reader["middleware"][3].tool_name == "extract_pdf_text"
+    assert reader["middleware"][3].run_limit == 1
+    assert reader["middleware"][3].exit_behavior == "end"
+    assert isinstance(reader["middleware"][4], PaperFetchGuardMiddleware)
+    assert reader["middleware"][4].max_attempts_per_paper == 2
     assert [tool.name for tool in reader["tools"]] == [
+        "retrieve_library_passages",
         "fetch_paper_text",
         "extract_pdf_text",
     ]
@@ -163,20 +169,24 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         "system_prompt"
     ]
     assert [tool.name for tool in scout_captured["tools"]] == [
+        "search_library",
         "search_openalex",
         "search_crossref",
     ]
     assert isinstance(scout_captured["middleware"][1], ModelCallLimitMiddleware)
-    assert scout_captured["middleware"][1].run_limit == 7
+    assert scout_captured["middleware"][1].run_limit == 9
     assert scout_captured["middleware"][1].exit_behavior == "end"
-    assert scout_captured["middleware"][2].tool_name == "search_openalex"
-    assert scout_captured["middleware"][2].run_limit == 3
+    assert scout_captured["middleware"][2].tool_name == "search_library"
+    assert scout_captured["middleware"][2].run_limit == 2
     assert scout_captured["middleware"][2].exit_behavior == "end"
-    assert scout_captured["middleware"][3].tool_name == "search_crossref"
-    assert scout_captured["middleware"][3].run_limit == 1
+    assert scout_captured["middleware"][3].tool_name == "search_openalex"
+    assert scout_captured["middleware"][3].run_limit == 3
     assert scout_captured["middleware"][3].exit_behavior == "end"
-    assert isinstance(scout_captured["middleware"][4], ExecutedSearchTrackingMiddleware)
-    assert len(scout_captured["middleware"]) == 5
+    assert scout_captured["middleware"][4].tool_name == "search_crossref"
+    assert scout_captured["middleware"][4].run_limit == 1
+    assert scout_captured["middleware"][4].exit_behavior == "end"
+    assert isinstance(scout_captured["middleware"][5], ExecutedSearchTrackingMiddleware)
+    assert len(scout_captured["middleware"]) == 6
     assert isinstance(scout_captured["response_format"], dict)
     assert scout_captured["response_format"]["title"] == "SearchReport"
     synthesizer = next(
