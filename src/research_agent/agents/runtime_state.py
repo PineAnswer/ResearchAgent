@@ -95,6 +95,41 @@ def _diagnostic_value(value: Any) -> Any:
     return str(value)
 
 
+_SENSITIVE_DIAGNOSTIC_KEYS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "cookie",
+    "access_token",
+    "refresh_token",
+)
+
+
+def _redact_diagnostic(value: Any) -> Any:
+    value = _diagnostic_value(value)
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(marker in key.casefold() for marker in _SENSITIVE_DIAGNOSTIC_KEYS)
+                else _redact_diagnostic(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_diagnostic(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+",
+            "Bearer [REDACTED]",
+            value,
+        )
+    return value
+
+
 def _structured_response_diagnostics(
     result: dict[str, Any], subagent_type: str
 ) -> dict[str, Any]:
@@ -116,19 +151,34 @@ def _structured_response_diagnostics(
         response_metadata = field("response_metadata", {})
         tool_calls = field("tool_calls", [])
         invalid_tool_calls = field("invalid_tool_calls", [])
+        finish_reason = (
+            response_metadata.get("finish_reason")
+            if isinstance(response_metadata, dict)
+            else None
+        )
+        if invalid_tool_calls:
+            parse_status = "invalid_tool_calls"
+        elif finish_reason == "tool_calls" and not tool_calls:
+            parse_status = "tool_call_finish_without_parsed_calls"
+        elif tool_calls:
+            parse_status = "schema_tool_call_not_promoted"
+        elif field("content", None):
+            parse_status = "unparsed_content"
+        else:
+            parse_status = "empty_model_response"
         return {
             "subagent_type": subagent_type,
             "expected_schema_tool": SUBAGENT_SCHEMA_TOOLS.get(subagent_type),
-            "content": _diagnostic_value(field("content", None)),
-            "tool_calls": _diagnostic_value(tool_calls),
-            "invalid_tool_calls": _diagnostic_value(invalid_tool_calls),
-            "additional_kwargs": _diagnostic_value(field("additional_kwargs", {})),
-            "response_metadata": _diagnostic_value(response_metadata),
-            "finish_reason": (
-                response_metadata.get("finish_reason")
-                if isinstance(response_metadata, dict)
-                else None
-            ),
+            "content": _redact_diagnostic(field("content", None)),
+            "tool_calls": _redact_diagnostic(tool_calls),
+            "invalid_tool_calls": _redact_diagnostic(invalid_tool_calls),
+            "additional_kwargs": _redact_diagnostic(field("additional_kwargs", {})),
+            "response_metadata": _redact_diagnostic(response_metadata),
+            "usage_metadata": _redact_diagnostic(field("usage_metadata", {})),
+            "message_id": field("id", None),
+            "finish_reason": finish_reason,
+            "parse_status": parse_status,
+            "diagnostic_hint": "See the matching llm.response entry in messages.jsonl.",
             "raw_provider_response_captured": False,
         }
     return {

@@ -838,6 +838,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return ApiEnvelope(data=_json_safe(result))
 
     @app.post(
+        "/api/projects/{project_id}/search-feedback/undo",
+        response_model=ApiEnvelope,
+    )
+    async def undo_search_feedback(project_id: str) -> ApiEnvelope:
+        try:
+            result = await asyncio.to_thread(
+                supervisor.search_review.undo_last_feedback,
+                project_id,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except WorkflowPrerequisiteError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ApiEnvelope(message="search_feedback_undone", data=_json_safe(result))
+
+    @app.post(
         "/api/projects/{project_id}/continue",
         response_model=ApiEnvelope,
     )

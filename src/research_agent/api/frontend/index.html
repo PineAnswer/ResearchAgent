@@ -60,6 +60,10 @@
             <div class="popover-heading">
               <span>工作台工具</span>
             </div>
+            <button id="usageGuideOpen" class="menu-item" type="button" role="menuitem">
+              <i data-lucide="circle-help" aria-hidden="true"></i>
+              <span>使用说明</span>
+            </button>
             <a class="menu-item" href="/docs" target="_blank" rel="noreferrer" role="menuitem">
               <i data-lucide="braces" aria-hidden="true"></i>
               <span>API 文档</span>
@@ -514,6 +518,7 @@
               <div class="feedback-actions">
                 <button id="stopReview" class="danger-link" type="button">证据不足，结束项目</button>
                 <div>
+                  <button id="undoReview" class="secondary" type="button" hidden>撤销上一步</button>
                   <button id="refineReview" class="secondary" type="button">更新候选集</button>
                   <button id="acceptReview" class="primary" type="button">确认当前选择</button>
                 </div>
@@ -527,10 +532,13 @@
               <h3 id="continueTitle">候选集已经确认</h3>
               <p id="continueText">继续后将读取论文、提取证据并完成综合审查。</p>
             </div>
-            <button id="continueResearch" class="primary" type="button">
-              <span id="continueButtonLabel">继续研究</span>
-              <i data-lucide="arrow-right" aria-hidden="true"></i>
-            </button>
+            <div class="continue-actions">
+              <button id="undoDecision" class="secondary" type="button" hidden>撤销审核操作</button>
+              <button id="continueResearch" class="primary" type="button">
+                <span id="continueButtonLabel">继续研究</span>
+                <i data-lucide="arrow-right" aria-hidden="true"></i>
+              </button>
+            </div>
           </section>
         </section>
       </main>
@@ -568,6 +576,64 @@
         </section>
       </section>
     </aside>
+
+    <div id="usageGuideBackdrop" class="usage-guide-backdrop" hidden></div>
+    <section
+      id="usageGuide"
+      class="usage-guide"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="usageGuideTitle"
+      aria-describedby="usageGuideDescription"
+      hidden
+    >
+      <header class="usage-guide-header">
+        <div>
+          <p class="eyebrow">Quick start</p>
+          <h2 id="usageGuideTitle">欢迎使用文献研究工作台</h2>
+        </div>
+        <button
+          id="usageGuideClose"
+          class="icon-button bordered"
+          type="button"
+          aria-label="关闭使用说明"
+          title="关闭"
+        >
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </header>
+
+      <p id="usageGuideDescription" class="usage-guide-intro">
+        从研究问题到证据综述，只需按下面的流程操作。
+      </p>
+      <ol class="usage-guide-steps">
+        <li>
+          <i data-lucide="file-plus-2" aria-hidden="true"></i>
+          <div><strong>新建研究</strong><span>填写主题、研究问题和检索范围，启动文献检索。</span></div>
+        </li>
+        <li>
+          <i data-lucide="list-checks" aria-hidden="true"></i>
+          <div><strong>审核候选</strong><span>勾选相关论文；结果不足时可补充关键词或 DOI。</span></div>
+        </li>
+        <li>
+          <i data-lucide="play" aria-hidden="true"></i>
+          <div><strong>继续研究</strong><span>确认候选后，让智能体完成精读、证据提取和综合审查。</span></div>
+        </li>
+        <li>
+          <i data-lucide="file-check-2" aria-hidden="true"></i>
+          <div><strong>查看成果</strong><span>在项目页面阅读综述，并通过“研究记录”查看过程与产物。</span></div>
+        </li>
+        <li>
+          <i data-lucide="library" aria-hidden="true"></i>
+          <div><strong>管理文献</strong><span>在文献库中导入、整理、比较论文，并围绕文献提问。</span></div>
+        </li>
+      </ol>
+
+      <footer class="usage-guide-footer">
+        <p><i data-lucide="info" aria-hidden="true"></i>稍后可从右上角“更多工具 → 使用说明”再次打开。</p>
+        <button id="usageGuideDismiss" class="primary" type="button">开始使用</button>
+      </footer>
+    </section>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </body>

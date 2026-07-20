@@ -28,6 +28,41 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+_SENSITIVE_LOG_KEYS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "cookie",
+    "access_token",
+    "refresh_token",
+)
+
+
+def _redact_log_value(value: Any) -> Any:
+    value = _json_safe(value)
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(marker in key.casefold() for marker in _SENSITIVE_LOG_KEYS)
+                else _redact_log_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+",
+            "Bearer [REDACTED]",
+            value,
+        )
+    return value
+
+
 def _parse_json(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -77,12 +112,12 @@ def _message_diagnostics(response: Any) -> dict[str, Any]:
         "tool_calls": tool_calls,
         "invalid_tool_calls": invalid_tool_calls,
         "additional_kwargs": additional_kwargs,
-        "response_metadata": response_metadata,
-        "generation_info": generation_info,
+        "response_metadata": _redact_log_value(response_metadata),
+        "generation_info": _redact_log_value(generation_info),
         "finish_reason": finish_reason,
         "parse_status": parse_status,
         "raw_provider_response_captured": raw_provider_response is not None,
-        "raw_provider_response": raw_provider_response,
+        "raw_provider_response": _redact_log_value(raw_provider_response),
     }
 
 
@@ -188,7 +223,7 @@ class ResearchRunLogger(BaseCallbackHandler):
         self.transcript(
             "llm.response",
             {
-                "response": response,
+                "response": _redact_log_value(response),
                 "message_diagnostics": diagnostics,
                 "run_id": kwargs.get("run_id"),
                 "parent_run_id": kwargs.get("parent_run_id"),

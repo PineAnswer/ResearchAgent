@@ -11,6 +11,7 @@ const STAGES = [
   ["REVIEWED", "审查完成"],
   ["OUTLINED", "提纲设计"],
   ["NARRATED", "综述已生成"],
+  ["REVISION_PENDING", "事实修订"],
   ["COMPLETED", "完成"],
 ];
 
@@ -18,6 +19,7 @@ const STAGE_LABELS = Object.fromEntries(STAGES);
 STAGE_LABELS.INCONCLUSIVE = "证据不足";
 STAGE_LABELS.OUTLINED = "提纲设计";
 STAGE_LABELS.NARRATED = "综述已生成";
+STAGE_LABELS.REVISION_PENDING = "事实修订";
 
 const RUN_PHASES = {
   thinking: {
@@ -83,6 +85,7 @@ const STAGE_RUN_PHASES = {
   REVIEWED: "outlining",
   OUTLINED: "writing",
   NARRATED: "verifying",
+  REVISION_PENDING: "writing",
   COMPLETED: "done",
   INCONCLUSIVE: "stopped",
 };
@@ -141,6 +144,8 @@ const state = {
   sidebarPreference: null,
   inspectorOpen: false,
   inspectorPreviousFocus: null,
+  usageGuideOpen: false,
+  usageGuidePreviousFocus: null,
   libraryPapers: [],
   libraryOverview: { counts: {}, collections: [] },
   projectLibrary: new Map(),
@@ -169,6 +174,7 @@ const elements = {
   healthBadge: byId("healthBadge"),
   toolsMenuToggle: byId("toolsMenuToggle"),
   toolsMenu: byId("toolsMenu"),
+  usageGuideOpen: byId("usageGuideOpen"),
   newProjectToggle: byId("newProjectToggle"),
   libraryToggle: byId("libraryToggle"),
   newProjectForm: byId("newProjectForm"),
@@ -258,6 +264,7 @@ const elements = {
   manualDois: byId("manualDois"),
   feedbackComment: byId("feedbackComment"),
   refineReview: byId("refineReview"),
+  undoReview: byId("undoReview"),
   acceptReview: byId("acceptReview"),
   stopReview: byId("stopReview"),
   continuePanel: byId("continuePanel"),
@@ -266,6 +273,7 @@ const elements = {
   continueText: byId("continueText"),
   continueButtonLabel: byId("continueButtonLabel"),
   continueResearch: byId("continueResearch"),
+  undoDecision: byId("undoDecision"),
   projectInspector: byId("projectInspector"),
   inspectorBackdrop: byId("inspectorBackdrop"),
   closeInspector: byId("closeInspector"),
@@ -277,10 +285,15 @@ const elements = {
   artifactSummary: byId("artifactSummary"),
   eventTimeline: byId("eventTimeline"),
   artifactList: byId("artifactList"),
+  usageGuide: byId("usageGuide"),
+  usageGuideBackdrop: byId("usageGuideBackdrop"),
+  usageGuideClose: byId("usageGuideClose"),
+  usageGuideDismiss: byId("usageGuideDismiss"),
   toast: byId("toast"),
 };
 
 const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
+const USAGE_GUIDE_STORAGE_KEY = "research-agent.usage-guide-dismissed.v1";
 
 function iconNode(name) {
   const icon = document.createElement("i");
@@ -309,6 +322,48 @@ function setPopover(toggle, popover, open) {
 function closeMenus() {
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
   setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+}
+
+function openUsageGuide() {
+  if (state.usageGuideOpen) return;
+  const previousFocus = document.activeElement === elements.usageGuideOpen
+    ? elements.toolsMenuToggle
+    : document.activeElement;
+  closeMenus();
+  if (state.inspectorOpen) closeInspector({ restoreFocus: false });
+  state.usageGuidePreviousFocus = previousFocus;
+  state.usageGuideOpen = true;
+  elements.usageGuide.hidden = false;
+  elements.usageGuideBackdrop.hidden = false;
+  window.setTimeout(() => elements.usageGuideDismiss.focus(), 0);
+}
+
+function closeUsageGuide({ remember = true, restoreFocus = true } = {}) {
+  if (!state.usageGuideOpen) return;
+  state.usageGuideOpen = false;
+  elements.usageGuide.hidden = true;
+  elements.usageGuideBackdrop.hidden = true;
+  if (remember) {
+    try {
+      window.localStorage.setItem(USAGE_GUIDE_STORAGE_KEY, "true");
+    } catch {
+      // The guide can still be closed when browser storage is unavailable.
+    }
+  }
+  if (restoreFocus && state.usageGuidePreviousFocus instanceof HTMLElement) {
+    state.usageGuidePreviousFocus.focus();
+  }
+  state.usageGuidePreviousFocus = null;
+}
+
+function maybeOpenUsageGuide() {
+  let dismissed = false;
+  try {
+    dismissed = window.localStorage.getItem(USAGE_GUIDE_STORAGE_KEY) === "true";
+  } catch {
+    // Show the guide when the browser does not expose persistent storage.
+  }
+  if (!dismissed) window.setTimeout(openUsageGuide, 0);
 }
 
 function readSidebarPreference() {
@@ -485,8 +540,10 @@ function setBusy(busy) {
   elements.stageStepper.classList.toggle("is-running", busy);
   [
     elements.refineReview,
+    elements.undoReview,
     elements.acceptReview,
     elements.stopReview,
+    elements.undoDecision,
     elements.reloadProject,
     elements.deleteProject,
   ].forEach((button) => {
@@ -2540,6 +2597,7 @@ const USER_STAGE_GUIDANCE = {
   REVIEWED: ["证据审查通过", "证据链已经通过审查，下一步生成文献综述大纲。"],
   OUTLINED: ["大纲已生成", "系统已规划章节结构，下一步逐节撰写正文。"],
   NARRATED: ["综述已生成", "完整综述已经生成，接下来进行事实核查。"],
+  REVISION_PENDING: ["需要修订正文", "事实核查发现问题，系统将只重写被标记的章节并再次核查。"],
   COMPLETED: ["研究已完成", "最终综述已生成并完成事实核查，可查看下方成果。"],
   INCONCLUSIVE: ["研究已停止", "系统认为证据不足或流程遇到阻断，请查看原因和建议。"],
 };
@@ -2561,7 +2619,10 @@ function countFindings(snapshot) {
 }
 
 function factCheckSummary(snapshot) {
-  const reports = artifactsOf(snapshot, "FactCheckReport");
+  const narrativeId = Number(latestArtifact(snapshot, "NarrativeReview")?.artifact_id || 0);
+  const reports = artifactsOf(snapshot, "FactCheckReport").filter(
+    (artifact) => Number(artifact.artifact_id || 0) > narrativeId,
+  );
   const revise = reports.filter((artifact) => artifact.payload?.verdict === "REVISE");
   const issues = reports.reduce(
     (total, artifact) => total + (artifact.payload?.issues || []).length,
@@ -2606,7 +2667,7 @@ function currentSectionDrafts(snapshot) {
 }
 
 function recoverableOperationalFailure(snapshot) {
-  if (snapshot?.project?.stage !== "INCONCLUSIVE" || !latestReviewPassed(snapshot)) {
+  if (snapshot?.project?.stage !== "INCONCLUSIVE") {
     return false;
   }
   const failure = latestArtifact(snapshot, "InsufficientEvidence")?.payload;
@@ -2632,7 +2693,8 @@ function recoverableOperationalFailure(snapshot) {
 function continuationMode(snapshot) {
   const stage = snapshot?.project?.stage;
   if (stage === "SCREENED") return "screening";
-  if (["REVIEWED", "OUTLINED", "NARRATED"].includes(stage) && latestReviewPassed(snapshot)) {
+  if (["EXTRACTED", "SYNTHESIZED", "REVIEW_PENDING"].includes(stage)) return "pipeline";
+  if (["REVIEWED", "OUTLINED", "NARRATED", "REVISION_PENDING"].includes(stage) && latestReviewPassed(snapshot)) {
     return "narrative";
   }
   if (stage === "COMPLETED" && latestReviewPassed(snapshot)) {
@@ -2645,6 +2707,10 @@ function continuationMode(snapshot) {
 function effectiveRecoveryStage(snapshot) {
   if (latestArtifact(snapshot, "NarrativeReview")) return "NARRATED";
   if (latestArtifact(snapshot, "ReviewOutline")) return "OUTLINED";
+  if (latestArtifact(snapshot, "ReviewResult")) return "EXTRACTED";
+  if (latestArtifact(snapshot, "SynthesisReport")) return "REVIEW_PENDING";
+  if (latestArtifact(snapshot, "PaperCard")) return "EXTRACTED";
+  if (latestArtifact(snapshot, "ScreeningDecision")) return "SCREENED";
   return "REVIEWED";
 }
 
@@ -2927,8 +2993,13 @@ function switchArtifactView(mode) {
 
 function renderStagePanels(snapshot) {
   const mode = continuationMode(snapshot);
+  const canUndoDecision = Boolean(
+    state.review?.can_undo && snapshot?.project?.stage !== "SEARCH_REVIEW_PENDING",
+  );
   elements.reviewPanel.hidden = true;
-  elements.continuePanel.hidden = !mode;
+  elements.continuePanel.hidden = !mode && !canUndoDecision;
+  elements.undoDecision.hidden = !canUndoDecision;
+  elements.continueResearch.hidden = !mode;
   if (mode === "screening") {
     elements.continueEyebrow.textContent = "Screening complete";
     elements.continueTitle.textContent = "候选集已经确认";
@@ -2946,6 +3017,11 @@ function renderStagePanels(snapshot) {
         ? `系统将复用已保存的 ${savedDraftCount} 个章节草稿，从整合阶段继续，不会重新检索或重写章节。`
         : "系统将复用已保存的论文卡片和证据，从当前写作阶段继续，不会重新检索。";
     elements.continueButtonLabel.textContent = "继续生成综述";
+  } else if (canUndoDecision) {
+    const stopped = snapshot?.project?.stage === "INCONCLUSIVE";
+    elements.continueEyebrow.textContent = "Reversible decision";
+    elements.continueTitle.textContent = stopped ? "项目已按审核意见停止" : "候选集已经确认";
+    elements.continueText.textContent = "在后续研究尚未开始前，可以恢复到上一版候选集。";
   }
   if (mode && !state.agentAvailable) {
     elements.continueResearch.disabled = true;
@@ -3050,11 +3126,16 @@ async function loadProject(projectId, quiet = false, force = false) {
     const snapshot = payload.data;
     await loadProjectLibrary(projectId);
     applyProjectSnapshot(snapshot);
-    if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
+    if (["SEARCH_REVIEW_PENDING", "SCREENED", "INCONCLUSIVE"].includes(snapshot.project.stage)) {
       const reviewPayload = await api(
         `/api/projects/${encodeURIComponent(projectId)}/search-review`,
       );
-      renderReview(reviewPayload.data);
+      if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
+        renderReview(reviewPayload.data);
+      } else {
+        state.review = reviewPayload.data;
+        renderStagePanels(snapshot);
+      }
     }
     elements.projectIdInput.value = projectId;
     if (!quiet) notify("项目状态已载入");
@@ -3305,6 +3386,7 @@ function renderReview(review) {
   });
   elements.reviewPanel.hidden = false;
   elements.continuePanel.hidden = true;
+  elements.undoReview.hidden = !review.can_undo;
   renderCandidateCards();
   updateReviewStats();
 }
@@ -3411,28 +3493,9 @@ async function submitFeedback(action) {
         failures.length > 0,
       );
     } else if (action === "accept" && result.ready_to_continue) {
-      elements.reviewPanel.hidden = true;
-      beginRunSession({
-        stage: "SCREENED",
-        message: "候选集已确认，正在直接进入论文精读",
-        snapshot: state.snapshot,
-      });
-      const conversationId = conversationIdForSnapshot();
-      if (!conversationId) throw new Error("当前项目没有独立对话记录");
-      const runPayload = await api(
-        `/api/conversations/${encodeURIComponent(conversationId)}/continue`,
-        {
-          method: "POST",
-          body: "{}",
-        },
-      );
-      backgroundStarted = true;
-      state.activeRun = runPayload.data;
-      state.activeRunId = runPayload.data.run_id;
-      if (state.snapshot) state.snapshot.active_run = runPayload.data;
-      startRunPolling();
       await loadProjects();
-      notify("候选集已确认，后续研究正在后台运行");
+      await loadProject(state.projectId, true, true);
+      notify("候选集已确认；可撤销，或点击继续研究开始精读");
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -3447,6 +3510,26 @@ async function submitFeedback(action) {
       elements.runPanel.hidden = true;
       setBusy(false);
     }
+  }
+}
+
+async function undoSearchFeedback() {
+  if (!state.projectId || state.busy) return;
+  if (!window.confirm("撤销最近一次人工审核操作并恢复上一版候选集？")) return;
+  setBusy(true);
+  try {
+    const payload = await api(
+      `/api/projects/${encodeURIComponent(state.projectId)}/search-feedback/undo`,
+      { method: "POST", body: "{}" },
+    );
+    renderReview(payload.data);
+    await loadProjects();
+    notify("已恢复上一版候选集");
+  } catch (error) {
+    notify(`撤销失败：${error.message}`, true);
+    await loadProject(state.projectId, true, true);
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -4044,9 +4127,11 @@ elements.clearAll.addEventListener("click", () => {
   updateReviewStats();
 });
 elements.refineReview.addEventListener("click", () => submitFeedback("refine"));
+elements.undoReview.addEventListener("click", undoSearchFeedback);
 elements.acceptReview.addEventListener("click", () => submitFeedback("accept"));
 elements.stopReview.addEventListener("click", () => submitFeedback("stop"));
 elements.continueResearch.addEventListener("click", continueResearch);
+elements.undoDecision.addEventListener("click", undoSearchFeedback);
 
 elements.sidebarToggle.addEventListener("click", () => {
   const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";
@@ -4058,6 +4143,10 @@ elements.toolsMenuToggle.addEventListener("click", () => {
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, open);
   if (open) elements.toolsMenu.querySelector("a, button, input")?.focus();
 });
+elements.usageGuideOpen.addEventListener("click", openUsageGuide);
+elements.usageGuideClose.addEventListener("click", () => closeUsageGuide());
+elements.usageGuideDismiss.addEventListener("click", () => closeUsageGuide());
+elements.usageGuideBackdrop.addEventListener("click", () => closeUsageGuide());
 elements.projectMenuToggle.addEventListener("click", () => {
   const open = elements.projectMenu.hidden;
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
@@ -4083,6 +4172,23 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (state.usageGuideOpen && event.key === "Tab") {
+    const focusable = [...elements.usageGuide.querySelectorAll(
+      'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.getClientRects().length > 0);
+    if (focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
   if (state.inspectorOpen && event.key === "Tab") {
     const focusable = [...elements.projectInspector.querySelectorAll(
       'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
@@ -4101,6 +4207,11 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  if (state.usageGuideOpen) {
+    event.preventDefault();
+    closeUsageGuide();
+    return;
+  }
   if (state.inspectorOpen) {
     event.preventDefault();
     closeInspector();
@@ -4116,6 +4227,7 @@ document.addEventListener("keydown", (event) => {
 async function initialize() {
   initializeSidebar();
   refreshIcons();
+  maybeOpenUsageGuide();
   await Promise.all([checkHealth(), loadProjects()]);
   const params = new URLSearchParams(window.location.search);
   if (params.get("view") === "library") {

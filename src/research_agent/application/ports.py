@@ -203,7 +203,7 @@ class ResearchRepositoryPort(Protocol):
         project_id: str,
         target: ResearchStage,
         actor: str,
-        review: ReviewResult,
+        review: ReviewResult | None = None,
     ) -> ResearchProject: ...
 
     def save_artifact(

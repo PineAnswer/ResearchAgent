@@ -36,6 +36,10 @@ CREATED
       ├─ PASS   → OUTLINED → NARRATED → COMPLETED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
+NARRATED
+  ├─ 最新事实核查全部 PASS → COMPLETED
+  └─ 存在 REVISE → REVISION_PENDING → NARRATED → 重新核查
+
 CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED / NARRATED
   └─ 证据不足或无法继续 → INCONCLUSIVE
 ```
@@ -52,6 +56,7 @@ CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED 
 - `REVIEWED`：结构化 `ReviewResult` 已提交。
 - `OUTLINED`：证据审查已通过，`ReviewOutline` 已保存，分节正文可以开始写作。
 - `NARRATED`：`NarrativeReview` 已整合完成，等待逐节事实核查收尾。
+- `REVISION_PENDING`：最新事实核查发现问题，只允许重写被标记章节并重新整合。
 - `COMPLETED`：综述正文及各节 `FactCheckReport` 已生成，项目流程完成。
 - `INCONCLUSIVE`：证据不足、连续结构校验失败或其他受控原因使流程无法形成可靠结论。
 
@@ -180,18 +185,18 @@ JsonArtifactExporter 刷新对应 JSON 镜像
 不同子 Agent 的提交效果为：
 
 - Scout：搜索中间件捕获原始论文元数据，`recording_runnable` 再用 `candidate_ids` 筛选并重建 `candidates`。Scout 在一次子任务内按前端限制自动完成多轮检索、标题摘要级筛选、覆盖盲区分析和检索词调整；随后保存最终 `SearchReport`。非空候选集会同时创建 `CandidateSetSnapshot`，项目经 `SEARCHED` 进入 `SEARCH_REVIEW_PENDING` 并等待用户最终手筛。
-- 检索审核：保存 `SearchFeedback`、可选的 `SupplementalSearchReport` 和新版 `CandidateSetSnapshot`；用户确认后保存 `ScreeningDecision` 并进入 `SCREENED`。前端确认后会直接调用继续接口进入精读；API 仍保留手动 `/continue` 入口用于集成和旧项目。
+- 检索审核：保存 `SearchFeedback`、可选的 `SupplementalSearchReport` 和新版 `CandidateSetSnapshot`；用户确认后保存 `ScreeningDecision` 并进入 `SCREENED`。后续运行开始前可追加补偿事件撤销到上一版候选集；点击继续后进入精读。
 - Reader：保存单篇 `PaperCard`，阶段暂不变化；全部入选论文处理完后由主 Agent推进 `SCREENED → EXTRACTED`。
 - Synthesizer：保存 `SynthesisReport`，`EXTRACTED → SYNTHESIZED`。
 - Reviewer：保存 `ReviewResult`，`REVIEW_PENDING → REVIEWED`。
 - Outliner：保存 `ReviewOutline`，`REVIEWED → OUTLINED`。
 - Writer：逐节保存 `SectionDraft`，项目保持 `OUTLINED`。
 - Chief editor：保存 `NarrativeReview`，`OUTLINED → NARRATED`。
-- Fact checker：逐节保存 `FactCheckReport`，全部核查结束后由主 Agent 推进 `NARRATED → COMPLETED`。
+- Fact checker：逐节保存 `FactCheckReport`；全部 `PASS` 才进入 `COMPLETED`，存在 `REVISE` 则进入 `REVISION_PENDING` 定向修订并重新核查。
 
 若结构化结果校验失败，该份待提交结果会被释放，错误响应会指示是否允许重试。Scout 不重新委派；其余角色最多容许一次重新委派，连续两份无效结果后要求调用 `finish_inconclusive`。
 
-Synthesizer 的业务校验还会检查研究空白引用的 Evidence、支持论文集合和假设中的数字。当前数字提取采用通用数字正则，因此 `2D`、`3DVG`、`FFL-3DOG` 等技术术语可能触发误判；这是当前版本的已知限制，详见[《故障诊断与当前限制》](troubleshooting.md)。
+Synthesizer 的业务校验还会检查研究空白引用的 Evidence、支持论文集合和假设中的数字。数字提取会忽略 `2D`、`3DVG`、`FFL-3DOG`、`ResNet-50` 等技术标识，并对规范化数值执行精确集合比较。
 
 `ResearchWorkflowGuardMiddleware` 还会执行以下硬约束：项目必须先创建或由 Supervisor 绑定恢复；只能委派八个注册角色；角色必须处于指定阶段；上一份待提交结果必须先提交；同一任务的 Scout 只能调用一次；`SEARCH_REVIEW_PENDING` 阶段的确认和停止只能来自用户反馈 API。这些检查位于中间件中，不依赖模型自行遵守提示词。
 
