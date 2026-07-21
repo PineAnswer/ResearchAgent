@@ -45,7 +45,7 @@ def build_library_tools(
 
     @tool
     def search_library(query: str, limit: int = 8) -> str:
-        """Search local papers, notes, indexed PDFs, and historical project evidence first."""
+        """Search local papers, notes, indexed PDFs, and historical project evidence."""
         results = service.search_library(
             query,
             library_ids=scoped_ids(None),

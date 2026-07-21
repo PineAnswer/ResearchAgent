@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
@@ -33,6 +34,7 @@ from research_agent.domain.models import (
     SectionDraft,
     SynthesisReport,
 )
+from research_agent.infrastructure.observable_chat_model import structured_output_strategy
 
 
 def _bounded_middleware(tool_call_limit: int) -> list:
@@ -55,6 +57,7 @@ def build_subagent_registry(
     max_openalex_searches: int = 3,
     max_crossref_searches: int = 1,
     max_paper_fetches_per_paper: int = 2,
+    memory_provider: Callable[[str, str, str], dict[str, Any]] | None = None,
 ) -> Sequence[dict]:
     state = runtime_state or ResearchRuntimeState()
     required_skills = {
@@ -69,33 +72,23 @@ def build_subagent_registry(
 
     scout_tools = [
         tools_by_name["search_library"],
-        tools_by_name["search_openalex"],
+        tools_by_name["search_multi_source"],
     ]
-    if max_crossref_searches > 0:
-        scout_tools.append(tools_by_name["search_crossref"])
-    scout_model_limit = max(6, max_openalex_searches + max_crossref_searches + 5)
+    scout_model_limit = max(6, max_openalex_searches + 5)
     scout_middleware = [
         SerialToolExecutionMiddleware(),
         ModelCallLimitMiddleware(run_limit=scout_model_limit, exit_behavior="end"),
         ToolCallLimitMiddleware(
             tool_name="search_library",
             run_limit=2,
-            exit_behavior="continue",
+            exit_behavior="end",
         ),
         ToolCallLimitMiddleware(
-            tool_name="search_openalex",
-            run_limit=max_openalex_searches,
-            exit_behavior="continue",
+            tool_name="search_multi_source",
+            run_limit=max(1, max_openalex_searches),
+            exit_behavior="end",
         ),
     ]
-    if max_crossref_searches > 0:
-        scout_middleware.append(
-            ToolCallLimitMiddleware(
-                tool_name="search_crossref",
-                run_limit=max_crossref_searches,
-                exit_behavior="continue",
-            )
-        )
     scout_middleware.append(ExecutedSearchTrackingMiddleware(state))
 
     configured = [
@@ -210,7 +203,7 @@ def build_subagent_registry(
             model=model,
             tools=tools,
             system_prompt=prompt,
-            response_format=schema.model_json_schema(),
+            response_format=structured_output_strategy(model, schema),
             middleware=middleware,
             name=name,
         )
@@ -218,7 +211,12 @@ def build_subagent_registry(
             {
                 "name": name,
                 "description": description,
-                "runnable": recording_runnable(agent, name, state),
+                "runnable": recording_runnable(
+                    agent,
+                    name,
+                    state,
+                    memory_provider=memory_provider,
+                ),
             }
         )
     return registry

@@ -4,7 +4,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-*/
 .ruff_cache/
+tmp/pytest-*/
 .research-agent/
 server_out.txt
 server_err.txt

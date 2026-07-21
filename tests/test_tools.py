@@ -364,3 +364,124 @@ def test_fetch_paper_text_reuses_cached_pdf_without_network(
     assert second["available"] is True
     assert second["cached"] is True
     assert calls == 1
+
+
+def test_multi_source_search_splits_queries_and_merges_duplicate_papers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    atom = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>https://arxiv.org/abs/2501.00001</id>
+        <published>2025-01-02T00:00:00Z</published>
+        <title>Geo localization benchmark</title>
+        <summary>A benchmark for image geolocation.</summary>
+        <author><name>Arxiv Author</name></author>
+        <link href="https://arxiv.org/pdf/2501.00001" type="application/pdf"/>
+      </entry>
+    </feed>"""
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        url = request.full_url
+        requested_urls.append(url)
+        if "api.openalex.org" in url:
+            return FakeJsonResponse(
+                {
+                    "results": [
+                        {
+                            "id": "https://openalex.org/W-GEO",
+                            "title": "Unified Geo Localization",
+                            "authorships": [],
+                            "publication_year": 2025,
+                            "doi": "https://doi.org/10.1000/geo",
+                            "primary_location": {},
+                            "best_oa_location": {},
+                            "abstract_inverted_index": {"image": [0], "geolocation": [1]},
+                        }
+                    ]
+                }
+            )
+        if "api.crossref.org" in url:
+            return FakeJsonResponse(
+                {
+                    "message": {
+                        "items": [
+                            {
+                                "DOI": "10.1000/geo",
+                                "title": ["Unified Geo Localization"],
+                                "author": [],
+                                "issued": {"date-parts": [[2025]]},
+                                "type": "journal-article",
+                                "container-title": ["Geo Journal"],
+                                "URL": "https://doi.org/10.1000/geo",
+                            }
+                        ]
+                    }
+                }
+            )
+        if "api.semanticscholar.org" in url:
+            return FakeJsonResponse(
+                {
+                    "data": [
+                        {
+                            "paperId": "S2-GEO",
+                            "title": "Unified Geo Localization",
+                            "authors": [],
+                            "year": 2025,
+                            "abstract": "Image geolocation with retrieval.",
+                            "externalIds": {"DOI": "10.1000/geo"},
+                            "url": "https://example.test/geo",
+                            "venue": "Geo Journal",
+                            "publicationTypes": ["JournalArticle"],
+                        }
+                    ]
+                }
+            )
+        if "export.arxiv.org" in url:
+            return FakeBinaryResponse(atom)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["search_multi_source"].invoke(
+            {
+                "queries": [
+                    "image geolocation retrieval",
+                    "geolocation benchmark evaluation",
+                ],
+                "limit_per_source": 3,
+                "year_from": 2024,
+                "year_to": 2026,
+            }
+        )
+    )
+
+    assert result["sources_attempted"] == [
+        "OpenAlex",
+        "Crossref",
+        "Semantic Scholar",
+        "arXiv",
+    ]
+    assert len(result["source_status"]) == 8
+    assert len(requested_urls) == 8
+    duplicate = next(
+        item
+        for item in result["candidates"]
+        if str(item.get("doi")).endswith("10.1000/geo")
+    )
+    assert duplicate["sources"] == [
+        "OpenAlex",
+        "Crossref",
+        "Semantic Scholar",
+    ]
+    assert duplicate["matched_queries"] == [
+        "image geolocation retrieval",
+        "geolocation benchmark evaluation",
+    ]
+    assert duplicate["source"] == "OpenAlex + Crossref + Semantic Scholar"
+    assert duplicate["relevance_score"] > 0

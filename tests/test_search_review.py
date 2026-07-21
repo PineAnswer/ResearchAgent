@@ -442,3 +442,58 @@ def test_scout_commit_callback_opens_review_and_consumes_result(tmp_path) -> Non
     assert committed["project"]["stage"] == "SEARCH_REVIEW_PENDING"
     assert committed["search_review"]["awaiting_input"] is True
     assert state.pending_result("thread-a", "literature-scout") is None
+
+
+def test_empty_scout_result_opens_review_instead_of_ending_project(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+    )
+    state = ResearchRuntimeState()
+    tools = {
+        item.name: item
+        for item in build_project_tools(
+            service,
+            state,
+            on_search_committed=lambda project_id, _thread_id: review.begin_review(
+                project_id
+            ),
+        )
+    }
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-empty"}})
+    project = json.loads(
+        tools["create_research_project"].func("topic", "question", runtime=runtime)
+    )
+    state.record_result(
+        "thread-empty",
+        "literature-scout",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidate_ids": [],
+            "candidates": [],
+            "screening_decisions": {},
+            "screening_reasons": {},
+            "coverage_gaps": ["No results yet."],
+            "search_iteration_log": [],
+            "selection_notes": ["Keep the project open for manual refinement."],
+        },
+    )
+
+    committed = json.loads(
+        tools["commit_subagent_result"].func(
+            project["project_id"],
+            "literature-scout",
+            runtime=runtime,
+        )
+    )
+
+    assert committed["project"]["stage"] == "SEARCH_REVIEW_PENDING"
+    assert committed["search_review"]["candidate_set"]["candidates"] == []
+    assert service.get_project(project["project_id"]).stage is (
+        ResearchStage.SEARCH_REVIEW_PENDING
+    )

@@ -6,6 +6,7 @@ import html
 import ipaddress
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -201,6 +202,71 @@ def _get_json(url: str, *, source: str, policy: HttpRetryPolicy) -> dict:
                 source=source,
                 error_code="invalid_response",
                 message=f"{source} returned an invalid JSON response",
+                attempts=attempts,
+                retryable=False,
+            ) from exc
+
+    raise AssertionError("retry loop ended unexpectedly")
+
+
+def _get_text(
+    url: str,
+    *,
+    source: str,
+    policy: HttpRetryPolicy,
+    headers: dict[str, str] | None = None,
+) -> str:
+    for attempt in range(policy.max_retries + 1):
+        attempts = attempt + 1
+        request_headers = {"User-Agent": policy.user_agent, **(headers or {})}
+        request = Request(url, headers=request_headers)
+        try:
+            with urlopen(
+                request, timeout=20
+            ) as response:  # noqa: S310 - fixed academic API hosts
+                return response.read().decode("utf-8")
+        except HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
+            delay = (
+                retry_after
+                if retry_after is not None
+                else policy.backoff_seconds * (2**attempt)
+            )
+            if (
+                retryable
+                and attempt < policy.max_retries
+                and delay <= policy.max_retry_wait_seconds
+            ):
+                time.sleep(delay)
+                continue
+            raise AcademicApiError(
+                source=source,
+                error_code="rate_limited" if exc.code == 429 else "http_error",
+                message=f"{source} HTTP {exc.code}: {exc.reason}",
+                attempts=attempts,
+                retryable=retryable,
+                status_code=exc.code,
+                retry_after_seconds=retry_after,
+                rate_limit=_rate_limit_headers(exc.headers),
+            ) from exc
+        except URLError as exc:
+            delay = policy.backoff_seconds * (2**attempt)
+            if attempt < policy.max_retries and delay <= policy.max_retry_wait_seconds:
+                time.sleep(delay)
+                continue
+            raise AcademicApiError(
+                source=source,
+                error_code="network_error",
+                message=f"{source} network error: {exc.reason}",
+                attempts=attempts,
+                retryable=True,
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise AcademicApiError(
+                source=source,
+                error_code="invalid_response",
+                message=f"{source} returned invalid UTF-8 text",
                 attempts=attempts,
                 retryable=False,
             ) from exc
@@ -425,6 +491,406 @@ def build_literature_tools(
                 year_to=year_to,
                 quality_venues_only=quality_venues_only,
             ),
+            ensure_ascii=False,
+        )
+
+    @tool
+    def search_semantic_scholar(
+        query: str,
+        limit: int = 5,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
+    ) -> str:
+        """Search Semantic Scholar and return normalized paper metadata."""
+        limit = max(1, min(limit, 20))
+        upstream_limit = min(50, max(limit, limit * 4 if quality_venues_only else limit))
+        fields = (
+            "paperId,title,authors,year,abstract,externalIds,url,venue,"
+            "publicationTypes,openAccessPdf"
+        )
+        params = {
+            "query": query,
+            "limit": upstream_limit,
+            "fields": fields,
+        }
+        url = (
+            "https://api.semanticscholar.org/graph/v1/paper/search?"
+            + urlencode(params)
+        )
+        try:
+            text = _get_text(
+                url,
+                source="Semantic Scholar",
+                policy=retry_policy,
+            )
+            data = json.loads(text)
+        except AcademicApiError as exc:
+            return recoverable_error(exc)
+        except json.JSONDecodeError:
+            return recoverable_error(
+                AcademicApiError(
+                    source="Semantic Scholar",
+                    error_code="invalid_response",
+                    message="Semantic Scholar returned invalid JSON",
+                    attempts=1,
+                    retryable=False,
+                )
+            )
+        records = []
+        for item in data.get("data", []):
+            external_ids = item.get("externalIds") or {}
+            doi = external_ids.get("DOI")
+            arxiv_id = external_ids.get("ArXiv")
+            publication_types = {
+                str(value).casefold() for value in item.get("publicationTypes") or []
+            }
+            venue_type = (
+                "conference"
+                if any("conference" in value for value in publication_types)
+                else "journal"
+                if any("journal" in value for value in publication_types)
+                else None
+            )
+            open_access = item.get("openAccessPdf") or {}
+            records.append(
+                {
+                    "paper_id": (
+                        doi
+                        or (f"arXiv:{arxiv_id}" if arxiv_id else "")
+                        or f"S2:{item.get('paperId', '')}"
+                    ),
+                    "title": item.get("title", ""),
+                    "authors": [
+                        author.get("name", "") for author in item.get("authors", [])
+                    ],
+                    "year": item.get("year"),
+                    "abstract": item.get("abstract") or "",
+                    "doi": doi,
+                    "url": open_access.get("url") or item.get("url"),
+                    "source": "Semantic Scholar",
+                    "venue": item.get("venue") or "",
+                    "venue_type": venue_type,
+                }
+            )
+        return json.dumps(
+            prepare_candidates(
+                records,
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+                quality_venues_only=quality_venues_only,
+            ),
+            ensure_ascii=False,
+        )
+
+    @tool
+    def search_arxiv(
+        query: str,
+        limit: int = 5,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
+    ) -> str:
+        """Search arXiv and return normalized preprint metadata."""
+        limit = max(1, min(limit, 20))
+        upstream_limit = min(50, max(limit, limit * 4))
+        params = {
+            "search_query": f"all:{query}",
+            "start": 0,
+            "max_results": upstream_limit,
+            "sortBy": "relevance",
+            "sortOrder": "descending",
+        }
+        url = "https://export.arxiv.org/api/query?" + urlencode(params)
+        try:
+            text = _get_text(url, source="arXiv", policy=retry_policy)
+            root = ET.fromstring(text)
+        except AcademicApiError as exc:
+            return recoverable_error(exc)
+        except ET.ParseError:
+            return recoverable_error(
+                AcademicApiError(
+                    source="arXiv",
+                    error_code="invalid_response",
+                    message="arXiv returned invalid Atom XML",
+                    attempts=1,
+                    retryable=False,
+                )
+            )
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        records = []
+        for entry in root.findall("atom:entry", namespace):
+            identifier_url = entry.findtext("atom:id", default="", namespaces=namespace)
+            arxiv_id = identifier_url.rstrip("/").rsplit("/", maxsplit=1)[-1]
+            published = entry.findtext(
+                "atom:published", default="", namespaces=namespace
+            )
+            try:
+                year = int(published[:4]) if published else None
+            except ValueError:
+                year = None
+            pdf_url = ""
+            for link in entry.findall("atom:link", namespace):
+                if link.attrib.get("type") == "application/pdf":
+                    pdf_url = link.attrib.get("href", "")
+                    break
+            records.append(
+                {
+                    "paper_id": f"arXiv:{arxiv_id}",
+                    "title": _plain_text(
+                        entry.findtext("atom:title", default="", namespaces=namespace)
+                    ),
+                    "authors": [
+                        _plain_text(
+                            author.findtext(
+                                "atom:name", default="", namespaces=namespace
+                            )
+                        )
+                        for author in entry.findall("atom:author", namespace)
+                    ],
+                    "year": year,
+                    "abstract": _plain_text(
+                        entry.findtext(
+                            "atom:summary", default="", namespaces=namespace
+                        )
+                    ),
+                    "doi": f"10.48550/arXiv.{arxiv_id}",
+                    "url": pdf_url or identifier_url,
+                    "source": "arXiv",
+                    "venue": "arXiv",
+                    "venue_type": None,
+                }
+            )
+        return json.dumps(
+            prepare_candidates(
+                records,
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+                quality_venues_only=quality_venues_only,
+            ),
+            ensure_ascii=False,
+        )
+
+    def candidate_merge_key(candidate: dict[str, Any]) -> str:
+        doi = str(candidate.get("doi") or "").casefold()
+        doi = doi.removeprefix("https://doi.org/").strip()
+        if doi:
+            return f"doi:{doi}"
+        title = re.sub(
+            r"[^\w]+",
+            " ",
+            str(candidate.get("title") or "").casefold(),
+            flags=re.UNICODE,
+        )
+        return "title:" + " ".join(title.split())
+
+    def merge_candidate(
+        merged: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        source: str,
+        query: str,
+    ) -> None:
+        sources = list(merged.get("sources") or [])
+        if source not in sources:
+            sources.append(source)
+        matched_queries = list(merged.get("matched_queries") or [])
+        if query not in matched_queries:
+            matched_queries.append(query)
+        for field in (
+            "paper_id",
+            "title",
+            "year",
+            "doi",
+            "url",
+            "venue",
+            "venue_type",
+            "venue_acronym",
+            "ccf_rank",
+            "ccf_category",
+            "ccf_year",
+            "sci_quartile",
+            "index_name",
+            "impact_factor",
+            "impact_factor_year",
+            "venue_rating_explanation",
+            "venue_rating_source_url",
+            "venue_rating_source_label",
+            "venue_match_confidence",
+        ):
+            if not merged.get(field) and candidate.get(field):
+                merged[field] = candidate[field]
+        if len(str(candidate.get("abstract") or "")) > len(
+            str(merged.get("abstract") or "")
+        ):
+            merged["abstract"] = candidate.get("abstract")
+        authors = list(merged.get("authors") or [])
+        for author in candidate.get("authors") or []:
+            if author and author not in authors:
+                authors.append(author)
+        merged["authors"] = authors
+        merged["sources"] = sources
+        merged["matched_queries"] = matched_queries
+        merged["source"] = " + ".join(sources)
+
+    def candidate_relevance(
+        candidate: dict[str, Any],
+        queries: list[str],
+    ) -> float:
+        title_tokens = set(
+            re.findall(
+                r"[\w]+",
+                str(candidate.get("title") or "").casefold(),
+                flags=re.UNICODE,
+            )
+        )
+        abstract_tokens = set(
+            re.findall(
+                r"[\w]+",
+                str(candidate.get("abstract") or "").casefold(),
+                flags=re.UNICODE,
+            )
+        )
+        score = 0.0
+        for query in queries:
+            query_tokens = set(
+                re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+            )
+            if not query_tokens:
+                continue
+            score += 3.0 * len(query_tokens & title_tokens) / len(query_tokens)
+            score += 1.0 * len(query_tokens & abstract_tokens) / len(query_tokens)
+        score += 1.5 * len(candidate.get("sources") or [])
+        score += 0.75 * len(candidate.get("matched_queries") or [])
+        if candidate.get("abstract"):
+            score += 0.5
+        if candidate.get("doi"):
+            score += 0.25
+        return round(score, 4)
+
+    @tool
+    def search_multi_source(
+        queries: list[str],
+        limit_per_source: int = 5,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        quality_venues_only: bool = False,
+    ) -> str:
+        """Run a portfolio of short queries against four scholarly sources.
+
+        Every query is attempted independently in OpenAlex, Crossref, Semantic
+        Scholar, and arXiv. Results are merged by DOI or normalized title and
+        ranked for presentation. Partial source failures never discard results
+        already returned by other sources.
+        """
+        normalized_queries = []
+        seen_queries: set[str] = set()
+        for value in queries:
+            query = " ".join(str(value).split())
+            key = query.casefold()
+            if query and key not in seen_queries:
+                seen_queries.add(key)
+                normalized_queries.append(query)
+            if len(normalized_queries) >= 6:
+                break
+        if not normalized_queries:
+            return json.dumps(
+                {
+                    "queries": [],
+                    "sources_attempted": [],
+                    "source_status": [],
+                    "candidates": [],
+                    "error": "At least one non-empty query is required.",
+                },
+                ensure_ascii=False,
+            )
+        limit_per_source = max(1, min(limit_per_source, 10))
+        source_tools = [
+            ("OpenAlex", search_openalex),
+            ("Crossref", search_crossref),
+            ("Semantic Scholar", search_semantic_scholar),
+            ("arXiv", search_arxiv),
+        ]
+        merged_by_key: dict[str, dict[str, Any]] = {}
+        source_status = []
+        for query in normalized_queries:
+            for source, source_tool in source_tools:
+                raw = source_tool.invoke(
+                    {
+                        "query": query,
+                        "limit": limit_per_source,
+                        "year_from": year_from,
+                        "year_to": year_to,
+                        "quality_venues_only": quality_venues_only,
+                    }
+                )
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = {
+                        "ok": False,
+                        "error_code": "invalid_response",
+                        "error": f"{source} returned an invalid response",
+                    }
+                if isinstance(parsed, dict):
+                    source_status.append(
+                        {
+                            "query": query,
+                            "source": source,
+                            "ok": False,
+                            "error_code": parsed.get("error_code", "source_error"),
+                            "error": parsed.get("error", ""),
+                        }
+                    )
+                    continue
+                candidates = [item for item in parsed if isinstance(item, dict)]
+                source_status.append(
+                    {
+                        "query": query,
+                        "source": source,
+                        "ok": True,
+                        "count": len(candidates),
+                    }
+                )
+                for candidate in candidates:
+                    key = candidate_merge_key(candidate)
+                    if key in {"doi:", "title:"}:
+                        continue
+                    if key not in merged_by_key:
+                        merged_by_key[key] = {
+                            **candidate,
+                            "sources": [],
+                            "matched_queries": [],
+                        }
+                    merge_candidate(
+                        merged_by_key[key],
+                        candidate,
+                        source=source,
+                        query=query,
+                    )
+        candidates = list(merged_by_key.values())
+        for candidate in candidates:
+            candidate["relevance_score"] = candidate_relevance(
+                candidate,
+                normalized_queries,
+            )
+        candidates.sort(
+            key=lambda item: (
+                float(item.get("relevance_score") or 0),
+                len(item.get("sources") or []),
+                int(item.get("year") or 0),
+            ),
+            reverse=True,
+        )
+        return json.dumps(
+            {
+                "queries": normalized_queries,
+                "sources_attempted": [source for source, _tool in source_tools],
+                "source_status": source_status,
+                "candidates": candidates,
+            },
             ensure_ascii=False,
         )
 
@@ -696,4 +1162,13 @@ def build_literature_tools(
         }
         return json.dumps(result, ensure_ascii=False)
 
-    return [search_openalex, search_crossref, fetch_paper_text, extract_pdf_text, verify_doi]
+    return [
+        search_openalex,
+        search_crossref,
+        search_semantic_scholar,
+        search_arxiv,
+        search_multi_source,
+        fetch_paper_text,
+        extract_pdf_text,
+        verify_doi,
+    ]

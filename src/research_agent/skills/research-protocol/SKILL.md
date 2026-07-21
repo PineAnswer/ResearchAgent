@@ -15,10 +15,10 @@ description: 证据驱动科研项目的总流程与状态推进规范
 ## 第二步：检索文献 → SEARCH_REVIEW_PENDING
 
 - 委派一次 literature-scout。
-- literature-scout 每个任务通常只委派一次；仅当提交工具明确返回 `retry_allowed=true` 时，允许按其 instruction 纠正性地重新委派一次。禁止使用 general-purpose 或额外委派绕过检索限制。
+- literature-scout 正常情况下每个任务只委派一次；只有首次结构校验失败且提交工具明确返回 `retry_allowed=true` 时，才允许修正后重试一次。
 - literature-scout 负责检索策略设计和标题摘要初筛，只输出 candidate_ids、screening_decisions、screening_reasons、coverage_gaps、search_iteration_log、selection_notes。candidate_ids 必须使用搜索工具返回的真实 paper_id 或 DOI，禁止使用 P001/P002 等临时编号。论文完整元数据由系统从搜索工具返回中自动捕获并重建 candidates 列表。
 - 调用 `commit_subagent_result(project_id, "literature-scout")`，由系统重建 candidates 并提交结构化结果，进入 SEARCHED。
-- 如果 SearchReport 的 `candidates` 为空，立即调用 `finish_inconclusive` 保存检索词、失败原因和建议，项目进入 `INCONCLUSIVE` 并正常结束。禁止创建空 ScreeningDecision 或继续到 EXTRACTED。
+- 如果 SearchReport 的 `candidates` 为空，仍保存 SearchReport 和空 CandidateSetSnapshot，进入 `SEARCH_REVIEW_PENDING` 等待用户补充查询或手动加入论文；不得自动进入 `INCONCLUSIVE`。
 - 如果存在候选论文，系统会创建候选集快照并进入 `SEARCH_REVIEW_PENDING`。立即停止本轮 Agent 执行，等待用户通过检索审核 API 补充查询、加入或排除论文。
 
 ## 第三步：用户确认候选集 → SCREENED
@@ -49,16 +49,14 @@ description: 证据驱动科研项目的总流程与状态推进规范
 5. 全部入选论文保存完成后，调用 `advance_project_stage(project_id, "EXTRACTED", "paper-reader")`。
 
 全文不可用但摘要非空时，可保存明确标记为 abstract 的摘要级 Evidence。全文和摘要均不可用时 findings 为空。
-paper-reader 已通过 response_format 绑定官方 PaperCard 结构，Supervisor不得在任务描述中重复字段定义。
-单篇论文连续两次返回无效结构时，跳过该论文并继续下一篇；重试额度按paper_id隔离。
-全部卡片保存后若 EXTRACTED 返回 `insufficient_evidence`，立即调用 `finish_inconclusive`，禁止进入综合。
+全部卡片的 findings 都为空时仍推进到 EXTRACTED。后续 SynthesisReport 的四个结论列表保持为空，并明确说明只有元数据、没有可定位证据；不得虚构综合结论。
 
 ## 第五步：综合比较 → SYNTHESIZED
 
 - 委派 research-synthesizer，任务中必须复制创建项目工具返回的原始 `project_id`，并提供研究主题和研究问题。
 - 禁止向任务中复制论文列表、猜测项目ID或自行定义 SynthesisReport JSON；综合 Agent 通过当前运行绑定的只读工具获取已保存产物。
 - 调用 `commit_subagent_result(project_id, "research-synthesizer")` 原样提交并进入 SYNTHESIZED。
-- 如果提交返回 `retry_allowed=true`，旧结果已被系统丢弃；根据错误原因重新委派 synthesizer 一次。再次失败或 `retry_allowed=false` 时调用 `finish_inconclusive`，禁止重复提交旧结果。
+- 如果提交返回 `retry_allowed=true`，旧结果已被系统丢弃；根据错误原因重新委派 synthesizer 一次。再次失败或 `retry_allowed=false` 时调用 `record_research_issue`，保留当前阶段并停止本轮，禁止重复提交旧结果。
 
 ## 第六步：同行审查 → REVIEWED
 
@@ -68,8 +66,9 @@ paper-reader 已通过 response_format 绑定官方 PaperCard 结构，Superviso
 
 ## 第七步：审查分流
 
-- PASS：只能进入综述写作流程，禁止直接推进到 COMPLETED。
-- REVISE：明确标记“报告需要修订”；可返回 EXTRACTED 修订一次，证据无法补充时进入 INCONCLUSIVE。
+- 提交 ReviewResult 后统一在 REVIEWED 结束本轮，给前端留下显式人工检查点。
+- PASS：提示用户点击“继续生成综述”；下一轮才进入提纲和正文写作，禁止直接推进到 COMPLETED。
+- REVISE：提示用户点击“修订并重新审查”；下一轮返回 EXTRACTED，复用现有 PaperCard 和 Evidence 修订 SynthesisReport，再次进入 REVIEW_PENDING 审查，不自动进入 INCONCLUSIVE。
 
 ## 第八步：综述提纲 → OUTLINED
 
@@ -88,7 +87,8 @@ paper-reader 已通过 response_format 绑定官方 PaperCard 结构，Superviso
 
 ## 停止规则
 
-- 子 Agent 返回 `_subagent_error` 时仍调用 `commit_subagent_result`，由系统记录拒绝并释放结果；根据 `retry_allowed` 决定重新委派或进入 `INCONCLUSIVE`。
+- 子 Agent 返回 `_subagent_error` 时仍调用 `commit_subagent_result`，由系统记录拒绝并释放结果；根据 `retry_allowed` 决定重新委派或调用 `record_research_issue` 保持当前阶段。
+- 证据不足、空候选、来源限流和结构化输出失败都不得由 Supervisor 自动调用 `finish_inconclusive`。
 - 工具返回结构化错误时严格遵循其中的 `instruction` 和 `retry_allowed`；禁止为了继续流程而跳过前置产物或非法推进状态。
 - 子 Agent 达到工具调用上限时，Supervisor不得以相同指令重复委派。
 - 所有状态变化必须经过 Python 状态机。

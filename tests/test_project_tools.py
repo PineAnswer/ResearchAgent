@@ -397,6 +397,28 @@ def test_empty_search_can_finish_inconclusive(tmp_path) -> None:
     assert result["artifact"]["kind"] == "InsufficientEvidence"
 
 
+def test_research_issue_keeps_current_project_stage(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    tools = _tools_by_name(service)
+    project = service.create_project("topic", "question")
+
+    result = json.loads(
+        tools["record_research_issue"].func(
+            project.project_id,
+            "SearchReport validation failed.",
+            ["query"],
+            ["invalid candidate metadata"],
+            "Normalize metadata and retry.",
+        )
+    )
+
+    assert result["mode"] == "paused"
+    assert result["recoverable"] is True
+    assert result["project"]["stage"] == "CREATED"
+    assert result["artifact"]["kind"] == "RuntimeIssue"
+    assert service.get_project(project.project_id).stage is ResearchStage.CREATED
+
+
 def test_advance_stage_returns_recoverable_error_without_paper_cards(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     tools = _tools_by_name(service)

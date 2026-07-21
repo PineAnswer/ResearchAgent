@@ -14,7 +14,6 @@ class ResearchRequest(SearchConstraints):
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
     max_search_rounds: int | None = Field(default=None, ge=0)
-    prefer_library: bool = False
 
 
 class CreateConversationRequest(SearchConstraints):
@@ -23,7 +22,11 @@ class CreateConversationRequest(SearchConstraints):
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
     max_search_rounds: int | None = Field(default=None, ge=0)
-    prefer_library: bool = False
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    pinned: bool | None = None
 
 
 class ApiEnvelope(BaseModel):

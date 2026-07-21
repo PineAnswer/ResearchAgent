@@ -298,9 +298,29 @@ class ResearchRunLogger(BaseCallbackHandler):
         self._report_tool_start(name, normalized_inputs)
 
     def _report_tool_start(self, name: str, inputs: dict[str, Any]) -> None:
-        if name in {"search_openalex", "search_crossref"}:
-            source = "OpenAlex" if name == "search_openalex" else "Crossref"
-            self.emit("search.started", f"正在使用{source}搜索：{inputs.get('query', '')}")
+        if name in {
+            "search_openalex",
+            "search_crossref",
+            "search_semantic_scholar",
+            "search_arxiv",
+            "search_multi_source",
+        }:
+            source_names = {
+                "search_openalex": "OpenAlex",
+                "search_crossref": "Crossref",
+                "search_semantic_scholar": "Semantic Scholar",
+                "search_arxiv": "arXiv",
+                "search_multi_source": "OpenAlex、Crossref、Semantic Scholar 和 arXiv",
+            }
+            query = (
+                " | ".join(str(item) for item in inputs.get("queries", []))
+                if name == "search_multi_source"
+                else inputs.get("query", "")
+            )
+            self.emit(
+                "search.started",
+                f"正在使用{source_names[name]}搜索：{query}",
+            )
             return
         if name == "task":
             subagent = inputs.get("subagent_type", "子Agent")
@@ -428,11 +448,22 @@ class ResearchRunLogger(BaseCallbackHandler):
             )
             return
         if (
-            name in {"search_openalex", "search_crossref"}
+            name
+            in {
+                "search_openalex",
+                "search_crossref",
+                "search_semantic_scholar",
+                "search_arxiv",
+            }
             and isinstance(parsed, dict)
             and parsed.get("ok") is False
         ):
-            source = "OpenAlex" if name == "search_openalex" else "Crossref"
+            source = {
+                "search_openalex": "OpenAlex",
+                "search_crossref": "Crossref",
+                "search_semantic_scholar": "Semantic Scholar",
+                "search_arxiv": "arXiv",
+            }[name]
             error_code = str(parsed.get("error_code", "search_error"))
             attempts = parsed.get("attempts", 1)
             status_code = parsed.get("status_code")
@@ -445,13 +476,42 @@ class ResearchRunLogger(BaseCallbackHandler):
                 parsed,
             )
             return
-        if name in {"search_openalex", "search_crossref"} and isinstance(parsed, list):
-            source = "OpenAlex" if name == "search_openalex" else "Crossref"
+        if name in {
+            "search_openalex",
+            "search_crossref",
+            "search_semantic_scholar",
+            "search_arxiv",
+        } and isinstance(parsed, list):
+            source = {
+                "search_openalex": "OpenAlex",
+                "search_crossref": "Crossref",
+                "search_semantic_scholar": "Semantic Scholar",
+                "search_arxiv": "arXiv",
+            }[name]
             titles = [str(item.get("title", "无标题")) for item in parsed if isinstance(item, dict)]
             self.emit(
                 "search.results",
                 f"{source}返回{len(parsed)}篇：" + "；".join(titles[:8]),
                 {"count": len(parsed), "papers": parsed},
+            )
+            return
+        if name == "search_multi_source" and isinstance(parsed, dict):
+            papers = parsed.get("candidates", [])
+            statuses = parsed.get("source_status", [])
+            failure_count = sum(
+                1
+                for status in statuses
+                if isinstance(status, dict) and status.get("ok") is False
+            )
+            self.emit(
+                "search.results",
+                f"四源合并去重后返回{len(papers)}篇，部分失败{failure_count}项",
+                {
+                    "count": len(papers),
+                    "partial_failures": failure_count,
+                    "papers": papers,
+                    "source_status": statuses,
+                },
             )
             return
         if name == "fetch_paper_text" and isinstance(parsed, dict):

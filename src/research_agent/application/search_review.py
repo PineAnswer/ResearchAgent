@@ -203,6 +203,7 @@ class SearchReviewService:
         year_from: int | None = None,
         year_to: int | None = None,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         if project.stage is not ResearchStage.SEARCHED:
@@ -274,6 +275,7 @@ class SearchReviewService:
             year_from=resolved_year_from,
             year_to=resolved_year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
             **self._agent_review_fields(
                 candidates,
                 decisions=report.get("screening_decisions", {}),
@@ -282,7 +284,7 @@ class SearchReviewService:
                 max_papers=max_papers,
             ),
         )
-        if candidates:
+        if candidates or not report.get("candidates"):
             artifact, project = self.service.save_artifact_and_transition(
                 project_id,
                 "CandidateSetSnapshot",
@@ -300,7 +302,7 @@ class SearchReviewService:
         return {
             "project": project.model_dump(mode="json"),
             "candidate_set": artifact.payload,
-            "awaiting_input": bool(candidates),
+            "awaiting_input": bool(candidates) or not report.get("candidates"),
             "manual_recovery_allowed": not candidates,
             "message": blocked_reason or "候选论文已准备好，等待人工审核。",
         }
@@ -423,6 +425,36 @@ class SearchReviewService:
     ) -> tuple[list[PaperCandidate], list[str]]:
         candidates: list[PaperCandidate] = []
         failures: list[str] = []
+        multi_source_tool = self.tools.get("search_multi_source")
+        if multi_source_tool is not None:
+            raw = multi_source_tool.invoke(
+                {
+                    "queries": list(queries),
+                    "limit_per_source": min(self.search_limit, 10),
+                    "year_from": snapshot.year_from,
+                    "year_to": snapshot.year_to,
+                    "quality_venues_only": snapshot.quality_venues_only,
+                }
+            )
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                return [], ["invalid_multi_source_response"]
+            for status in parsed.get("source_status", []):
+                if isinstance(status, dict) and status.get("ok") is False:
+                    failures.append(
+                        f"{status.get('query', '')} / {status.get('source', '')}: "
+                        f"{status.get('error_code', 'search_failed')}"
+                    )
+            raw_candidates = parsed.get("candidates", [])
+            if not isinstance(raw_candidates, list):
+                return [], [*failures, "invalid_multi_source_candidates"]
+            candidates.extend(
+                PaperCandidate.model_validate(item)
+                for item in raw_candidates
+                if isinstance(item, dict)
+            )
+            return candidates, failures
+
         search_tool = self.tools["search_openalex"]
         for query in queries:
             raw = search_tool.invoke(
@@ -581,6 +613,7 @@ class SearchReviewService:
             year_from=snapshot.year_from,
             year_to=snapshot.year_to,
             quality_venues_only=snapshot.quality_venues_only,
+            prefer_library_search=snapshot.prefer_library_search,
             **self._agent_review_fields(
                 candidates,
                 decisions=prior_status,

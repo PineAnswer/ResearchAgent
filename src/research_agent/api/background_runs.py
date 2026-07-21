@@ -76,7 +76,7 @@ class ConversationRunManager:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library: bool = False,
+        prefer_library_search: bool = True,
     ) -> ConversationRun:
         return await self._start(
             conversation_id,
@@ -89,7 +89,7 @@ class ConversationRunManager:
                 "year_from": year_from,
                 "year_to": year_to,
                 "quality_venues_only": quality_venues_only,
-                "prefer_library": prefer_library,
+                "prefer_library_search": prefer_library_search,
             },
         )
 
@@ -156,6 +156,12 @@ class ConversationRunManager:
                 if project.stage is ResearchStage.SEARCH_REVIEW_PENDING:
                     status = "awaiting_input"
                     message = "候选论文已准备好，等待人工审核"
+                elif project.stage is ResearchStage.REVIEWED:
+                    status = "completed"
+                    if project.current_review and project.current_review.verdict.value == "REVISE":
+                        message = "证据审查要求修订，等待确认后重新审查"
+                    else:
+                        message = "证据审查已通过，等待确认后生成综述"
                 elif project.stage is ResearchStage.COMPLETED:
                     status = "completed"
                     message = "综述已生成，研究已完成"
@@ -168,7 +174,11 @@ class ConversationRunManager:
                 self.repository.update_conversation_run(
                     run_id,
                     status=status,
-                    phase=STAGE_PHASES[project.stage],
+                    phase=(
+                        "reviewing"
+                        if project.stage is ResearchStage.REVIEWED
+                        else STAGE_PHASES[project.stage]
+                    ),
                     message=message,
                     finished_at=datetime.now(UTC),
                 )

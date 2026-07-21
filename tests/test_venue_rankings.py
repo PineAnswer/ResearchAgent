@@ -178,7 +178,7 @@ def test_search_request_defaults_and_year_validation() -> None:
     assert request.year_from == 2024
     assert request.year_to == 2026
     assert request.quality_venues_only is False
-    assert request.prefer_library is False
+    assert request.prefer_library_search is True
 
     try:
         CreateConversationRequest(
@@ -201,8 +201,12 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
     assert 'id="initialYearFrom"' in html
     assert 'id="initialYearTo"' in html
     assert 'id="initialQualityVenuesOnly"' in html
-    assert 'id="initialPreferLibrary"' in html
-    assert "prefer_library: elements.initialPreferLibrary.checked" in script
+    assert 'id="initialPreferLibrarySearch"' in html
+    assert "prefer_library_search: elements.initialPreferLibrarySearch.checked" in script
+    assert 'method: "PATCH"' in script
+    assert "project-list-menu-toggle" in script
+    assert 'metricCard("候选论文", latestSearch?.candidates?.length ?? 0' in script
+    assert "const runFinished = syncRunningSnapshot(payload.data)" in script
     assert "仅 CCF-A、一区和 Nature 子刊" in html
     assert "candidate.venue_rating_explanation" in script
     assert "candidate.impact_factor" in script

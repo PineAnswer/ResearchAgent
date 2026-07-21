@@ -375,6 +375,12 @@ class SqliteResearchRepository:
                 "conversation_id",
                 "TEXT NOT NULL DEFAULT ''",
             )
+            self._ensure_column(
+                connection,
+                "conversations",
+                "pinned_at",
+                "TEXT",
+            )
             for table in (
                 "library_collections",
                 "library_notes",
@@ -767,6 +773,7 @@ class SqliteResearchRepository:
 
     @staticmethod
     def _conversation_from_row(row: sqlite3.Row) -> ResearchConversation:
+        pinned_at = row["pinned_at"]
         return ResearchConversation(
             conversation_id=row["conversation_id"],
             user_id=row["user_id"],
@@ -774,6 +781,8 @@ class SqliteResearchRepository:
             thread_id=row["thread_id"],
             title=row["title"],
             research_question=row["research_question"],
+            pinned=bool(pinned_at),
+            pinned_at=pinned_at,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -811,11 +820,49 @@ class SqliteResearchRepository:
                 """
                 SELECT * FROM conversations
                 WHERE user_id = ?
-                ORDER BY updated_at DESC LIMIT ?
+                ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC
+                LIMIT ?
                 """,
                 (self.current_user_id, safe_limit),
             ).fetchall()
         return [self._conversation_from_row(row) for row in rows]
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> ResearchConversation:
+        conversation = self.get_conversation(conversation_id)
+        clean_title = title.strip() if title is not None else None
+        if clean_title == "":
+            raise ValueError("Conversation title cannot be empty")
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE conversations
+                SET title = COALESCE(?, title),
+                    pinned_at = CASE
+                        WHEN ? IS NULL THEN pinned_at
+                        WHEN ? = 1 THEN COALESCE(pinned_at, ?)
+                        ELSE NULL
+                    END,
+                    updated_at = ?
+                WHERE conversation_id = ? AND user_id = ?
+                """,
+                (
+                    clean_title,
+                    None if pinned is None else int(pinned),
+                    None if pinned is None else int(pinned),
+                    now,
+                    now,
+                    conversation_id,
+                    conversation.user_id,
+                ),
+            )
+        return self.get_conversation(conversation_id)
 
     @staticmethod
     def _run_from_row(row: sqlite3.Row) -> ConversationRun:
@@ -1094,9 +1141,17 @@ class SqliteResearchRepository:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT payload_json FROM projects
-                WHERE user_id = ?
-                ORDER BY updated_at DESC LIMIT ?
+                SELECT projects.payload_json
+                FROM projects
+                LEFT JOIN conversations
+                    ON conversations.project_id = projects.project_id
+                    AND conversations.user_id = projects.user_id
+                WHERE projects.user_id = ?
+                ORDER BY
+                    (conversations.pinned_at IS NOT NULL) DESC,
+                    conversations.pinned_at DESC,
+                    projects.updated_at DESC
+                LIMIT ?
                 """,
                 (self.current_user_id, safe_limit),
             ).fetchall()

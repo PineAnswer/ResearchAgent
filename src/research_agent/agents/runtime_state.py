@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from research_agent.application.paper_ids import normalize_paper_id
@@ -338,7 +338,7 @@ class ResearchRuntimeState:
         self._search_result_counts: dict[str, dict[str, int]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
         self._search_constraints: dict[str, dict[str, Any]] = {}
-        self._prefer_library: dict[str, bool] = {}
+        self._prefer_library_search: dict[str, bool] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
@@ -363,7 +363,7 @@ class ResearchRuntimeState:
             self._search_result_counts[thread_id] = {}
             self._raw_search_results[thread_id] = []
             self._search_constraints.setdefault(thread_id, {})
-            self._prefer_library.setdefault(thread_id, False)
+            self._prefer_library_search.setdefault(thread_id, True)
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
             for key in [item for item in self._rejections if item[0] == thread_id]:
@@ -390,6 +390,7 @@ class ResearchRuntimeState:
         year_from: int,
         year_to: int,
         quality_venues_only: bool,
+        prefer_library_search: bool = True,
     ) -> None:
         with self._lock:
             self._search_constraints[thread_id] = {
@@ -397,18 +398,15 @@ class ResearchRuntimeState:
                 "year_to": int(year_to),
                 "quality_venues_only": bool(quality_venues_only),
             }
+            self._prefer_library_search[thread_id] = bool(prefer_library_search)
 
     def search_constraints(self, thread_id: str) -> dict[str, Any]:
         with self._lock:
             return dict(self._search_constraints.get(thread_id, {}))
 
-    def set_prefer_library(self, thread_id: str, enabled: bool) -> None:
+    def prefer_library_search(self, thread_id: str) -> bool:
         with self._lock:
-            self._prefer_library[thread_id] = bool(enabled)
-
-    def prefer_library(self, thread_id: str) -> bool:
-        with self._lock:
-            return self._prefer_library.get(thread_id, False)
+            return self._prefer_library_search.get(thread_id, True)
 
     def record_search(self, thread_id: str, query: str) -> bool:
         query = query.strip()
@@ -451,12 +449,43 @@ class ResearchRuntimeState:
             parsed = _json.loads(results_json)
         except (_json.JSONDecodeError, TypeError):
             return
+        if isinstance(parsed, dict):
+            parsed = parsed.get("candidates", [])
         if not isinstance(parsed, list):
             return
         candidates = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
+            source_names = []
+            raw_sources = item.get("sources")
+            if isinstance(raw_sources, list):
+                for value in raw_sources:
+                    if isinstance(value, str):
+                        source = value.strip()
+                    elif isinstance(value, dict):
+                        source = str(
+                            value.get("provider")
+                            or value.get("database")
+                            or value.get("source_name")
+                            or ""
+                        ).strip()
+                    else:
+                        source = ""
+                    if source and source not in source_names:
+                        source_names.append(source)
+            primary_source = str(item.get("source", "")).strip()
+            if not source_names and primary_source:
+                source_names.append(primary_source)
+            matched_queries = [
+                str(value).strip()
+                for value in (
+                    item.get("matched_queries")
+                    if isinstance(item.get("matched_queries"), list)
+                    else []
+                )
+                if isinstance(value, str) and value.strip()
+            ]
             candidates.append(
                 {
                     "paper_id": str(item.get("paper_id", "")),
@@ -470,7 +499,10 @@ class ResearchRuntimeState:
                     "abstract": str(item.get("abstract", "")),
                     "doi": item.get("doi"),
                     "url": item.get("url"),
-                    "source": str(item.get("source", "")),
+                    "source": primary_source,
+                    "sources": source_names,
+                    "matched_queries": matched_queries,
+                    "relevance_score": item.get("relevance_score"),
                     "library_id": str(item.get("library_id", "")),
                     "venue": str(item.get("venue", "")),
                     "venue_type": _normalized_candidate_venue_type(
@@ -600,13 +632,33 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
 
     def _reserve(self, request: ToolCallRequest) -> ToolMessage | None:
         name = str(request.tool_call.get("name", ""))
-        if name not in {"search_library", "search_openalex", "search_crossref"}:
+        search_tools = {
+            "search_library",
+            "search_openalex",
+            "search_crossref",
+            "search_multi_source",
+        }
+        if name not in search_tools:
             return None
         thread_id = thread_id_from_config(request.runtime.config)
-        if (
-            name != "search_library"
-            and self.state.prefer_library(thread_id)
-            and not self.state.has_search_source(thread_id, "search_library")
+        prefer_library = self.state.prefer_library_search(thread_id)
+        if name == "search_library" and not prefer_library:
+            return ToolMessage(
+                content=json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "local_library_search_disabled",
+                        "instruction": "用户未启用文献库优先检索，请直接执行多源联网检索。",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_call_id=str(request.tool_call.get("id", "library-search-disabled")),
+                name=name,
+                status="error",
+            )
+        if prefer_library and name != "search_library" and not self.state.has_search_source(
+            thread_id,
+            "search_library",
         ):
             return ToolMessage(
                 content=json.dumps(
@@ -646,13 +698,28 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
                 status="error",
             )
         args = request.tool_call.get("args", {})
-        if name in {"search_openalex", "search_crossref"} and isinstance(args, dict):
+        if name in {
+            "search_openalex",
+            "search_crossref",
+            "search_multi_source",
+        } and isinstance(args, dict):
             args.update(
                 self.state.search_constraints(
                     thread_id_from_config(request.runtime.config)
                 )
             )
-        query = str(args.get("query", ""))
+        if name == "search_multi_source" and isinstance(args, dict):
+            unique_queries = []
+            for value in args.get("queries", []):
+                query = " ".join(str(value).split())
+                if query and self.state.record_search(thread_id, query):
+                    unique_queries.append(query)
+            if unique_queries:
+                args["queries"] = unique_queries
+                return None
+            query = " | ".join(str(value) for value in args.get("queries", []))
+        else:
+            query = str(args.get("query", ""))
         if self.state.record_search(thread_id, query):
             return None
         return ToolMessage(
@@ -672,7 +739,12 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
 
     def _capture_result(self, request: ToolCallRequest, result: Any) -> None:
         name = str(request.tool_call.get("name", ""))
-        if name not in {"search_library", "search_openalex", "search_crossref"}:
+        if name not in {
+            "search_library",
+            "search_openalex",
+            "search_crossref",
+            "search_multi_source",
+        }:
             return
         content = getattr(result, "content", result)
         if isinstance(content, str):
@@ -759,8 +831,43 @@ class PaperFetchGuardMiddleware(AgentMiddleware):
         return blocked if blocked is not None else await handler(request)
 
 
-def recording_runnable(agent: Any, subagent_type: str, state: ResearchRuntimeState):
+def recording_runnable(
+    agent: Any,
+    subagent_type: str,
+    state: ResearchRuntimeState,
+    *,
+    memory_provider: Callable[[str, str, str], dict[str, Any]] | None = None,
+):
     """Wrap a structured agent and retain its exact JSON response for atomic commit."""
+
+    def inject_memory(inputs: Any, config: RunnableConfig) -> Any:
+        if memory_provider is None or not isinstance(inputs, dict):
+            return inputs
+        thread_id = thread_id_from_config(config)
+        project_id = state.project_id(thread_id)
+        if not project_id:
+            return inputs
+        try:
+            memory = memory_provider(
+                project_id,
+                subagent_type,
+                _task_text(inputs),
+            )
+        except Exception:  # noqa: BLE001 - memory must never block the agent task
+            return inputs
+        messages = inputs.get("messages")
+        if not isinstance(messages, list):
+            return inputs
+        memory_message = SystemMessage(
+            content=(
+                "以下是系统从已提交项目产物生成的共享记忆账本。它用于让你承接前序 "
+                "Agent 的工作；artifact_id、paper_id、evidence_id 和当前阶段任务均须"
+                "保持原样。已提交产物是事实来源，不得虚构缺失内容，也不要重复已完成"
+                "章节。请先阅读账本，再执行消息列表末尾的当前任务。\n"
+                + json.dumps(memory, ensure_ascii=False, default=str)
+            )
+        )
+        return {**inputs, "messages": [memory_message, *messages]}
 
     def record(result: dict[str, Any], inputs: Any, config: RunnableConfig) -> dict[str, Any]:
         thread_id = thread_id_from_config(config)
@@ -825,10 +932,12 @@ def recording_runnable(agent: Any, subagent_type: str, state: ResearchRuntimeSta
         return result
 
     def invoke(inputs: Any, config: RunnableConfig) -> dict[str, Any]:
-        return record(agent.invoke(inputs, config=config), inputs, config)
+        prepared = inject_memory(inputs, config)
+        return record(agent.invoke(prepared, config=config), inputs, config)
 
     async def ainvoke(inputs: Any, config: RunnableConfig) -> dict[str, Any]:
-        result = await agent.ainvoke(inputs, config=config)
+        prepared = inject_memory(inputs, config)
+        result = await agent.ainvoke(prepared, config=config)
         return record(result, inputs, config)
 
     return RunnableLambda(invoke, afunc=ainvoke, name=f"record-{subagent_type}")

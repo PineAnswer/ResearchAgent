@@ -54,10 +54,26 @@ OPENALEX_EMAIL=your-email@example.com
 使用 OpenAI 兼容接口时，同时设置：
 
 ```dotenv
+RESEARCH_AGENT_PROVIDER=openai
 RESEARCH_AGENT_MODEL=openai:your-model-name
 OPENAI_API_KEY=your-key
 RESEARCH_AGENT_BASE_URL=https://your-provider.example/v1
 ```
+
+使用 Claude 时走原生 Anthropic Messages 协议，不经过 OpenAI 兼容层：
+
+```dotenv
+RESEARCH_AGENT_PROVIDER=anthropic
+RESEARCH_AGENT_MODEL=anthropic:claude-sonnet-4-6
+ANTHROPIC_API_KEY=your-claude-key
+RESEARCH_AGENT_ANTHROPIC_BASE_URL=https://your-provider.example
+```
+
+两套配置可以同时保留在 `.env` 中；切换时只需修改
+`RESEARCH_AGENT_PROVIDER` 和 `RESEARCH_AGENT_MODEL`。系统不会根据 `sk-` 前缀猜测
+Key 的类型，也不会用 `OPENAI_API_KEY` 代替缺失的 `ANTHROPIC_API_KEY`。
+Anthropic 地址应填写服务根地址，客户端会自行追加 `/v1/messages`；OpenAI 兼容地址通常
+保留 `/v1`。
 
 完整配置项及默认值见 [.env.example](.env.example)。
 
@@ -71,13 +87,18 @@ research-agent serve --host 127.0.0.1 --port 8000
 
 推荐从前端开始使用：
 
-1. 填写研究主题、研究问题、系统检索-筛选迭代轮数，以及精读篇数下限/上限后发起研究。
-2. 系统在单次 `literature-scout` 子任务内自动执行多轮“检索 → 标题摘要级筛选 → 生成覆盖盲区/筛选意见 → 根据意见改写下一轮检索词”。达到迭代轮数、工具预算或候选规模条件后，项目进入 `SEARCH_REVIEW_PENDING`。
+1. 填写研究主题、研究问题和检索偏好后发起研究。
+2. `literature-scout` 会先检索本地文献库，再把长问题拆成多条互补短查询，同时检索 OpenAlex、Crossref、Semantic Scholar 和 arXiv。系统按 DOI/标题合并重复论文，保留每篇论文命中的来源和查询轨迹，再进行标题摘要级筛选；候选数量或单个来源失败不会阻止系统提交已有真实结果。
 3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
 4. 确认候选集后，可以先撤销确认或点击“继续研究”进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作和总编整合；完整综述生成后项目结束。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
 
-前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和人工 `stop` 会保存新候选快照，在后续运行开始前可通过补偿事件撤销到上一版，不改写历史记录。
+每个子 Agent 开始工作前都会收到由已提交产物生成的共享记忆账本：任务账本说明当前
+阶段和本次职责，进度账本压缩前序结论、章节衔接和审核意见，同时保留
+`artifact_id`、`paper_id`、`evidence_id` 的来源关系。数据库产物始终是事实来源，
+压缩记忆只作为有界的工作上下文，不会另存一份可能分叉的事实副本。
+
+前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口。
 
 Swagger API 页面：<http://127.0.0.1:8000/docs>
 
@@ -412,7 +433,7 @@ SQLite 保存权威业务事实；`outputs/` 是便于人工检查的镜像；`r
 
 Pydantic 校验失败、非法状态迁移和缺少前置产物会返回给 Agent 或调用方处理，不会生成伪科研结果。
 
-连续两份无效子 Agent 结果也会受控进入 `INCONCLUSIVE`。该状态既可能表示证据不足，也可能表示结构化输出或业务校验连续失败；诊断时应读取 `InsufficientEvidence.reason`、`events.jsonl` 中的首个 `artifact.commit_failed` 以及项目快照。可恢复的执行故障会从最近的安全持久化阶段继续；数值校验会忽略 `2D`、`3DVG`、`ResNet-50` 等技术标识并对规范化数值做精确匹配。
+连续两份无效子 Agent 结果会保存为可恢复的 `RuntimeIssue`，项目保持在原阶段，不再被误标为“证据不足”并自动进入 `INCONCLUSIVE`。诊断时应读取 `RuntimeIssue.reason`、`events.jsonl` 中的首个 `artifact.commit_failed` 以及项目快照。当前数值校验会把 `2D`、`3DVG`、`FFL-3DOG` 等术语中的数字识别为数值 token，属于已知限制，详见[《故障诊断与当前限制》](docs/troubleshooting.md)。
 
 ## 测试范围
 
