@@ -24,6 +24,11 @@ class CreateConversationRequest(SearchConstraints):
     max_search_rounds: int | None = Field(default=None, ge=0)
 
 
+class ConversationUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    pinned: bool | None = None
+
+
 class ApiEnvelope(BaseModel):
     code: int = 0
     message: str = "success"

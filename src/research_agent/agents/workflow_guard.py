@@ -35,6 +35,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "save_artifact_and_transition",
         "save_paper_card",
         "advance_project_stage",
+        "record_research_issue",
         "finish_inconclusive",
     }
 
@@ -152,8 +153,8 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 return self._error(
                     request,
                     "subagent_retry_limit_reached",
-                    f"{subagent_type}已连续生成两份无效结果；停止重试并调用"
-                    "finish_inconclusive保存失败原因。",
+                    f"{subagent_type}已连续生成两份无效结果；停止本轮重试并调用"
+                    "record_research_issue保存可恢复问题，项目保持当前阶段。",
                 )
         if (
             subagent_type == "paper-reader"
@@ -178,7 +179,12 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         if subagent_type == "literature-scout":
             with self._lock:
                 count = self._scout_calls.get(thread_id, 0)
-                if count >= 1:
+                retry_count = (
+                    self.runtime_state.rejection_count(thread_id, subagent_type)
+                    if self.runtime_state is not None
+                    else 0
+                )
+                if count >= 1 and not (count == 1 and retry_count == 1):
                     return self._error(
                         request,
                         "literature_scout_limit_reached",

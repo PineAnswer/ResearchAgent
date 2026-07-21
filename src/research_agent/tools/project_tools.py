@@ -197,7 +197,7 @@ def build_project_tools(
                     ResearchStage.SEARCHED,
                     actor="literature-scout",
                 )
-                if payload.get("candidates") and on_search_committed is not None:
+                if on_search_committed is not None:
                     search_review = on_search_committed(project_id, thread_id)
                     project = service.get_project(project_id)
             elif subagent_type == "paper-reader":
@@ -263,9 +263,7 @@ def build_project_tools(
             if subagent_type == "paper-reader" and payload.get("_paper_id"):
                 state.reset_paper_fetch(thread_id, str(payload["_paper_id"]))
             rejection_count = state.reject_result(thread_id, subagent_type)
-            retry_allowed = (
-                subagent_type != "literature-scout" and rejection_count < 2
-            )
+            retry_allowed = rejection_count < 2
             if retry_allowed:
                 instruction = (
                     "该无效结果已被系统丢弃。根据message修正任务说明后，"
@@ -274,8 +272,9 @@ def build_project_tools(
                 )
             else:
                 instruction = (
-                    "该子Agent已连续两次生成无效结果，停止重试并调用"
-                    "finish_inconclusive保存失败原因；禁止Supervisor手工重建JSON。"
+                    "该子Agent已连续两次生成无效结果，停止本轮重试并调用"
+                    "record_research_issue保存可恢复问题；保持项目当前阶段，"
+                    "禁止Supervisor手工重建JSON。"
                 )
             return json.dumps(
                 {
@@ -475,7 +474,10 @@ def build_project_tools(
                     "error_code": "insufficient_evidence",
                     "requested_stage": target_stage,
                     "message": str(exc),
-                    "instruction": "保持当前SCREENED阶段并立即调用finish_inconclusive。",
+                    "instruction": (
+                        "不要结束项目。保存当前已有PaperCard并继续生成明确标注"
+                        "证据局限的综合结果。"
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -492,13 +494,49 @@ def build_project_tools(
                     "requested_stage": target_stage,
                     "message": str(exc),
                     "instruction": (
-                        "检查当前项目阶段和所需产物；零篇入选论文时调用"
-                        "finish_inconclusive，不得重试EXTRACTED。"
+                        "检查当前项目阶段和所需产物；保持当前阶段并调用"
+                        "record_research_issue记录可恢复问题，不要进入INCONCLUSIVE。"
                     ),
                 },
                 ensure_ascii=False,
             )
         return project.model_dump_json()
+
+    @tool
+    def record_research_issue(
+        project_id: str,
+        reason: str,
+        queries_attempted: list[str],
+        search_failures: list[str],
+        recommendation: str,
+    ) -> str:
+        """Record a recoverable workflow issue without ending the project."""
+        project = service.get_project(project_id)
+        artifact = service.save_artifact(
+            project_id,
+            "RuntimeIssue",
+            {
+                "reason": reason,
+                "queries_attempted": queries_attempted,
+                "search_failures": search_failures,
+                "recommendation": recommendation,
+                "stage": project.stage.value,
+                "recoverable": True,
+            },
+        )
+        return json.dumps(
+            {
+                "mode": "paused",
+                "recoverable": True,
+                "artifact": artifact.model_dump(mode="json"),
+                "project": service.get_project(project_id).model_dump(mode="json"),
+                "instruction": (
+                    "本轮停止，但项目保持当前阶段；修复问题后可从保存进度继续。"
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
 
     @tool
     def finish_inconclusive(
@@ -562,5 +600,6 @@ def build_project_tools(
         save_artifact_and_transition,
         save_paper_card,
         advance_project_stage,
+        record_research_issue,
         finish_inconclusive,
     ]

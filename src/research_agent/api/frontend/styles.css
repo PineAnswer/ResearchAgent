@@ -503,12 +503,63 @@ h3,
   gap: 10px;
   width: 100%;
   min-height: 62px;
-  padding: 10px 12px;
+  padding: 10px 42px 10px 12px;
   border: 1px solid transparent;
   border-radius: 6px;
   color: var(--ink-soft);
   background: transparent;
   text-align: left;
+}
+
+.project-list-entry {
+  position: relative;
+}
+
+.project-list-menu-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+  background: transparent;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.project-list-entry:hover .project-list-menu-toggle,
+.project-list-entry:focus-within .project-list-menu-toggle,
+.project-list-menu-toggle[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.project-list-menu-toggle:hover,
+.project-list-menu-toggle[aria-expanded="true"] {
+  color: var(--pine-dark);
+  background: #dde7e1;
+}
+
+.project-list-menu-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-list-menu {
+  z-index: 80;
+  top: 40px;
+  right: 8px;
+  min-width: 156px;
+}
+
+.project-list-menu .menu-item {
+  min-height: 36px;
+  font-size: 11px;
+}
+
+.project-list-menu .menu-item svg {
+  width: 15px;
+  height: 15px;
 }
 
 .project-list-item:hover {
@@ -561,6 +612,30 @@ h3,
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.project-list-title-row {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+  align-items: flex-start;
+}
+
+.project-list-title-row .project-list-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.project-list-pinned {
+  display: inline-flex;
+  flex: none;
+  margin-top: 1px;
+  color: var(--pine);
+}
+
+.project-list-pinned svg {
+  width: 12px;
+  height: 12px;
 }
 
 .project-list-meta {
@@ -1590,12 +1665,18 @@ textarea:focus {
   text-transform: uppercase;
 }
 
+.research-option-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .quality-filter-option {
   display: flex;
-  grid-column: 3;
-  grid-row: 3;
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
   min-height: 74px;
   padding: 12px;
   border: 1px solid var(--line-strong);
@@ -2598,9 +2679,8 @@ textarea:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .quality-filter-option {
-    grid-column: 1 / -1;
-    grid-row: auto;
+  .research-option-grid {
+    grid-template-columns: 1fr;
   }
 
   .candidate-card {

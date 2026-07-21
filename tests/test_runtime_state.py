@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from langchain.agents.middleware import ToolCallRequest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from research_agent.agents.runtime_state import (
     ExecutedSearchTrackingMiddleware,
@@ -223,12 +223,19 @@ def test_runtime_state_preserves_local_library_identity_and_search_order() -> No
                     "library_id": "LP-local",
                     "title": "Local evidence",
                     "source": "library",
+                    "sources": [
+                        {
+                            "source_id": "ABSTRACT-LP-local",
+                            "snippet": "local evidence",
+                        }
+                    ],
                 }
             ]
         ),
     )
 
     assert state.get_search_results("thread-a")[0]["library_id"] == "LP-local"
+    assert state.get_search_results("thread-a")[0]["sources"] == ["library"]
     assert state.has_search_source("thread-a", "search_library") is False
     state.mark_search_source("thread-a", "search_library")
     assert state.has_search_source("thread-a", "search_library") is True
@@ -272,6 +279,149 @@ def test_search_middleware_blocks_external_search_until_library_was_queried() ->
     assert "local_library_search_required" in blocked.content
     assert local.status == "success"
     assert external.status == "success"
+
+
+def test_search_middleware_skips_library_when_user_disables_priority() -> None:
+    state = ResearchRuntimeState()
+    state.set_search_constraints(
+        "thread-a",
+        year_from=2024,
+        year_to=2026,
+        quality_venues_only=False,
+        prefer_library_search=False,
+    )
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+
+    def request(name: str, args: dict, call_id: str) -> ToolCallRequest:
+        return ToolCallRequest(
+            tool_call={"name": name, "args": args, "id": call_id},
+            tool=None,
+            state={},
+            runtime=runtime,
+        )
+
+    local = middleware.wrap_tool_call(
+        request("search_library", {"query": "local topic"}, "call-local"),
+        lambda _request: "should not execute",
+    )
+    external_request = request(
+        "search_multi_source",
+        {"queries": ["visual geolocation benchmark"]},
+        "call-external",
+    )
+    external = middleware.wrap_tool_call(
+        external_request,
+        lambda _request: ToolMessage(
+            content='{"candidates": []}',
+            tool_call_id="call-external",
+            name="search_multi_source",
+        ),
+    )
+
+    assert local.status == "error"
+    assert "local_library_search_disabled" in local.content
+    assert external.status == "success"
+    assert external_request.tool_call["args"] == {
+        "queries": ["visual geolocation benchmark"],
+        "year_from": 2024,
+        "year_to": 2026,
+        "quality_venues_only": False,
+    }
+
+
+def test_multi_source_search_tracks_each_query_and_captures_merged_candidates() -> None:
+    state = ResearchRuntimeState()
+    state.mark_search_source("thread-a", "search_library")
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+    request = ToolCallRequest(
+        tool_call={
+            "name": "search_multi_source",
+            "args": {
+                "queries": ["image geolocation", "geo benchmark evaluation"],
+            },
+            "id": "call-multi",
+        },
+        tool=None,
+        state={},
+        runtime=runtime,
+    )
+
+    result = middleware.wrap_tool_call(
+        request,
+        lambda _request: ToolMessage(
+            content=json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "paper_id": "10.1000/geo",
+                            "title": "Geo Paper",
+                            "source": "OpenAlex + Crossref",
+                            "sources": ["OpenAlex", "Crossref"],
+                            "matched_queries": ["image geolocation"],
+                            "relevance_score": 4.5,
+                        }
+                    ]
+                }
+            ),
+            tool_call_id="call-multi",
+            name="search_multi_source",
+        ),
+    )
+
+    assert result.status == "success"
+    assert state.search_terms("thread-a") == [
+        "image geolocation",
+        "geo benchmark evaluation",
+    ]
+    stored = state.get_search_results("thread-a")[0]
+    assert stored["sources"] == ["OpenAlex", "Crossref"]
+    assert stored["relevance_score"] == 4.5
+
+
+def test_recording_runnable_injects_shared_memory_before_current_task() -> None:
+    class CapturingAgent(FakeStructuredAgent):
+        captured_inputs = None
+
+        def invoke(self, inputs, config=None):
+            self.captured_inputs = inputs
+            return super().invoke(inputs, config)
+
+    state = ResearchRuntimeState()
+    state.register_project("thread-a", "RP-memory")
+    agent = CapturingAgent(
+        {
+            "topic": "geo",
+            "consensus": [],
+            "conflicts": [],
+            "method_comparison": [],
+            "gaps": [],
+        }
+    )
+    runnable = recording_runnable(
+        agent,
+        "research-synthesizer",
+        state,
+        memory_provider=lambda project_id, role, task: {
+            "project_id": project_id,
+            "role": role,
+            "current_task": task,
+            "artifact_id": 17,
+            "evidence_id": "P1:E1",
+        },
+    )
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="整合前序证据")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    assert isinstance(agent.captured_inputs["messages"][0], SystemMessage)
+    memory_text = agent.captured_inputs["messages"][0].content
+    assert "RP-memory" in memory_text
+    assert "P1:E1" in memory_text
+    assert agent.captured_inputs["messages"][-1].content == "整合前序证据"
 
 
 def test_rejected_result_is_consumed_and_retry_count_resets_on_success() -> None:

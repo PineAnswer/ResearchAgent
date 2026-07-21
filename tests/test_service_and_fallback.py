@@ -2,7 +2,6 @@ from research_agent.application.fallback import OfflineFallback
 import pytest
 
 from research_agent.application.research_service import (
-    InsufficientEvidenceError,
     ResearchService,
     WorkflowPrerequisiteError,
 )
@@ -160,6 +159,102 @@ def test_fallback_reuses_an_existing_project(tmp_path) -> None:
     assert result["reused_project"] is True
     assert result["project"]["project_id"] == project.project_id
     assert service.get_snapshot(project.project_id)["artifacts"][0]["kind"] == "RuntimeFallback"
+
+
+def test_agent_memory_preserves_task_progress_and_evidence_provenance(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("Geo 定位", "视觉地理定位方法如何评估？")
+    card = service.repository.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "P1",
+            "title": "Geo Paper",
+            "research_question": project.research_question,
+            "methods": ["retrieval"],
+            "datasets": ["GeoGuessr"],
+            "findings": [
+                {
+                    "evidence_id": "P1:E1",
+                    "paper_id": "P1",
+                    "claim": "Retrieval improves candidate generation.",
+                    "quote": "quoted evidence",
+                    "page": 3,
+                }
+            ],
+            "limitations": ["single benchmark"],
+        },
+    )
+
+    memory = service.build_agent_memory(
+        project.project_id,
+        "research-synthesizer",
+        "比较方法并形成跨论文结论",
+    )
+
+    assert memory["task_ledger"]["project_id"] == project.project_id
+    assert memory["task_ledger"]["current_agent"] == "research-synthesizer"
+    assert memory["task_ledger"]["current_task"] == "比较方法并形成跨论文结论"
+    assert memory["progress_ledger"][0]["artifact_id"] == card.artifact_id
+    finding = memory["progress_ledger"][0]["summary"]["findings"][0]
+    assert finding["paper_id"] == "P1"
+    assert finding["evidence_id"] == "P1:E1"
+
+
+def test_paper_card_normalizes_cosmetic_identifier_drift(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": "W123", "title": "Paper", "source": "OpenAlex"}
+            ],
+            "selection_notes": [],
+        },
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    _enter_search_review(service, project.project_id, ["W123"])
+    service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": ["W123"],
+            "excluded_paper_ids": [],
+            "reasons": ["include"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+
+    artifact = service.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "W123.",
+            "title": "Paper",
+            "research_question": "question",
+            "methods": ["method"],
+            "datasets": [],
+            "findings": [
+                {
+                    "evidence_id": "W123.:W123:E1",
+                    "paper_id": "W123.",
+                    "claim": "claim",
+                    "quote": "quote",
+                }
+            ],
+            "limitations": [],
+        },
+    )
+
+    assert artifact.payload["paper_id"] == "W123"
+    assert artifact.payload["findings"][0]["paper_id"] == "W123"
+    assert artifact.payload["findings"][0]["evidence_id"] == "W123.:W123:E1"
 
 
 def test_service_requires_artifact_before_stage_transition(tmp_path) -> None:
@@ -427,7 +522,7 @@ def test_screening_context_returns_small_included_paper_metadata(tmp_path) -> No
     ]
 
 
-def test_extracted_rejects_all_empty_findings(tmp_path) -> None:
+def test_extracted_allows_empty_findings_and_empty_synthesis(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
     _, project = service.save_artifact_and_transition(
@@ -468,10 +563,27 @@ def test_extracted_rejects_all_empty_findings(tmp_path) -> None:
         },
     )
 
-    with pytest.raises(InsufficientEvidenceError, match="empty findings"):
-        service.transition(project.project_id, ResearchStage.EXTRACTED, actor="reader")
+    project = service.transition(
+        project.project_id,
+        ResearchStage.EXTRACTED,
+        actor="reader",
+    )
+    assert project.stage is ResearchStage.EXTRACTED
 
-    assert service.get_project(project.project_id).stage is ResearchStage.SCREENED
+    _, project = service.save_artifact_and_transition(
+        project.project_id,
+        "SynthesisReport",
+        {
+            "topic": "topic",
+            "consensus": [],
+            "conflicts": [],
+            "method_comparison": [],
+            "gaps": [],
+        },
+        ResearchStage.SYNTHESIZED,
+        actor="synthesizer",
+    )
+    assert project.stage is ResearchStage.SYNTHESIZED
 
 
 def test_paper_card_normalizes_simple_evidence_ids_before_synthesis(tmp_path) -> None:
@@ -723,6 +835,121 @@ def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
     assert recovery_event["from_stage"] == "COMPLETED"
     assert recovery_event["to_stage"] == "REVIEWED"
     assert recovery_event["actor"] == "workflow-recovery"
+
+
+def test_prepare_continuation_opens_revise_loop_and_repairs_legacy_card(
+    tmp_path,
+) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": "W123", "title": "Paper", "source": "OpenAlex"}
+            ],
+            "selection_notes": [],
+        },
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    _enter_search_review(service, project.project_id, ["W123"])
+    service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": ["W123"],
+            "excluded_paper_ids": [],
+            "reasons": ["include"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+    service.repository.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "W123.",
+            "title": "Legacy Paper",
+            "research_question": "question",
+            "methods": ["method"],
+            "datasets": [],
+            "findings": [
+                {
+                    "evidence_id": "W123.:W123:E1",
+                    "paper_id": "W123",
+                    "claim": "claim",
+                    "quote": "quote",
+                }
+            ],
+            "limitations": [],
+        },
+    )
+    service.transition(project.project_id, ResearchStage.EXTRACTED, actor="reader")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SynthesisReport",
+        {
+            "topic": "topic",
+            "consensus": [],
+            "conflicts": [],
+            "method_comparison": [],
+            "gaps": [],
+        },
+        ResearchStage.SYNTHESIZED,
+        actor="synthesizer",
+    )
+    service.transition(
+        project.project_id,
+        ResearchStage.REVIEW_PENDING,
+        actor="supervisor",
+    )
+    review = ReviewResult(
+        verdict=ReviewVerdict.REVISE,
+        fatal_issues=["Identifier drift"],
+        suggestions=["Canonicalize the PaperCard paper_id"],
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "ReviewResult",
+        review.model_dump(mode="json"),
+        ResearchStage.REVIEWED,
+        actor="reviewer",
+        review=review,
+    )
+
+    continuation = service.prepare_continuation(project.project_id)
+
+    assert continuation["mode"] == "revision"
+    assert continuation["project"].stage is ResearchStage.EXTRACTED
+    assert continuation["context"]["review_verdict"] == "REVISE"
+    assert continuation["context"]["review_result"]["fatal_issues"] == [
+        "Identifier drift"
+    ]
+    assert continuation["context"]["repaired_paper_ids"] == ["W123"]
+    artifacts = service.get_snapshot(project.project_id)["artifacts"]
+    cards = [item for item in artifacts if item["kind"] == "PaperCard"]
+    assert [item["payload"]["paper_id"] for item in cards] == ["W123.", "W123"]
+    revision_event = service.get_snapshot(project.project_id)["events"][-1]
+    assert revision_event["from_stage"] == "REVIEWED"
+    assert revision_event["to_stage"] == "EXTRACTED"
+    assert revision_event["actor"] == "review-revision"
+
+    resumed = service.prepare_continuation(project.project_id)
+
+    assert resumed["mode"] == "revision"
+    assert resumed["project"].stage is ResearchStage.EXTRACTED
+    assert resumed["context"]["repaired_paper_ids"] == []
+    assert len(
+        [
+            item
+            for item in service.get_snapshot(project.project_id)["artifacts"]
+            if item["kind"] == "PaperCard"
+        ]
+    ) == 2
 
 
 def test_prepare_continuation_recovers_operational_writing_failure(tmp_path) -> None:

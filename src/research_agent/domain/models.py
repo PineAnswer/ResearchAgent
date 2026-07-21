@@ -44,6 +44,7 @@ class SearchConstraints(BaseModel):
     year_from: int = Field(default=2024, ge=2000, le=2026)
     year_to: int = Field(default=2026, ge=2000, le=2026)
     quality_venues_only: bool = False
+    prefer_library_search: bool = True
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "SearchConstraints":
@@ -61,6 +62,9 @@ class PaperCandidate(BaseModel):
     doi: str | None = None
     url: HttpUrl | None = None
     source: str
+    sources: list[str] = Field(default_factory=list)
+    matched_queries: list[str] = Field(default_factory=list)
+    relevance_score: float | None = None
     library_id: str = ""
     venue: str = ""
     venue_type: Literal["journal", "conference"] | None = None
@@ -140,6 +144,7 @@ class CandidateSetSnapshot(BaseModel):
     year_from: int | None = Field(default=None, ge=2000, le=2026)
     year_to: int | None = Field(default=None, ge=2000, le=2026)
     quality_venues_only: bool = False
+    prefer_library_search: bool = True
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "CandidateSetSnapshot":
@@ -239,6 +244,8 @@ class ResearchConversation(BaseModel):
     thread_id: str
     title: str
     research_question: str
+    pinned: bool = False
+    pinned_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

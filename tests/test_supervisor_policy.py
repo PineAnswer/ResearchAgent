@@ -64,6 +64,41 @@ def test_narrative_continuation_prompt_skips_completed_work() -> None:
     assert '"saved_section_draft_ids": [\n    "sec-1"\n  ]' in prompt
 
 
+def test_revision_continuation_prompt_reuses_evidence_and_stops_after_rereview() -> None:
+    prompt = ResearchSupervisor.build_revision_continue_prompt(
+        "RP-test",
+        {
+            "current_stage": "EXTRACTED",
+            "review_verdict": "REVISE",
+            "review_result": {
+                "fatal_issues": ["claim is too broad"],
+                "suggestions": ["narrow the claim"],
+            },
+        },
+    )
+
+    assert "禁止创建新项目、重新检索、重新筛选或重新精读论文" in prompt
+    assert "根据review_result中的fatal_issues" in prompt
+    assert "新的ReviewResult保存到REVIEWED后立即结束本轮" in prompt
+    assert "本轮禁止委派research-outliner" in prompt
+    assert '"review_verdict": "REVISE"' in prompt
+
+
+def test_start_prompt_respects_optional_library_priority() -> None:
+    direct_prompt = ResearchSupervisor.build_prompt(
+        "GeoAI",
+        "Which benchmarks are reliable?",
+        prefer_library_search=False,
+    )
+    library_prompt = ResearchSupervisor.build_prompt(
+        "GeoAI",
+        "Which benchmarks are reliable?",
+        prefer_library_search=True,
+    )
+
+    assert "跳过本地文献库，直接进行多源检索" in direct_prompt
+    assert "先检索本地文献库，再进行多源检索" in library_prompt
+
 def test_skill_injection_rejects_empty_content_and_missing_subagent_skills() -> None:
     with pytest.raises(ValueError, match="Skill content is empty: test-skill"):
         inject_skill("base", "test-skill", "  ")
@@ -150,12 +185,17 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert "commit_subagent_result" in exposed_names
     assert "save_screening_decision" in exposed_names
     assert "advance_project_stage" in exposed_names
+    assert "record_research_issue" in exposed_names
+    assert "finish_inconclusive" not in exposed_names
     assert "save_artifact_and_transition" not in exposed_names
     assert "save_paper_card" not in exposed_names
     assert "save_project_artifact" not in exposed_names
     assert "transition_project_stage" not in exposed_names
     assert "search_openalex" not in exposed_names
     assert "search_crossref" not in exposed_names
+    assert "search_semantic_scholar" not in exposed_names
+    assert "search_arxiv" not in exposed_names
+    assert "search_multi_source" not in exposed_names
     assert "search_library" not in exposed_names
     assert "retrieve_library_passages" not in exposed_names
     assert "verify_doi" not in exposed_names
@@ -201,28 +241,24 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         config for config in agent_configs if config["name"] == "literature-scout"
     )
     assert '<skill name="literature-search">' in scout_captured["system_prompt"]
-    assert "将研究问题拆成主题词、方法词、对象词和限制条件" in scout_captured[
+    assert "禁止把研究问题原句或所有限定词拼成唯一查询" in scout_captured[
         "system_prompt"
     ]
     assert [tool.name for tool in scout_captured["tools"]] == [
         "search_library",
-        "search_openalex",
-        "search_crossref",
+        "search_multi_source",
     ]
     assert isinstance(scout_captured["middleware"][1], ModelCallLimitMiddleware)
-    assert scout_captured["middleware"][1].run_limit == 9
+    assert scout_captured["middleware"][1].run_limit == 8
     assert scout_captured["middleware"][1].exit_behavior == "end"
     assert scout_captured["middleware"][2].tool_name == "search_library"
     assert scout_captured["middleware"][2].run_limit == 2
     assert scout_captured["middleware"][2].exit_behavior == "end"
-    assert scout_captured["middleware"][3].tool_name == "search_openalex"
+    assert scout_captured["middleware"][3].tool_name == "search_multi_source"
     assert scout_captured["middleware"][3].run_limit == 3
     assert scout_captured["middleware"][3].exit_behavior == "end"
-    assert scout_captured["middleware"][4].tool_name == "search_crossref"
-    assert scout_captured["middleware"][4].run_limit == 1
-    assert scout_captured["middleware"][4].exit_behavior == "end"
-    assert isinstance(scout_captured["middleware"][5], ExecutedSearchTrackingMiddleware)
-    assert len(scout_captured["middleware"]) == 6
+    assert isinstance(scout_captured["middleware"][4], ExecutedSearchTrackingMiddleware)
+    assert len(scout_captured["middleware"]) == 5
     assert isinstance(scout_captured["response_format"], dict)
     assert scout_captured["response_format"]["title"] == "SearchReport"
     synthesizer = next(

@@ -21,6 +21,13 @@ from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitM
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+    APITimeoutError as AnthropicAPITimeoutError,
+    AuthenticationError as AnthropicAuthenticationError,
+    InternalServerError as AnthropicInternalServerError,
+    RateLimitError as AnthropicRateLimitError,
+)
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -44,7 +51,11 @@ from research_agent.domain.models import (
 from research_agent.infrastructure.artifact_exporter import JsonArtifactExporter
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.run_logger import ResearchRunLogger
-from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
+from research_agent.infrastructure.observable_chat_model import (
+    ObservableChatAnthropic,
+    ObservableChatOpenAI,
+    structured_output_strategy,
+)
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 from research_agent.infrastructure.venue_rankings import VenueRankingIndex
 from research_agent.infrastructure.workspace import WorkspaceBootstrapper
@@ -73,6 +84,11 @@ FALLBACK_EXCEPTIONS = (
     AuthenticationError,
     InternalServerError,
     RateLimitError,
+    AnthropicAPIConnectionError,
+    AnthropicAPITimeoutError,
+    AnthropicAuthenticationError,
+    AnthropicInternalServerError,
+    AnthropicRateLimitError,
     BotoCoreError,
     ClientError,
     httpx.NetworkError,
@@ -158,19 +174,28 @@ class ResearchSupervisor:
             self.initialization_error = str(exc)
 
     def _build_model(self):
-        provider, separator, model_name = self.settings.model.partition(":")
-        if provider.lower() == "bedrock":
-            return self._build_bedrock_model(model_name or self.settings.model)
+        provider, model_name = self.settings.resolved_model()
+        if provider == "bedrock":
+            return self._build_bedrock_model(model_name)
+        if provider == "anthropic":
+            return self._build_anthropic_model(model_name)
 
-        if not self.settings.base_url:
-            return self.settings.model
+        api_key = self.settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for the OpenAI provider")
+        kwargs: dict[str, Any] = {"model": model_name, "api_key": api_key}
+        if self.settings.base_url:
+            kwargs["base_url"] = self.settings.base_url
+        return ObservableChatOpenAI(**kwargs)
 
-        resolved_model = model_name if separator else self.settings.model
-        return ObservableChatOpenAI(
-            model=resolved_model,
-            api_key=os.getenv("OPENAI_API_KEY", "not-set"),
-            base_url=self.settings.base_url,
-        )
+    def _build_anthropic_model(self, model_name: str):
+        api_key = self.settings.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY is required for the Anthropic provider")
+        kwargs: dict[str, Any] = {"model": model_name, "api_key": api_key}
+        if self.settings.anthropic_base_url:
+            kwargs["base_url"] = self.settings.anthropic_base_url
+        return ObservableChatAnthropic(**kwargs)
 
     def _build_bedrock_model(self, model_name: str):
         from langchain_aws import ChatBedrockConverse
@@ -229,11 +254,13 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> dict[str, Any]:
         options: dict[str, Any] = {
             "year_from": year_from,
             "year_to": year_to,
             "quality_venues_only": quality_venues_only,
+            "prefer_library_search": prefer_library_search,
         }
         if min_papers is not None:
             options["min_papers"] = min_papers
@@ -252,6 +279,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> None:
         options = self._search_review_options(
             min_papers=min_papers,
@@ -260,6 +288,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         self._search_review_options_by_thread[thread_id] = options
         self.runtime_state.set_search_constraints(
@@ -267,6 +296,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
 
     def _begin_search_review(self, project_id: str, thread_id: str) -> dict[str, Any]:
@@ -290,6 +320,7 @@ class ResearchSupervisor:
             max_openalex_searches=self.settings.max_openalex_searches,
             max_crossref_searches=self.settings.max_crossref_searches,
             max_paper_fetches_per_paper=self.settings.max_paper_fetches_per_paper,
+            memory_provider=self.service.build_agent_memory,
         )
         hidden_supervisor_tools = {
             "save_project_artifact",
@@ -297,8 +328,12 @@ class ResearchSupervisor:
             "save_artifact_and_transition",
             "save_paper_card",
             "get_active_research_project",
+            "finish_inconclusive",
             "search_openalex",
             "search_crossref",
+            "search_semantic_scholar",
+            "search_arxiv",
+            "search_multi_source",
             "extract_pdf_text",
             "fetch_paper_text",
             "verify_doi",
@@ -347,6 +382,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> str:
         limits: list[str] = [
             f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
@@ -361,6 +397,10 @@ class ResearchSupervisor:
             limits.append(
                 "- 出版物质量：仅 CCF-A、JCR Q1 或 Nature Portfolio 期刊（后端强制过滤）"
             )
+        limits.append(
+            "- 文献库优先检索："
+            + ("启用；先检索本地文献库，再进行多源检索" if prefer_library_search else "未启用；跳过本地文献库，直接进行多源检索")
+        )
         limit_text = ""
         if limits:
             limit_text = (
@@ -417,6 +457,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> str:
         base = cls.build_prompt(
             topic,
@@ -427,6 +468,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         return (
             f"系统已经为当前隔离对话创建科研项目：{project_id}\n"
@@ -452,6 +494,28 @@ class ResearchSupervisor:
             "advance_project_stage推进到COMPLETED。\n\n"
             "narrative_context:\n"
             f"{json.dumps(narrative_context, ensure_ascii=False, indent=2)}"
+        )
+
+    @staticmethod
+    def build_revision_continue_prompt(
+        project_id: str,
+        revision_context: dict[str, Any],
+    ) -> str:
+        return (
+            f"继续修订已有科研项目：{project_id}\n"
+            "该项目的证据审查结论为REVISE。禁止创建新项目、重新检索、重新筛选"
+            "或重新精读论文；必须复用已保存的PaperCard和Evidence。\n"
+            "从 revision_context.current_stage 继续修订闭环："
+            "EXTRACTED时委派research-synthesizer，根据review_result中的fatal_issues"
+            "和suggestions生成一份完整、收窄过度表述的新版SynthesisReport并提交；"
+            "SYNTHESIZED时推进到REVIEW_PENDING；"
+            "REVIEW_PENDING时委派evidence-reviewer重新审查并提交新的ReviewResult。"
+            "不得复用旧SynthesisReport冒充新版，也不得修改或猜测evidence_id。"
+            "新的ReviewResult保存到REVIEWED后立即结束本轮：若PASS，明确提示用户可点击"
+            "“继续生成综述”；若仍为REVISE，明确提示可再次点击“修订并重新审查”。"
+            "本轮禁止委派research-outliner或进入正文写作。\n\n"
+            "revision_context:\n"
+            f"{json.dumps(revision_context, ensure_ascii=False, indent=2)}"
         )
 
     @staticmethod
@@ -534,6 +598,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
         search_review_options = self._search_review_options(
@@ -543,6 +608,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(
@@ -582,6 +648,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -595,6 +662,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
@@ -637,7 +705,7 @@ class ResearchSupervisor:
         project_id: str,
         thread_id: str | None = None,
     ) -> dict:
-        """Continue a persisted project from screening or an interrupted writing stage."""
+        """Continue screening, review revision, or an interrupted writing stage."""
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
@@ -646,6 +714,11 @@ class ResearchSupervisor:
         project = continuation["project"]
         if continuation["mode"] == "screening":
             continue_prompt = self.build_continue_prompt(
+                project_id,
+                continuation["context"],
+            )
+        elif continuation["mode"] == "revision":
+            continue_prompt = self.build_revision_continue_prompt(
                 project_id,
                 continuation["context"],
             )
@@ -709,6 +782,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> dict:
         """Start research for a project pre-created by the conversation service."""
         if self.graph is None:
@@ -727,6 +801,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(thread_id, **options)
         self.runtime_state.register_project(
@@ -791,6 +866,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library_search: bool = True,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -804,6 +880,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
@@ -1088,7 +1165,7 @@ class ResearchSupervisor:
                 model=model,
                 tools=toolset.tools,
                 system_prompt=LIBRARY_AGENT_PROMPT,
-                response_format=LibraryAgentResponse.model_json_schema(),
+                response_format=structured_output_strategy(model, LibraryAgentResponse),
                 middleware=[
                     SerialToolExecutionMiddleware(),
                     ModelCallLimitMiddleware(run_limit=10, exit_behavior="end"),

@@ -130,6 +130,9 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "startRunPolling" in script.text
     assert "syncRunningSnapshot" in script.text
     assert "继续生成综述" in script.text
+    assert "修订并重新审查" in script.text
+    assert "证据审查要求修订" in script.text
+    assert 'return "revision"' in script.text
     assert "成果待补全" in script.text
     assert "写作待恢复" in script.text
     assert "本次停止来自主编输出格式故障" in script.text

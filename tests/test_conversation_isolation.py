@@ -49,6 +49,29 @@ def test_repository_isolates_conversations_and_editable_library_records(tmp_path
         assert repository.get_library_paper(first_paper.library_id).title == "Owner copy"
 
 
+def test_conversations_can_be_renamed_pinned_and_ordered(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "agent.db")
+    first, _ = repository.create_conversation("First topic", "First question")
+    second, _ = repository.create_conversation("Second topic", "Second question")
+
+    assert repository.list_conversations()[0].conversation_id == second.conversation_id
+
+    updated = repository.update_conversation(
+        first.conversation_id,
+        title="Pinned custom name",
+        pinned=True,
+    )
+
+    assert updated.title == "Pinned custom name"
+    assert updated.pinned is True
+    assert updated.pinned_at is not None
+    assert repository.list_conversations()[0].conversation_id == first.conversation_id
+
+    unpinned = repository.update_conversation(first.conversation_id, pinned=False)
+    assert unpinned.pinned is False
+    assert unpinned.pinned_at is None
+
+
 def test_local_shared_mode_rebinds_existing_browser_sessions_to_primary_user(
     tmp_path,
 ) -> None:
@@ -116,6 +139,52 @@ def test_default_api_mode_shares_history_across_local_browsers(
     asyncio.run(exercise_api())
 
 
+def test_conversation_api_renames_pins_and_deletes_sidebar_entry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    filesystem_root = tmp_path / "filesystem"
+    filesystem_root.mkdir()
+    app = create_app(
+        Settings(
+            model="openai:gpt-4.1-mini",
+            data_dir=tmp_path,
+            database_path=tmp_path / "agent.db",
+            filesystem_root=filesystem_root,
+            enable_fallback=True,
+        )
+    )
+    conversation, project = app.state.supervisor.service.create_conversation(
+        "Original topic",
+        "Original question",
+    )
+
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            updated = await client.patch(
+                f"/api/conversations/{conversation.conversation_id}",
+                json={"title": "Custom sidebar title", "pinned": True},
+            )
+            listing = await client.get("/api/projects")
+            deleted = await client.delete(
+                f"/api/conversations/{conversation.conversation_id}"
+            )
+            missing = await client.get(f"/api/projects/{project.project_id}")
+            return updated, listing, deleted, missing
+
+    updated, listing, deleted, missing = asyncio.run(exercise_api())
+
+    assert updated.status_code == 200
+    assert updated.json()["data"]["title"] == "Custom sidebar title"
+    assert updated.json()["data"]["pinned"] is True
+    assert listing.json()["data"][0]["conversation"]["title"] == "Custom sidebar title"
+    assert listing.json()["data"][0]["conversation"]["pinned"] is True
+    assert deleted.status_code == 200
+    assert missing.status_code == 404
+
+
 def test_api_runs_two_conversations_concurrently_and_blocks_cross_user_access(
     tmp_path,
     monkeypatch,
@@ -135,11 +204,11 @@ def test_api_runs_two_conversations_concurrently_and_blocks_cross_user_access(
     )
 
     async def exercise_api() -> None:
-        started: list[str] = []
+        started: list[tuple[str, dict]] = []
         release = asyncio.Event()
 
-        async def fake_start(project_id, thread_id, **_options):
-            started.append(f"{project_id}:{thread_id}")
+        async def fake_start(project_id, thread_id, **options):
+            started.append((f"{project_id}:{thread_id}", options))
             await release.wait()
             return {"messages": [{"content": f"finished {project_id}"}]}
 
@@ -151,7 +220,11 @@ def test_api_runs_two_conversations_concurrently_and_blocks_cross_user_access(
         ) as owner:
             first = await owner.post(
                 "/api/conversations",
-                json={"topic": "Geo A", "research_question": "Question A"},
+                json={
+                    "topic": "Geo A",
+                    "research_question": "Question A",
+                    "prefer_library_search": False,
+                },
             )
             second = await owner.post(
                 "/api/conversations",
@@ -165,6 +238,7 @@ def test_api_runs_two_conversations_concurrently_and_blocks_cross_user_access(
             assert first.status_code == 202
             assert second.status_code == 202
             assert len(started) == 2
+            assert any(options["prefer_library_search"] is False for _, options in started)
 
             first_data = first.json()["data"]
             second_data = second.json()["data"]

@@ -94,6 +94,7 @@ const ACTOR_LABELS = {
   "paper-reader": "论文精读 Agent",
   "research-synthesizer": "证据综合 Agent",
   "evidence-reviewer": "证据审查 Agent",
+  "review-revision": "审查修订流程",
   "research-outliner": "提纲设计 Agent",
   "narrative-writer": "综述写作 Agent",
   "chief-editor": "综述主编 Agent",
@@ -159,6 +160,7 @@ const state = {
   runLastActivity: "",
   runPhase: "thinking",
   runSessionId: 0,
+  openConversationMenuId: null,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -217,6 +219,7 @@ const elements = {
   initialYearFrom: byId("initialYearFrom"),
   initialYearTo: byId("initialYearTo"),
   initialQualityVenuesOnly: byId("initialQualityVenuesOnly"),
+  initialPreferLibrarySearch: byId("initialPreferLibrarySearch"),
   emptyState: byId("emptyState"),
   projectView: byId("projectView"),
   stageBadge: byId("stageBadge"),
@@ -309,6 +312,21 @@ function setPopover(toggle, popover, open) {
 function closeMenus() {
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
   setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  closeConversationMenus();
+}
+
+function closeConversationMenus(except = null) {
+  document.querySelectorAll(".project-list-menu").forEach((menu) => {
+    if (menu !== except) menu.hidden = true;
+  });
+  document.querySelectorAll(".project-list-menu-toggle").forEach((toggle) => {
+    if (toggle.closest(".project-list-entry")?.querySelector(".project-list-menu") !== except) {
+      toggle.setAttribute("aria-expanded", "false");
+    }
+  });
+  state.openConversationMenuId = except
+    ? except.closest(".project-list-entry")?.dataset.conversationId || null
+    : null;
 }
 
 function readSidebarPreference() {
@@ -1606,6 +1624,97 @@ async function importLibraryRecords() {
   }
 }
 
+function projectConversation(project) {
+  return project?.conversation || null;
+}
+
+function projectDisplayTitle(project) {
+  return projectConversation(project)?.title || project?.topic || "未命名研究";
+}
+
+async function renameConversation(project) {
+  const conversation = projectConversation(project);
+  if (!conversation?.conversation_id) {
+    notify("这个旧项目没有可编辑的对话记录", true);
+    return;
+  }
+  const currentTitle = projectDisplayTitle(project);
+  const nextTitle = window.prompt("修改对话名称", currentTitle)?.trim();
+  if (!nextTitle || nextTitle === currentTitle) return;
+  try {
+    await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: nextTitle }),
+    });
+    await loadProjects();
+    if (project.project_id === state.projectId) {
+      const refreshed = state.projects.find((item) => item.project_id === state.projectId);
+      state.conversation = refreshed?.conversation || state.conversation;
+      if (state.snapshot && refreshed?.conversation) {
+        state.snapshot.conversation = refreshed.conversation;
+      }
+    }
+    notify("对话名称已更新");
+  } catch (error) {
+    notify(`修改失败：${error.message}`, true);
+  }
+}
+
+async function toggleConversationPin(project) {
+  const conversation = projectConversation(project);
+  if (!conversation?.conversation_id) {
+    notify("这个旧项目没有可置顶的对话记录", true);
+    return;
+  }
+  try {
+    await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: !conversation.pinned }),
+    });
+    await loadProjects();
+    notify(conversation.pinned ? "已取消置顶" : "已置顶对话");
+  } catch (error) {
+    notify(`置顶操作失败：${error.message}`, true);
+  }
+}
+
+async function deleteConversationFromSidebar(project) {
+  const conversation = projectConversation(project);
+  if (!conversation?.conversation_id) {
+    notify("这个旧项目没有独立对话记录", true);
+    return;
+  }
+  const title = projectDisplayTitle(project);
+  if (!window.confirm(`永久删除“${title}”吗？\n\n对话、项目、研究产物和状态记录都会被删除，此操作无法撤销。`)) {
+    return;
+  }
+  try {
+    await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+      method: "DELETE",
+    });
+    state.projects = state.projects.filter((item) => item.project_id !== project.project_id);
+    if (project.project_id === state.projectId) clearProjectView();
+    else renderProjectList();
+    await loadProjects();
+    notify("研究对话已删除");
+  } catch (error) {
+    notify(`删除失败：${error.message}`, true);
+  }
+}
+
+function conversationMenuItem(label, iconName, action, danger = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `menu-item${danger ? " danger-menu-item" : ""}`;
+  button.append(iconNode(iconName), document.createTextNode(label));
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    closeConversationMenus();
+    await action();
+  });
+  return button;
+}
+
 function renderRecentProjects() {
   elements.recentProjectList.replaceChildren();
   elements.recentProjects.hidden = !state.projects.length;
@@ -1613,12 +1722,12 @@ function renderRecentProjects() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "start-recent-item";
-    button.setAttribute("aria-label", `打开研究：${project.topic || "未命名研究"}`);
+    button.setAttribute("aria-label", `打开研究：${projectDisplayTitle(project)}`);
 
     const copy = document.createElement("span");
     copy.className = "start-recent-copy";
     const title = document.createElement("strong");
-    title.textContent = project.topic || "未命名研究";
+    title.textContent = projectDisplayTitle(project);
     const meta = document.createElement("span");
     meta.textContent = `${STAGE_LABELS[project.stage] || project.stage} · ${formatDate(project.updated_at)}`;
     copy.append(title, meta);
@@ -1643,21 +1752,32 @@ function renderProjectList() {
 
   state.projects.forEach((project) => {
     const isRunning = ["queued", "running"].includes(project.active_run?.status);
+    const isReviewRevision =
+      project.stage === "REVIEWED"
+      && project.current_review?.verdict === "REVISE";
     const displayStage =
       isRunning
         ? "调研中"
+        : isReviewRevision
+        ? "审查待修订"
         : project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery"
         ? recoverableOperationalFailure(state.snapshot)
           ? "写作待恢复"
           : "成果待补全"
         : STAGE_LABELS[project.stage] || project.stage;
+    const conversation = projectConversation(project);
+    const displayTitle = projectDisplayTitle(project);
+    const entry = document.createElement("div");
+    entry.className = "project-list-entry";
+    entry.dataset.conversationId = conversation?.conversation_id || "";
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = "project-list-item";
     button.classList.toggle("is-active", project.project_id === state.projectId);
     button.setAttribute("aria-current", project.project_id === state.projectId ? "page" : "false");
-    button.setAttribute("aria-label", `${project.topic || "未命名研究"}，${displayStage}`);
-    button.title = project.topic || "未命名研究";
+    button.setAttribute("aria-label", `${displayTitle}，${displayStage}`);
+    button.title = displayTitle;
 
     const icon = document.createElement("span");
     icon.className = "project-list-icon";
@@ -1677,7 +1797,18 @@ function renderProjectList() {
 
     const title = document.createElement("span");
     title.className = "project-list-title";
-    title.textContent = project.topic || "未命名研究";
+    title.textContent = displayTitle;
+
+    const titleRow = document.createElement("span");
+    titleRow.className = "project-list-title-row";
+    titleRow.append(title);
+    if (conversation?.pinned) {
+      const pinned = document.createElement("span");
+      pinned.className = "project-list-pinned";
+      pinned.title = "已置顶";
+      pinned.append(iconNode("pin"));
+      titleRow.append(pinned);
+    }
 
     const meta = document.createElement("span");
     meta.className = "project-list-meta";
@@ -1687,10 +1818,50 @@ function renderProjectList() {
     date.textContent = formatDate(project.updated_at);
     meta.append(stage, date);
 
-    content.append(title, meta);
+    content.append(titleRow, meta);
     button.append(icon, content);
-    button.addEventListener("click", () => loadProject(project.project_id));
-    elements.projectList.append(button);
+    button.addEventListener("click", () => {
+      closeConversationMenus();
+      loadProject(project.project_id);
+    });
+
+    const menuToggle = document.createElement("button");
+    menuToggle.type = "button";
+    menuToggle.className = "icon-button project-list-menu-toggle";
+    menuToggle.setAttribute("aria-label", `打开“${displayTitle}”的对话操作`);
+    menuToggle.setAttribute("aria-haspopup", "menu");
+    menuToggle.setAttribute("aria-expanded", "false");
+    menuToggle.append(iconNode("ellipsis"));
+
+    const menu = document.createElement("div");
+    menu.className = "popover project-list-menu";
+    menu.setAttribute("role", "menu");
+    const keepMenuOpen = Boolean(
+      conversation?.conversation_id
+      && state.openConversationMenuId === conversation.conversation_id,
+    );
+    menu.hidden = !keepMenuOpen;
+    menuToggle.setAttribute("aria-expanded", String(keepMenuOpen));
+    menu.append(
+      conversationMenuItem(
+        conversation?.pinned ? "取消置顶" : "置顶",
+        conversation?.pinned ? "pin-off" : "pin",
+        () => toggleConversationPin(project),
+      ),
+      conversationMenuItem("修改名称", "pencil", () => renameConversation(project)),
+      conversationMenuItem("删除", "trash-2", () => deleteConversationFromSidebar(project), true),
+    );
+    menuToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = menu.hidden;
+      closeConversationMenus(open ? menu : null);
+      menu.hidden = !open;
+      menuToggle.setAttribute("aria-expanded", String(open));
+      if (open) menu.querySelector("button")?.focus();
+    });
+
+    entry.append(button, menuToggle, menu);
+    elements.projectList.append(entry);
   });
   refreshIcons();
 }
@@ -1864,9 +2035,16 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
   elements.projectIdLabel.textContent = project.project_id;
   elements.projectTopic.textContent = project.topic || "未命名研究";
   elements.projectQuestion.textContent = project.research_question || "";
-  elements.stageBadge.textContent = STAGE_LABELS[project.stage] || project.stage;
+  const needsReviewRevision =
+    project.stage === "REVIEWED"
+    && project.current_review?.verdict === "REVISE";
+  elements.stageBadge.textContent = needsReviewRevision
+    ? "审查待修订"
+    : STAGE_LABELS[project.stage] || project.stage;
   elements.stageBadge.className = "stage-badge";
-  if (["COMPLETED", "REVIEWED", "NARRATED"].includes(project.stage)) {
+  if (needsReviewRevision) {
+    elements.stageBadge.classList.add("is-warning");
+  } else if (["COMPLETED", "REVIEWED", "NARRATED"].includes(project.stage)) {
     elements.stageBadge.classList.add("is-done");
   }
   if (project.stage === "INCONCLUSIVE") {
@@ -2537,7 +2715,7 @@ const USER_STAGE_GUIDANCE = {
   EXTRACTED: ["证据已提取", "论文精读已经完成，下一步会综合比较证据。"],
   SYNTHESIZED: ["综合完成", "系统已经形成共识、冲突和研究空白，等待独立审查。"],
   REVIEW_PENDING: ["等待证据审查", "系统将检查综合结论是否都有证据支撑。"],
-  REVIEWED: ["证据审查通过", "证据链已经通过审查，下一步生成文献综述大纲。"],
+  REVIEWED: ["证据审查完成", "请根据审查结论继续写作，或先修订综合结论并重新审查。"],
   OUTLINED: ["大纲已生成", "系统已规划章节结构，下一步逐节撰写正文。"],
   NARRATED: ["综述已生成", "完整综述已经生成，接下来进行事实核查。"],
   COMPLETED: ["研究已完成", "最终综述已生成并完成事实核查，可查看下方成果。"],
@@ -2572,6 +2750,12 @@ function factCheckSummary(snapshot) {
 
 function latestReviewPassed(snapshot) {
   return latestArtifact(snapshot, "ReviewResult")?.payload?.verdict === "PASS";
+}
+
+function latestReviewVerdict(snapshot) {
+  return latestArtifact(snapshot, "ReviewResult")?.payload?.verdict
+    || snapshot?.project?.current_review?.verdict
+    || null;
 }
 
 function narrativeCompletion(snapshot) {
@@ -2631,8 +2815,15 @@ function recoverableOperationalFailure(snapshot) {
 
 function continuationMode(snapshot) {
   const stage = snapshot?.project?.stage;
+  const reviewVerdict = latestReviewVerdict(snapshot);
   if (stage === "SCREENED") return "screening";
-  if (["REVIEWED", "OUTLINED", "NARRATED"].includes(stage) && latestReviewPassed(snapshot)) {
+  if (
+    reviewVerdict === "REVISE"
+    && ["REVIEWED", "EXTRACTED", "SYNTHESIZED", "REVIEW_PENDING"].includes(stage)
+  ) {
+    return "revision";
+  }
+  if (["REVIEWED", "OUTLINED", "NARRATED"].includes(stage) && reviewVerdict === "PASS") {
     return "narrative";
   }
   if (stage === "COMPLETED" && latestReviewPassed(snapshot)) {
@@ -2658,6 +2849,7 @@ function metricCard(label, value, hint = "") {
 
 function renderOutcome(snapshot) {
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
+  const review = latestArtifact(snapshot, "ReviewResult")?.payload;
   const insufficient = snapshot?.project?.stage === "INCONCLUSIVE"
     ? latestArtifact(snapshot, "InsufficientEvidence")?.payload
     : null;
@@ -2728,6 +2920,34 @@ function renderOutcome(snapshot) {
     return;
   }
 
+  if (snapshot?.project?.stage === "REVIEWED" && review?.verdict === "REVISE") {
+    const issues = review.fatal_issues || [];
+    elements.primaryOutcome.hidden = false;
+    elements.projectSummary.classList.add("has-outcome");
+    elements.primaryOutcome.append(
+      h("div", { cls: "outcome-header" }, [
+        h("div", {}, [
+          h("p", { cls: "eyebrow" }, "Evidence review"),
+          h("h3", {}, "证据审查要求修订"),
+        ]),
+        h("span", { cls: "outcome-badge is-warning" }, "REVISE"),
+      ]),
+      h(
+        "p",
+        { cls: "outcome-abstract" },
+        "论文精读和证据均已保留。下一步将按照审查意见修订综合结论，再进行一次独立证据审查。",
+      ),
+      issues.length
+        ? h(
+          "ul",
+          { cls: "quality-note" },
+          issues.slice(0, 4).map((issue) => h("li", {}, issue)),
+        )
+        : null,
+    );
+    return;
+  }
+
   if (insufficient) {
     elements.primaryOutcome.hidden = false;
     elements.projectSummary.classList.add("has-outcome");
@@ -2763,7 +2983,13 @@ function renderProjectSummary(snapshot) {
     "项目正在推进中。",
   ];
   const needsRecovery = continuationMode(snapshot) === "recovery";
-  if (needsRecovery) {
+  const needsRevision = continuationMode(snapshot) === "revision";
+  if (needsRevision) {
+    title = "证据审查要求修订";
+    text = "审查已完成，但发现证据归属或结论边界问题。点击下方按钮复用现有证据修订综合报告并重新审查。";
+    elements.stageBadge.textContent = "审查待修订";
+    elements.stageBadge.className = "stage-badge is-warning";
+  } else if (needsRecovery) {
     const completion = narrativeCompletion(snapshot);
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDrafts = currentSectionDrafts(snapshot);
@@ -2788,13 +3014,12 @@ function renderProjectSummary(snapshot) {
   elements.nextActionTitle.textContent = title;
   elements.nextActionText.textContent = text;
 
-  const latestCandidateSet = latestArtifact(snapshot, "CandidateSetSnapshot")?.payload;
   const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
   const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
   const facts = factCheckSummary(snapshot);
   elements.resultHighlights.replaceChildren(
-    metricCard("候选论文", latestCandidateSet?.candidates?.length || latestSearch?.candidates?.length || 0, "当前可审核范围"),
+    metricCard("候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"),
     metricCard("入选精读", latestScreening?.included_paper_ids?.length || 0, "你确认的论文"),
     metricCard("证据摘录", countFindings(snapshot), "可追踪 evidence"),
     metricCard("综述章节", narrative?.sections?.length || 0, facts.revise ? `${facts.revise} 章需修订` : "最终正文"),
@@ -2934,6 +3159,13 @@ function renderStagePanels(snapshot) {
     elements.continueTitle.textContent = "候选集已经确认";
     elements.continueText.textContent = "继续后将读取论文、提取证据并完成综述。";
     elements.continueButtonLabel.textContent = "继续研究";
+  } else if (mode === "revision") {
+    const issueCount = latestArtifact(snapshot, "ReviewResult")?.payload?.fatal_issues?.length || 0;
+    elements.continueEyebrow.textContent = "Review revisions required";
+    elements.continueTitle.textContent = "修订综合结论并重新审查";
+    elements.continueText.textContent =
+      `系统将复用已保存的论文和证据，处理 ${issueCount} 项审查问题；不会重新检索或重新精读论文。`;
+    elements.continueButtonLabel.textContent = "修订并重新审查";
   } else if (mode) {
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDraftCount = currentSectionDrafts(snapshot).length;
@@ -2962,6 +3194,8 @@ function snapshotSignature(snapshot) {
   const events = snapshot?.events || [];
   const latestArtifact = artifacts.at(-1);
   const latestEvent = events.at(-1);
+  const latestRun = snapshot?.runs?.[0] || null;
+  const activeRun = snapshot?.active_run || null;
   return [
     snapshot?.project?.updated_at || "",
     snapshot?.project?.stage || "",
@@ -2969,6 +3203,9 @@ function snapshotSignature(snapshot) {
     latestArtifact?.artifact_id || "",
     events.length,
     latestEvent?.event_id || "",
+    activeRun?.run_id || latestRun?.run_id || "",
+    activeRun?.status || latestRun?.status || "",
+    activeRun?.updated_at || latestRun?.updated_at || "",
   ].join(":");
 }
 
@@ -3582,7 +3819,8 @@ function artifactActivity(artifact) {
 
 function syncRunningSnapshot(snapshot) {
   const signature = snapshotSignature(snapshot);
-  if (signature === state.runSnapshotSignature) return;
+  const runFinished = Boolean(state.activeRunId && !activeSnapshotRun(snapshot));
+  if (signature === state.runSnapshotSignature && !runFinished) return false;
 
   (snapshot?.artifacts || []).forEach((artifact, index) => {
     const identity = artifactIdentity(artifact, index);
@@ -3606,11 +3844,11 @@ function syncRunningSnapshot(snapshot) {
   });
   if (!state.busy) {
     elements.runPanel.hidden = true;
-    void loadProjects();
-    return;
+    return runFinished;
   }
   const stage = snapshot?.project?.stage;
   setRunPhase(STAGE_RUN_PHASES[stage] || "thinking");
+  return runFinished;
 }
 
 async function pollRunningProject() {
@@ -3627,7 +3865,13 @@ async function pollRunningProject() {
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}`);
     if (sessionId !== state.runSessionId || !state.runStartedAt || !state.busy) return;
-    syncRunningSnapshot(payload.data);
+    const projectId = state.projectId;
+    const runFinished = syncRunningSnapshot(payload.data);
+    if (runFinished && projectId === state.projectId) {
+      await loadProject(projectId, true, true);
+      await loadProjects();
+      notify("本阶段已经完成，界面已自动更新");
+    }
   } catch {
     // The main request owns error reporting; polling remains best-effort.
   } finally {
@@ -3825,6 +4069,8 @@ async function continueResearchLegacy() {
   const mode = continuationMode(state.snapshot);
   const confirmation = mode === "screening"
     ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
+    : mode === "revision"
+      ? "将复用已保存的论文和证据，根据审查意见修订综合结论并重新审查；不会重新检索或重新精读论文。确认开始吗？"
     : recoverableOperationalFailure(state.snapshot)
       ? "将从已保存的章节草稿恢复综述整合与事实核查，不会重新检索、重读论文或重写章节。确认开始吗？"
       : "将复用已保存的证据继续生成综述，不会重新检索或重读论文。确认开始吗？";
@@ -3836,6 +4082,8 @@ async function continueResearchLegacy() {
     stage: state.snapshot?.project?.stage || "SCREENED",
     message: mode === "screening"
       ? "正在恢复项目并启动论文精读"
+      : mode === "revision"
+        ? "正在根据审查意见修订综合结论"
       : "正在恢复写作阶段并生成缺失的综述产物",
     snapshot: state.snapshot,
   });
@@ -3921,12 +4169,19 @@ async function continueResearch() {
     notify("旧项目没有独立对话记录，请重新创建一个研究对话", true);
     return;
   }
-  if (!window.confirm("将从已保存进度继续，并在后台运行。确认开始吗？")) return;
+  const mode = continuationMode(state.snapshot);
+  const confirmation = mode === "revision"
+    ? "将复用已保存的论文和证据，根据审查意见修订综合结论并重新审查；不会重新检索或重新精读论文。确认开始吗？"
+    : "将从已保存进度继续，并在后台运行。确认开始吗？";
+  if (!window.confirm(confirmation)) return;
 
   setBusy(true);
   beginRunSession({
     stage: state.snapshot?.project?.stage || "SCREENED",
-    message: "正在从已保存进度恢复研究",
+    phase: mode === "revision" ? "synthesizing" : undefined,
+    message: mode === "revision"
+      ? "正在根据审查意见修订综合结论并重新审查"
+      : "正在从已保存进度恢复研究",
     snapshot: state.snapshot,
   });
   try {
@@ -3939,7 +4194,11 @@ async function continueResearch() {
     if (state.snapshot) state.snapshot.active_run = payload.data;
     await loadProjects();
     startRunPolling();
-    notify("后续研究已在后台启动；可以切换到其他对话");
+    notify(
+      mode === "revision"
+        ? "审查修订已在后台启动；可以切换到其他对话"
+        : "后续研究已在后台启动；可以切换到其他对话",
+    );
   } catch (error) {
     if (state.runStartedAt) finishRunSession();
     elements.runPanel.hidden = true;
@@ -3997,6 +4256,7 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
     year_from: numberInputValue(elements.initialYearFrom, 2024),
     year_to: numberInputValue(elements.initialYearTo, 2026),
     quality_venues_only: elements.initialQualityVenuesOnly.checked,
+    prefer_library_search: elements.initialPreferLibrarySearch.checked,
   };
   if (reviewLimits.min_papers > reviewLimits.max_papers) {
     notify("精读篇数下限不能大于上限", true);
@@ -4080,6 +4340,7 @@ document.addEventListener("click", (event) => {
   if (!elements.projectMenuToggle.closest(".menu-anchor").contains(event.target)) {
     setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   }
+  if (!event.target.closest(".project-list-entry")) closeConversationMenus();
 });
 
 document.addEventListener("keydown", (event) => {

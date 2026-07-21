@@ -18,6 +18,7 @@ from research_agent.api.background_runs import ConversationRunManager
 from research_agent.api.schemas import (
     ApiEnvelope,
     ContinueProjectRequest,
+    ConversationUpdateRequest,
     CreateConversationRequest,
     LibraryAssistantRequest,
     LibraryAttachmentRequest,
@@ -117,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data={
                 "status": "ok" if supervisor.graph is not None else "degraded",
                 "model": supervisor.settings.model,
+                "provider": supervisor.settings.resolved_model()[0],
                 "user_mode": (
                     "multi_user"
                     if supervisor.settings.multi_user_mode
@@ -169,6 +171,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 year_from=request.year_from,
                 year_to=request.year_to,
                 quality_venues_only=request.quality_venues_only,
+                prefer_library_search=request.prefer_library_search,
             )
         except ActiveConversationRunError as exc:
             raise HTTPException(status_code=409, detail="conversation_already_running") from exc
@@ -214,6 +217,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="conversation_not_found") from exc
         return ApiEnvelope(data=_json_safe(snapshot))
 
+    @app.patch("/api/conversations/{conversation_id}", response_model=ApiEnvelope)
+    async def update_conversation(
+        conversation_id: str,
+        request: ConversationUpdateRequest,
+    ) -> ApiEnvelope:
+        try:
+            conversation = await asyncio.to_thread(
+                supervisor.service.update_conversation,
+                conversation_id,
+                title=request.title,
+                pinned=request.pinned,
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(status_code=404, detail="conversation_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ApiEnvelope(
+            message="conversation_updated",
+            data=conversation.model_dump(mode="json"),
+        )
+
+    @app.delete("/api/conversations/{conversation_id}", response_model=ApiEnvelope)
+    async def delete_conversation(conversation_id: str) -> ApiEnvelope:
+        try:
+            active_run = supervisor.repository.get_active_conversation_run(conversation_id)
+            if active_run is not None:
+                raise HTTPException(status_code=409, detail="conversation_is_running")
+            conversation = supervisor.service.get_conversation(conversation_id)
+            await asyncio.to_thread(
+                supervisor.service.delete_conversation,
+                conversation_id,
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(status_code=404, detail="conversation_not_found") from exc
+        return ApiEnvelope(
+            message="conversation_deleted",
+            data={
+                "conversation_id": conversation_id,
+                "project_id": conversation.project_id,
+            },
+        )
+
     @app.post(
         "/api/conversations/{conversation_id}/continue",
         response_model=ApiEnvelope,
@@ -258,6 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 year_from=request.year_from,
                 year_to=request.year_to,
                 quality_venues_only=request.quality_venues_only,
+                prefer_library_search=request.prefer_library_search,
             )
             return ApiEnvelope(data=_json_safe(result))
         except Exception as exc:
@@ -285,6 +331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     year_from=request.year_from,
                     year_to=request.year_to,
                     quality_venues_only=request.quality_venues_only,
+                    prefer_library_search=request.prefer_library_search,
                 ):
                     payload = json.dumps(_json_safe(event), ensure_ascii=False)
                     event_name = (
