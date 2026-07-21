@@ -76,7 +76,7 @@ class ConversationRunManager:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> ConversationRun:
         return await self._start(
             conversation_id,
@@ -128,10 +128,15 @@ class ConversationRunManager:
     ) -> None:
         with self.repository.user_scope(user_id):
             run = self.repository.get_conversation_run(run_id)
+            project = self.supervisor.service.get_project(run.project_id)
             self.repository.update_conversation_run(
                 run_id,
                 status="running",
-                phase="thinking",
+                phase=(
+                    "thinking"
+                    if run.kind == "initial"
+                    else STAGE_PHASES.get(project.stage, "thinking")
+                ),
                 message=(
                     "正在创建检索策略并分析研究问题"
                     if run.kind == "initial"
@@ -157,11 +162,11 @@ class ConversationRunManager:
                     status = "awaiting_input"
                     message = "候选论文已准备好，等待人工审核"
                 elif project.stage is ResearchStage.REVIEWED:
-                    status = "completed"
+                    status = "interrupted"
                     if project.current_review and project.current_review.verdict.value == "REVISE":
-                        message = "证据审查要求修订，等待确认后重新审查"
+                        message = "自动修订流程提前停止，可从已保存证据恢复"
                     else:
-                        message = "证据审查已通过，等待确认后生成综述"
+                        message = "综述写作流程提前停止，可从已保存审查结果恢复"
                 elif project.stage is ResearchStage.COMPLETED:
                     status = "completed"
                     message = "综述已生成，研究已完成"

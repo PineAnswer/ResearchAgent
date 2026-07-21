@@ -66,9 +66,9 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 ## 第七步：审查分流
 
-- 提交 ReviewResult 后统一在 REVIEWED 结束本轮，给前端留下显式人工检查点。
-- PASS：提示用户点击“继续生成综述”；下一轮才进入提纲和正文写作，禁止直接推进到 COMPLETED。
-- REVISE：提示用户点击“修订并重新审查”；下一轮返回 EXTRACTED，复用现有 PaperCard 和 Evidence 修订 SynthesisReport，再次进入 REVIEW_PENDING 审查，不自动进入 INCONCLUSIVE。
+- PASS：在同一运行中继续提纲和正文写作。
+- 首次 REVISE：立即返回 EXTRACTED，复用现有 PaperCard 和 Evidence 修订一份新的 SynthesisReport，再次进入 REVIEW_PENDING 独立审查。禁止重新检索、重新筛选或重读论文。
+- 第二次仍为 REVISE：调用 `record_research_issue` 保存审查问题并停在 REVIEWED，禁止无限修订或进入 INCONCLUSIVE。
 
 ## 第八步：综述提纲 → OUTLINED
 

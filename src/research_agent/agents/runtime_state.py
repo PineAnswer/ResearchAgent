@@ -363,7 +363,7 @@ class ResearchRuntimeState:
             self._search_result_counts[thread_id] = {}
             self._raw_search_results[thread_id] = []
             self._search_constraints.setdefault(thread_id, {})
-            self._prefer_library_search.setdefault(thread_id, True)
+            self._prefer_library_search.setdefault(thread_id, False)
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
             for key in [item for item in self._rejections if item[0] == thread_id]:
@@ -390,7 +390,7 @@ class ResearchRuntimeState:
         year_from: int,
         year_to: int,
         quality_venues_only: bool,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> None:
         with self._lock:
             self._search_constraints[thread_id] = {
@@ -406,7 +406,7 @@ class ResearchRuntimeState:
 
     def prefer_library_search(self, thread_id: str) -> bool:
         with self._lock:
-            return self._prefer_library_search.get(thread_id, True)
+            return self._prefer_library_search.get(thread_id, False)
 
     def record_search(self, thread_id: str, query: str) -> bool:
         query = query.strip()

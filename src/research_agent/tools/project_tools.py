@@ -207,7 +207,7 @@ def build_project_tools(
                 "literature-scout一次，并明确告知它本地检索已经完成；首次工具调用"
                 "必须是search_openalex，禁止再次调用search_library。"
                 if retry_allowed
-                else "外部检索仍未执行；停止重试并调用finish_inconclusive。"
+                else "外部检索仍未执行；停止重试并调用record_research_issue。"
             )
             return json.dumps(
                 {
@@ -256,6 +256,33 @@ def build_project_tools(
                     actor="evidence-reviewer",
                     review=review,
                 )
+                if review.verdict.value == "REVISE":
+                    revise_count = sum(
+                        1
+                        for item in service.repository.list_artifacts(
+                            project_id, "ReviewResult"
+                        )
+                        if item.payload.get("verdict") == "REVISE"
+                    )
+                    if revise_count == 1:
+                        project = service.transition(
+                            project_id,
+                            ResearchStage.EXTRACTED,
+                            actor="review-revision",
+                        )
+                    else:
+                        service.save_artifact(
+                            project_id,
+                            "RuntimeIssue",
+                            {
+                                "reason": "review_revision_limit_reached",
+                                "recommendation": (
+                                    "证据审查连续两次要求修订；请人工检查研究问题、"
+                                    "证据边界和综合结论后再继续。"
+                                ),
+                                "stage": ResearchStage.REVIEWED.value,
+                            },
+                        )
             elif subagent_type == "research-outliner":
                 artifact, project = service.save_artifact_and_transition(
                     project_id,

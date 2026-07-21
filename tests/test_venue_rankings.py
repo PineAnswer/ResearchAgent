@@ -178,7 +178,7 @@ def test_search_request_defaults_and_year_validation() -> None:
     assert request.year_from == 2024
     assert request.year_to == 2026
     assert request.quality_venues_only is False
-    assert request.prefer_library_search is True
+    assert request.prefer_library_search is False
 
     try:
         CreateConversationRequest(
@@ -207,6 +207,7 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
     assert 'id="paperHorizontalScroller"' in html
     assert "研究文件夹" in html
     assert "prefer_library_search: elements.initialPreferLibrarySearch.checked" in script
+    assert "suggested_queries: action === \"refine\"" in script
     assert 'method: "PATCH"' in script
     assert "project-list-menu-toggle" in script
     assert 'latestSearch?.candidates?.length ?? 0, "首次检索去重结果"' in script

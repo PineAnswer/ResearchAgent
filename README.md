@@ -88,7 +88,7 @@ research-agent serve --host 127.0.0.1 --port 8000
 推荐从前端开始使用：
 
 1. 填写研究主题、研究问题和检索偏好后发起研究。
-2. `literature-scout` 会先检索本地文献库，再把长问题拆成多条互补短查询，同时检索 OpenAlex、Crossref、Semantic Scholar 和 arXiv。系统按 DOI/标题合并重复论文，保留每篇论文命中的来源和查询轨迹，再进行标题摘要级筛选；候选数量或单个来源失败不会阻止系统提交已有真实结果。
+2. `literature-scout` 默认直接进行外部检索；启用“优先检索本地文献库”后才会先复用本地论文。它会把长问题拆成多条互补短查询，同时检索 OpenAlex、Crossref、Semantic Scholar 和 arXiv。系统按 DOI/标题合并重复论文，保留每篇论文命中的来源和查询轨迹，再进行标题摘要级筛选；候选数量或单个来源失败不会阻止系统提交已有真实结果。
 3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
 4. 确认候选集后，可以先撤销确认或点击“继续研究”进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作和总编整合；完整综述生成后项目结束。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
@@ -98,7 +98,7 @@ research-agent serve --host 127.0.0.1 --port 8000
 `artifact_id`、`paper_id`、`evidence_id` 的来源关系。数据库产物始终是事实来源，
 压缩记忆只作为有界的工作上下文，不会另存一份可能分叉的事实副本。
 
-前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口。
+前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和人工 `stop` 会追加新的候选快照，在后续研究运行开始前可通过补偿事件撤销，历史记录保持不变。
 
 Swagger API 页面：<http://127.0.0.1:8000/docs>
 
@@ -249,9 +249,9 @@ GET /api/projects/RP-.../search-review
 POST /api/projects/RP-.../continue
 ```
 
-服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。若写作阶段意外中断，同一接口也会从 `REVIEWED`、`OUTLINED` 或 `NARRATED` 恢复，并跳过已经保存的章节。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
+服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。若管线意外中断，同一接口也会从 `EXTRACTED`、`SYNTHESIZED`、`REVIEW_PENDING`、`REVIEWED`、`OUTLINED` 或 `NARRATED` 恢复，并跳过已保存的工作。首次审查为 `REVISE` 时会在同一运行内自动返回综合阶段并复审一次；用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
 
-`/continue` 接受 `SCREENED`、`REVIEWED`、`OUTLINED` 和旧版本遗留的 `NARRATED` 项目。错误标记为 `COMPLETED`、但缺少完整综述的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
+`/continue` 接受 `SCREENED`、`EXTRACTED`、`SYNTHESIZED`、`REVIEW_PENDING`、`REVIEWED`、`OUTLINED` 和旧版本遗留的 `NARRATED` 项目。错误标记为 `COMPLETED`、但缺少完整综述的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
 
 ### 8. 文献库
 
@@ -293,7 +293,7 @@ ruff check .
 
 | Agent | 职责 | 实际可用 Tool | 结构化输出 | 运行保护 |
 |---|---|---|---|---|
-| `literature-scout` | 设计检索策略、标题摘要级初筛和覆盖分析 | `search_openalex`；可选 `search_crossref` | `SearchReport` | 系统捕获工具原始结果并重建完整 `candidates`；检索次数受配置限制；每个项目只委派一次 |
+| `literature-scout` | 设计检索策略、标题摘要级初筛和覆盖分析 | `search_library`、`search_multi_source` | `SearchReport` | 多条短查询同时覆盖 OpenAlex、Crossref、Semantic Scholar 和 arXiv；系统捕获原始结果并重建 `candidates` |
 | `paper-reader` | 获取开放全文或使用摘要提取单篇证据 | `fetch_paper_text`、`extract_pdf_text` | `PaperCard` | 全文请求受限；本地 PDF 最多解析一次；模型最多调用四次 |
 | `research-synthesizer` | 跨论文比较并识别研究空白 | `get_active_research_project` | `SynthesisReport` | 最多两次工具调用，只能引用已保存 Evidence |
 | `evidence-reviewer` | 审查结论、引文和 Evidence 对应关系 | `get_active_research_project` | `ReviewResult` | 项目最多读取一次；模型最多调用三次 |
@@ -323,10 +323,12 @@ CREATED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
 CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED
-  └─ 证据不足或无法继续 → INCONCLUSIVE
+  ├─ 人工停止或真实证据不足 → INCONCLUSIVE
+  └─ 执行故障 → RuntimeIssue，并保持当前阶段
 ```
 
 `ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`；`NarrativeReview` 提交后直接进入 `COMPLETED`。所有状态变化都经过 `ResearchService → Repository → validate_transition`。
+首次 `REVISE` 会自动返回 `EXTRACTED` 修订并复审一次；连续两次 `REVISE` 会保存 `RuntimeIssue` 并停在 `REVIEWED`，避免无限循环。
 
 ## 分层架构
 
@@ -398,7 +400,7 @@ RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND=3
 
 网页端在开始调研前提供两个硬筛选条件：
 
-- 发表年份允许选择 `2000-2026`，默认 `2024-2026`。年份范围会同时传给 OpenAlex/Crossref，并在本地再次校验。
+- 发表年份允许选择 `2000-2026`，默认 `2024-2026`。年份范围会传给多源检索适配器，并在本地再次校验。
 - “仅 CCF-A、一区和 Nature 子刊”默认不勾选。勾选后采用并集规则，只保留 `CCF-A`、`JCR Q1` 或 `Nature Portfolio` 中至少命中一项的论文；不勾选时不限制来源级别。
 
 候选论文卡片会显示期刊或会议名称、CCF 评级、JCR 分区、影响因子及其数据年份。未可靠命中的来源会明确显示“暂无可靠评级数据”，不会根据名称猜测。也可以通过 `GET /api/venues/lookup?q=TPAMI&venue_type=journal` 单独查询本地评级库。

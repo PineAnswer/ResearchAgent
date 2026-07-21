@@ -63,31 +63,17 @@ def test_narrative_continuation_prompt_skips_completed_work() -> None:
     assert '"saved_section_draft_ids": [\n    "sec-1"\n  ]' in prompt
 
 
-def test_revision_continuation_prompt_reuses_evidence_and_stops_after_rereview() -> None:
-    prompt = ResearchSupervisor.build_revision_continue_prompt(
-        "RP-test",
-        {
-            "current_stage": "EXTRACTED",
-            "review_verdict": "REVISE",
-            "review_result": {
-                "fatal_issues": ["claim is too broad"],
-                "suggestions": ["narrow the claim"],
-            },
-        },
-    )
-
-    assert "禁止创建新项目、重新检索、重新筛选或重新精读论文" in prompt
-    assert "根据review_result中的fatal_issues" in prompt
-    assert "新的ReviewResult保存到REVIEWED后立即结束本轮" in prompt
-    assert "本轮禁止委派research-outliner" in prompt
-    assert '"review_verdict": "REVISE"' in prompt
+def test_review_policy_continues_pass_and_bounds_automatic_revision() -> None:
+    assert "PASS时在同一运行中继续提纲和正文写作" in PI_PROMPT
+    assert "首次REVISE时立即返回EXTRACTED" in PI_PROMPT
+    assert "第二次仍为REVISE时调用record_research_issue" in PI_PROMPT
+    assert "fact-checker" not in PI_PROMPT
 
 
 def test_start_prompt_respects_optional_library_priority() -> None:
     direct_prompt = ResearchSupervisor.build_prompt(
         "GeoAI",
         "Which benchmarks are reliable?",
-        prefer_library_search=False,
     )
     library_prompt = ResearchSupervisor.build_prompt(
         "GeoAI",

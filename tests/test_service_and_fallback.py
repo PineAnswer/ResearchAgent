@@ -208,7 +208,7 @@ def test_agent_memory_preserves_task_progress_and_evidence_provenance(tmp_path) 
     assert finding["evidence_id"] == "P1:E1"
 
 
-def test_paper_card_normalizes_cosmetic_identifier_drift(tmp_path) -> None:
+def test_paper_card_preserves_exact_identifier_from_reader(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
     service.save_artifact_and_transition(
@@ -259,8 +259,8 @@ def test_paper_card_normalizes_cosmetic_identifier_drift(tmp_path) -> None:
         },
     )
 
-    assert artifact.payload["paper_id"] == "W123"
-    assert artifact.payload["findings"][0]["paper_id"] == "W123"
+    assert artifact.payload["paper_id"] == "W123."
+    assert artifact.payload["findings"][0]["paper_id"] == "W123."
     assert artifact.payload["findings"][0]["evidence_id"] == "W123.:W123:E1"
 
 
@@ -407,7 +407,7 @@ def test_extracted_requires_a_paper_card_for_every_included_paper(tmp_path) -> N
     assert service.get_project(project.project_id).stage is ResearchStage.SCREENED
 
 
-def test_openalex_url_and_bare_id_match_for_screened_paper_cards(tmp_path) -> None:
+def test_screening_normalizes_openalex_id_but_evidence_requires_exact_card_id(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
     full_id = "https://openalex.org/W4409797280"
@@ -440,28 +440,29 @@ def test_openalex_url_and_bare_id_match_for_screened_paper_cards(tmp_path) -> No
 
     assert screening.payload["included_paper_ids"] == [bare_id]
 
-    service.save_artifact(
-        screened.project_id,
-        "PaperCard",
-        {
-            "paper_id": bare_id,
-            "title": "Paper",
-            "research_question": "question",
-            "methods": [],
-            "datasets": [],
-            "findings": [
-                {
-                    "evidence_id": "E1",
-                    "paper_id": full_id,
-                    "claim": "claim",
-                    "quote": "quote",
-                    "page": None,
-                    "section": "abstract",
-                }
-            ],
-            "limitations": [],
-        },
-    )
+    payload = {
+        "paper_id": bare_id,
+        "title": "Paper",
+        "research_question": "question",
+        "methods": [],
+        "datasets": [],
+        "findings": [
+            {
+                "evidence_id": "E1",
+                "paper_id": full_id,
+                "claim": "claim",
+                "quote": "quote",
+                "page": None,
+                "section": "abstract",
+            }
+        ],
+        "limitations": [],
+    }
+    with pytest.raises(WorkflowPrerequisiteError, match="paper_id mismatch"):
+        service.save_artifact(screened.project_id, "PaperCard", payload)
+
+    payload["findings"][0]["paper_id"] = bare_id
+    service.save_artifact(screened.project_id, "PaperCard", payload)
     extracted = service.transition(
         screened.project_id,
         ResearchStage.EXTRACTED,
@@ -837,7 +838,7 @@ def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
     assert recovery_event["actor"] == "workflow-recovery"
 
 
-def test_prepare_continuation_opens_revise_loop_and_repairs_legacy_card(
+def test_prepare_continuation_resumes_revision_without_rewriting_legacy_card(
     tmp_path,
 ) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
@@ -923,33 +924,27 @@ def test_prepare_continuation_opens_revise_loop_and_repairs_legacy_card(
 
     continuation = service.prepare_continuation(project.project_id)
 
-    assert continuation["mode"] == "revision"
+    assert continuation["mode"] == "pipeline"
     assert continuation["project"].stage is ResearchStage.EXTRACTED
-    assert continuation["context"]["review_verdict"] == "REVISE"
-    assert continuation["context"]["review_result"]["fatal_issues"] == [
-        "Identifier drift"
-    ]
-    assert continuation["context"]["repaired_paper_ids"] == ["W123"]
     artifacts = service.get_snapshot(project.project_id)["artifacts"]
     cards = [item for item in artifacts if item["kind"] == "PaperCard"]
-    assert [item["payload"]["paper_id"] for item in cards] == ["W123.", "W123"]
+    assert [item["payload"]["paper_id"] for item in cards] == ["W123."]
     revision_event = service.get_snapshot(project.project_id)["events"][-1]
     assert revision_event["from_stage"] == "REVIEWED"
     assert revision_event["to_stage"] == "EXTRACTED"
-    assert revision_event["actor"] == "review-revision"
+    assert revision_event["actor"] == "review-revision-recovery"
 
     resumed = service.prepare_continuation(project.project_id)
 
-    assert resumed["mode"] == "revision"
+    assert resumed["mode"] == "pipeline"
     assert resumed["project"].stage is ResearchStage.EXTRACTED
-    assert resumed["context"]["repaired_paper_ids"] == []
     assert len(
         [
             item
             for item in service.get_snapshot(project.project_id)["artifacts"]
             if item["kind"] == "PaperCard"
         ]
-    ) == 2
+    ) == 1
 
 
 def test_prepare_continuation_recovers_operational_writing_failure(tmp_path) -> None:

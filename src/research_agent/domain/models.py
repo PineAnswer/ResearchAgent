@@ -44,7 +44,7 @@ class SearchConstraints(BaseModel):
     year_from: int = Field(default=2024, ge=2000, le=2026)
     year_to: int = Field(default=2026, ge=2000, le=2026)
     quality_venues_only: bool = False
-    prefer_library_search: bool = True
+    prefer_library_search: bool = False
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "SearchConstraints":
@@ -148,7 +148,7 @@ class CandidateSetSnapshot(BaseModel):
     year_from: int | None = Field(default=None, ge=2000, le=2026)
     year_to: int | None = Field(default=None, ge=2000, le=2026)
     quality_venues_only: bool = False
-    prefer_library_search: bool = True
+    prefer_library_search: bool = False
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "CandidateSetSnapshot":

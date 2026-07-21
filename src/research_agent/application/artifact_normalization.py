@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from research_agent.application.paper_ids import normalize_paper_id, same_paper_id
+from research_agent.application.paper_ids import normalize_paper_id
 
 
 def _normalize_evidence_id(paper_id: str, evidence_id: Any) -> str:
     normalized = str(evidence_id).strip()
     if (
         not normalized
-        or ":" in normalized
+        or normalized.startswith(f"{paper_id}:")
         or normalized.startswith(f"{paper_id}-")
     ):
         return normalized
@@ -18,12 +18,10 @@ def _normalize_evidence_id(paper_id: str, evidence_id: Any) -> str:
 
 def _normalize_paper_card(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
-    paper_id = normalize_paper_id(normalized.get("paper_id", ""))
+    paper_id = str(normalized.get("paper_id", "")).strip()
     findings = normalized.get("findings")
     if not paper_id or not isinstance(findings, list):
         return normalized
-    normalized["paper_id"] = paper_id
-
     normalized_findings = []
     for finding in findings:
         if not isinstance(finding, dict):
@@ -32,11 +30,7 @@ def _normalize_paper_card(payload: dict[str, Any]) -> dict[str, Any]:
         item = dict(finding)
         item["evidence_id"] = _normalize_evidence_id(paper_id, item.get("evidence_id", ""))
         finding_paper_id = str(item.get("paper_id", "")).strip()
-        if (
-            not finding_paper_id
-            or same_paper_id(finding_paper_id, paper_id)
-            or finding_paper_id.startswith(f"{paper_id}:")
-        ):
+        if not finding_paper_id or finding_paper_id.startswith(f"{paper_id}:"):
             item["paper_id"] = paper_id
         normalized_findings.append(item)
     normalized["findings"] = normalized_findings

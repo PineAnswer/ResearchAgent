@@ -272,7 +272,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> dict[str, Any]:
         options: dict[str, Any] = {
             "year_from": year_from,
@@ -297,7 +297,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> None:
         options = self._search_review_options(
             min_papers=min_papers,
@@ -400,7 +400,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> str:
         limits: list[str] = [
             f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
@@ -476,7 +476,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> str:
         base = cls.build_prompt(
             topic,
@@ -527,28 +527,6 @@ class ResearchSupervisor:
             "必须复用saved_context中的PaperCard、Evidence和SynthesisReport。\n\n"
             "pipeline_context:\n"
             f"{json.dumps(pipeline_context, ensure_ascii=False, indent=2)}"
-        )
-
-    @staticmethod
-    def build_revision_continue_prompt(
-        project_id: str,
-        revision_context: dict[str, Any],
-    ) -> str:
-        return (
-            f"继续修订已有科研项目：{project_id}\n"
-            "该项目的证据审查结论为REVISE。禁止创建新项目、重新检索、重新筛选"
-            "或重新精读论文；必须复用已保存的PaperCard和Evidence。\n"
-            "从 revision_context.current_stage 继续修订闭环："
-            "EXTRACTED时委派research-synthesizer，根据review_result中的fatal_issues"
-            "和suggestions生成一份完整、收窄过度表述的新版SynthesisReport并提交；"
-            "SYNTHESIZED时推进到REVIEW_PENDING；"
-            "REVIEW_PENDING时委派evidence-reviewer重新审查并提交新的ReviewResult。"
-            "不得复用旧SynthesisReport冒充新版，也不得修改或猜测evidence_id。"
-            "新的ReviewResult保存到REVIEWED后立即结束本轮：若PASS，明确提示用户可点击"
-            "“继续生成综述”；若仍为REVISE，明确提示可再次点击“修订并重新审查”。"
-            "本轮禁止委派research-outliner或进入正文写作。\n\n"
-            "revision_context:\n"
-            f"{json.dumps(revision_context, ensure_ascii=False, indent=2)}"
         )
 
     def build_config(self, thread_id: str | None = None) -> dict[str, Any]:
@@ -630,7 +608,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
         search_review_options = self._search_review_options(
@@ -680,7 +658,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -737,7 +715,7 @@ class ResearchSupervisor:
         project_id: str,
         thread_id: str | None = None,
     ) -> dict:
-        """Continue screening, review revision, or an interrupted writing stage."""
+        """Continue screening or an interrupted research stage."""
         if self.graph is None:
             raise AgentUnavailableError(
                 self.initialization_error or "Agent graph is unavailable"
@@ -746,11 +724,6 @@ class ResearchSupervisor:
         project = continuation["project"]
         if continuation["mode"] == "screening":
             continue_prompt = self.build_continue_prompt(
-                project_id,
-                continuation["context"],
-            )
-        elif continuation["mode"] == "revision":
-            continue_prompt = self.build_revision_continue_prompt(
                 project_id,
                 continuation["context"],
             )
@@ -819,7 +792,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> dict:
         """Start research for a project pre-created by the conversation service."""
         if self.graph is None:
@@ -903,7 +876,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
-        prefer_library_search: bool = True,
+        prefer_library_search: bool = False,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
             raise AgentUnavailableError(
