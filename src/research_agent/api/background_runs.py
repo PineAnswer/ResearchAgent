@@ -15,14 +15,14 @@ from research_agent.infrastructure.sqlite_repository import (
 STAGE_PHASES = {
     ResearchStage.CREATED: "thinking",
     ResearchStage.SEARCHED: "searching",
-    ResearchStage.SEARCH_REVIEW_PENDING: "reviewing",
+    ResearchStage.SEARCH_REVIEW_PENDING: "searching",
     ResearchStage.SCREENED: "reading",
     ResearchStage.EXTRACTED: "synthesizing",
     ResearchStage.SYNTHESIZED: "reviewing",
     ResearchStage.REVIEW_PENDING: "reviewing",
     ResearchStage.REVIEWED: "outlining",
     ResearchStage.OUTLINED: "writing",
-    ResearchStage.NARRATED: "verifying",
+    ResearchStage.NARRATED: "done",
     ResearchStage.COMPLETED: "done",
     ResearchStage.INCONCLUSIVE: "stopped",
 }
@@ -164,7 +164,7 @@ class ConversationRunManager:
                         message = "证据审查已通过，等待确认后生成综述"
                 elif project.stage is ResearchStage.COMPLETED:
                     status = "completed"
-                    message = "研究与事实核查已完成"
+                    message = "综述已生成，研究已完成"
                 elif project.stage is ResearchStage.INCONCLUSIVE:
                     status = "inconclusive"
                     message = "本轮研究已停止，可查看已保存产物"

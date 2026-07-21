@@ -22,6 +22,7 @@ from research_agent.domain.models import (
     LibraryNote,
     LibraryPaper,
     LibraryPaperAnalysis,
+    PaperAnnotation,
     ProjectPaper,
 )
 
@@ -357,7 +358,7 @@ class LibraryService:
     def save_paper_analysis(
         self,
         library_id: str,
-        attachment_id: str,
+        attachment_id: str | None,
         analysis: LibraryPaperAnalysis,
         *,
         mode: Literal["agent", "extractive"] = "agent",
@@ -640,6 +641,10 @@ class LibraryService:
                 note.model_dump(mode="json")
                 for note in self.repository.list_library_notes(library_id)
             ],
+            "annotations": [
+                annotation.model_dump(mode="json")
+                for annotation in self.repository.list_paper_annotations(library_id)
+            ],
             "attachments": [
                 attachment.model_dump(mode="json")
                 for attachment in self.repository.list_library_attachments(library_id)
@@ -853,6 +858,145 @@ class LibraryService:
         note.content = clean_content
         note.updated_at = datetime.now(UTC)
         return self.repository.save_library_note(note)
+
+    def save_annotation(
+        self,
+        library_id: str,
+        payload: dict[str, Any],
+        *,
+        annotation_id: str | None = None,
+    ) -> PaperAnnotation:
+        self.repository.get_library_paper(library_id)
+        kind = str(payload.get("kind") or "").strip()
+        selected_text = str(payload.get("selected_text") or "").strip()
+        content = str(payload.get("content") or "").strip()
+        question = str(payload.get("question") or "").strip()
+        answer = str(payload.get("answer") or "").strip()
+        if kind == "highlight" and not selected_text:
+            raise ValueError("Highlight requires selected text")
+        if kind == "note" and not (content or selected_text):
+            raise ValueError("Annotation requires content or selected text")
+        if kind == "qa" and not (question and answer):
+            raise ValueError("Saved Q&A requires both question and answer")
+        existing = (
+            self.repository.get_paper_annotation(annotation_id)
+            if annotation_id
+            else None
+        )
+        if existing is not None and existing.library_id != library_id:
+            raise ValueError("Annotation belongs to another paper")
+        created_at = existing.created_at if existing else datetime.now(UTC)
+        annotation = PaperAnnotation(
+            annotation_id=annotation_id or f"PA-{uuid.uuid4().hex[:12]}",
+            library_id=library_id,
+            attachment_id=payload.get("attachment_id"),
+            kind=kind,
+            page=payload.get("page"),
+            selected_text=selected_text,
+            prefix=str(payload.get("prefix") or ""),
+            suffix=str(payload.get("suffix") or ""),
+            rects=list(payload.get("rects") or []),
+            color=str(payload.get("color") or "yellow"),
+            content=content,
+            question=question,
+            answer=answer,
+            citations=list(payload.get("citations") or []),
+            created_at=created_at,
+            updated_at=datetime.now(UTC),
+        )
+        return self.repository.save_paper_annotation(annotation)
+
+    def paper_workspace(self, library_id: str) -> dict[str, Any]:
+        detail = self.get_paper(library_id)
+        pdfs = [
+            item
+            for item in detail["attachments"]
+            if str(item.get("media_type") or "").casefold() == "application/pdf"
+            or str(item.get("name") or "").casefold().endswith(".pdf")
+        ]
+        uploaded = [
+            item
+            for item in pdfs
+            if str(item.get("url") or "").startswith("/api/library/attachments/")
+        ]
+        uploaded.sort(
+            key=lambda item: item.get("full_text_status") != "indexed"
+        )
+        detail["workspace_attachment"] = (uploaded or pdfs or [None])[0]
+        return detail
+
+    def export_reading_report(self, library_id: str) -> str:
+        detail = self.paper_workspace(library_id)
+        paper = detail["paper"]
+        analyses = [
+            item for item in detail["analyses"] if item.get("kind") == "PaperCard"
+        ]
+        card = analyses[0].get("payload", {}) if analyses else {}
+        lines = [
+            f"# {paper['title']}",
+            "",
+            "## 文献信息",
+            "",
+            f"- 作者：{', '.join(paper.get('authors') or []) or '未记录'}",
+            f"- 年份：{paper.get('year') or '未记录'}",
+            f"- DOI：{paper.get('doi') or '未记录'}",
+            "",
+            "## 结构化精读卡",
+            "",
+            f"### 摘要\n\n{card.get('summary') or paper.get('abstract') or '尚未生成'}",
+        ]
+        for heading, key in (
+            ("方法", "methods"),
+            ("数据集", "datasets"),
+            ("局限", "limitations"),
+            ("关键词", "keywords"),
+        ):
+            lines.extend(["", f"### {heading}", ""])
+            values = card.get(key) or []
+            lines.extend([f"- {value}" for value in values] or ["- 尚未记录"])
+        lines.extend(["", "### 主要发现", ""])
+        findings = card.get("findings") or []
+        for finding in findings:
+            page = f"（第 {finding.get('page')} 页）" if finding.get("page") else ""
+            lines.append(f"- {finding.get('claim') or ''}{page}")
+            if finding.get("quote"):
+                lines.append(f"  > {finding['quote']}")
+        if not findings:
+            lines.append("- 尚未记录")
+        lines.extend(["", "## 高亮与批注", ""])
+        annotations = detail.get("annotations") or []
+        for item in annotations:
+            page = f"第 {item.get('page')} 页" if item.get("page") else "未定位页码"
+            kind = {"highlight": "高亮", "note": "批注", "qa": "问答"}.get(
+                item.get("kind"), item.get("kind", "批注")
+            )
+            lines.append(f"### {kind} · {page}")
+            lines.append("")
+            if item.get("selected_text"):
+                lines.append(f"> {item['selected_text']}")
+                lines.append("")
+            if item.get("content"):
+                lines.append(item["content"])
+                lines.append("")
+            if item.get("question"):
+                lines.append(f"**问题：** {item['question']}")
+                lines.append("")
+            if item.get("answer"):
+                lines.append(f"**回答：** {item['answer']}")
+                lines.append("")
+            for citation in item.get("citations") or []:
+                citation_page = citation.get("page")
+                suffix = f"，第 {citation_page} 页" if citation_page else ""
+                lines.append(
+                    f"- {citation.get('citation') or '引用'} {citation.get('title') or paper['title']}{suffix}"
+                )
+                if citation.get("quote"):
+                    lines.append(f"  > {citation['quote']}")
+            lines.append("")
+        if not annotations:
+            lines.append("尚无批注。")
+        lines.extend(["", "---", "", "由 Research Agent 单论文工作台导出。", ""])
+        return "\n".join(lines)
 
     def add_attachment(
         self,

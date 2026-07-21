@@ -895,6 +895,29 @@ def build_literature_tools(
         )
 
     def openalex_pdf_urls(paper_id: str, doi: str) -> list[str]:
+        def mdpi_resource_url(location: dict[str, Any]) -> str:
+            pdf_url = str(location.get("pdf_url") or "")
+            parsed = urlparse(pdf_url)
+            if parsed.hostname not in {"mdpi.com", "www.mdpi.com"}:
+                return ""
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) < 5 or parts[-1].casefold() != "pdf":
+                return ""
+            volume, article = parts[-4], parts[-2]
+            source = location.get("source") or {}
+            journal = re.sub(
+                r"[^a-z0-9]+",
+                "",
+                str(source.get("display_name") or "").casefold(),
+            )
+            if not journal or not volume.isdigit() or not article.isdigit():
+                return ""
+            stem = f"{journal}-{int(volume)}-{int(article):05d}"
+            return (
+                f"https://mdpi-res.com/d_attachment/{journal}/{stem}/"
+                f"article_deploy/{stem}.pdf"
+            )
+
         identifier = paper_id.strip()
         if identifier.startswith("https://openalex.org/"):
             identifier = identifier.rsplit("/", maxsplit=1)[-1]
@@ -919,7 +942,15 @@ def build_literature_tools(
         except AcademicApiError:
             return []
         locations = [data.get("best_oa_location") or {}, *data.get("locations", [])]
-        return [str(item.get("pdf_url")) for item in locations if item.get("pdf_url")]
+        urls: list[str] = []
+        for item in locations:
+            if not item.get("pdf_url"):
+                continue
+            resource_url = mdpi_resource_url(item)
+            if resource_url:
+                urls.append(resource_url)
+            urls.append(str(item["pdf_url"]))
+        return urls
 
     def direct_pdf_urls(doi: str, url: str) -> list[str]:
         values = []
@@ -941,16 +972,21 @@ def build_literature_tools(
         if trusted_arxiv_id:
             values.append(f"https://export.arxiv.org/pdf/{trusted_arxiv_id}")
             values.append(f"https://arxiv.org/pdf/{trusted_arxiv_id}.pdf")
-        if (
-            url_arxiv_id
-            and trusted_arxiv_id
-            and url_arxiv_id == trusted_arxiv_id
-            and url.lower().split("?", maxsplit=1)[0].endswith(".pdf")
-        ):
-            values.append(url)
-        elif "arxiv.org/" not in url.lower() and url.lower().split("?", 1)[0].endswith(
-            ".pdf"
-        ):
+        if url_arxiv_id:
+            doi_allows_url = not normalized_doi or (
+                bool(trusted_arxiv_id) and url_arxiv_id == trusted_arxiv_id
+            )
+            if doi_allows_url:
+                values.append(f"https://arxiv.org/pdf/{url_arxiv_id}.pdf")
+                values.append(f"https://export.arxiv.org/pdf/{url_arxiv_id}")
+        parsed = urlparse(url)
+        path = parsed.path.casefold().rstrip("/")
+        looks_like_pdf = (
+            path.endswith(".pdf")
+            or path.endswith("/pdf")
+            or "/doi/pdf/" in path
+        )
+        if "arxiv.org" not in (parsed.hostname or "").casefold() and looks_like_pdf:
             values.append(url)
         return values
 
@@ -996,14 +1032,36 @@ def build_literature_tools(
                 )
             except Exception:
                 pass
-        candidates = direct_pdf_urls(doi, url)
-        if not candidates:
-            candidates = openalex_pdf_urls(paper_id, doi)
-        candidates = list(dict.fromkeys(item for item in candidates if _safe_public_url(item)))
+        candidates = list(
+            dict.fromkeys(
+                item for item in direct_pdf_urls(doi, url) if _safe_public_url(item)
+            )
+        )
         errors = []
-        for candidate in candidates:
+        candidate_index = 0
+        openalex_loaded = False
+        while True:
+            if candidate_index >= len(candidates):
+                if openalex_loaded:
+                    break
+                openalex_loaded = True
+                candidates.extend(
+                    item
+                    for item in openalex_pdf_urls(paper_id, doi)
+                    if _safe_public_url(item) and item not in candidates
+                )
+                if candidate_index >= len(candidates):
+                    break
+            candidate = candidates[candidate_index]
+            candidate_index += 1
             try:
-                request = Request(candidate, headers={"User-Agent": retry_policy.user_agent})
+                request = Request(
+                    candidate,
+                    headers={
+                        "User-Agent": retry_policy.user_agent,
+                        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1",
+                    },
+                )
                 with urlopen(request, timeout=30) as response:  # noqa: S310 - validated public URL
                     content = response.read(25 * 1024 * 1024 + 1)
                 if len(content) > 25 * 1024 * 1024:

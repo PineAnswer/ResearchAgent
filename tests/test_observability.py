@@ -140,7 +140,7 @@ def test_run_logger_labels_model_batches_as_serial_execution(tmp_path) -> None:
     )
 
     events = logger.events_path.read_text(encoding="utf-8")
-    assert "LLM提出2个工具调用；系统串行执行第一个：verify_doi" in events
+    assert "LLM拟调用2个工具；系统将尝试串行执行第一个：verify_doi" in events
 
 
 def test_run_logger_records_invalid_tool_call_diagnostics(tmp_path) -> None:
@@ -204,6 +204,7 @@ def test_observable_chat_model_preserves_raw_provider_tool_arguments(tmp_path) -
     )
     response = {
         "id": "response-1",
+        "api_key": "sk-provider-secret",
         "model": "deepseek-chat",
         "object": "chat.completion",
         "created": 1,
@@ -257,6 +258,7 @@ def test_observable_chat_model_preserves_raw_provider_tool_arguments(tmp_path) -
         "function"
     ]["arguments"]
     assert logged_arguments == '{"topic": "broken"'
+    assert logged_raw["api_key"] == "[REDACTED]"
 
 
 def test_run_logger_marks_nonterminal_return_incomplete_and_updates_run_file(

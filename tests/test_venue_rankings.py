@@ -57,6 +57,35 @@ def test_seed_covers_requested_venue_sets_and_fast_alias_lookup(tmp_path: Path) 
     assert nature["impact_factor"] == 29.8
 
 
+def test_generic_venue_names_do_not_match_longer_high_quality_titles(
+    tmp_path: Path,
+) -> None:
+    index = VenueRankingIndex(tmp_path / "rankings.db")
+
+    assert index.lookup("Information", "journal") is None
+    assert index.lookup("Electronics", "journal") is None
+
+
+def test_unsupported_source_type_is_normalized_without_dropping_candidate(
+    tmp_path: Path,
+) -> None:
+    index = VenueRankingIndex(tmp_path / "rankings.db")
+
+    candidate = index.enrich_candidate(
+        {
+            "paper_id": "W-repository",
+            "title": "Repository copy",
+            "source": "OpenAlex",
+            "venue": "Unranked Repository",
+            "venue_type": "repository",
+        }
+    )
+
+    assert candidate["venue_type"] is None
+    assert candidate["venue"] == "Unranked Repository"
+    assert candidate["nature_portfolio"] is False
+
+
 def test_openalex_hard_filters_year_and_quality_then_enriches(
     tmp_path: Path,
     monkeypatch,

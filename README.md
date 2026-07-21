@@ -90,7 +90,7 @@ research-agent serve --host 127.0.0.1 --port 8000
 1. 填写研究主题、研究问题和检索偏好后发起研究。
 2. `literature-scout` 会先检索本地文献库，再把长问题拆成多条互补短查询，同时检索 OpenAlex、Crossref、Semantic Scholar 和 arXiv。系统按 DOI/标题合并重复论文，保留每篇论文命中的来源和查询轨迹，再进行标题摘要级筛选；候选数量或单个来源失败不会阻止系统提交已有真实结果。
 3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
-4. 确认候选集后，前端会直接进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作、总编整合和事实核查。
+4. 确认候选集后，可以先撤销确认或点击“继续研究”进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作和总编整合；完整综述生成后项目结束。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
 
 每个子 Agent 开始工作前都会收到由已提交产物生成的共享记忆账本：任务账本说明当前
@@ -243,7 +243,7 @@ GET /api/projects/RP-.../search-review
 }
 ```
 
-确认后，前端会自动调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
+确认后，前端会显示撤销与继续入口；点击继续后调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
 
 ```text
 POST /api/projects/RP-.../continue
@@ -251,7 +251,7 @@ POST /api/projects/RP-.../continue
 
 服务会从 SQLite 恢复已确认项目并从 `paper-reader` 阶段继续。继续阶段只读取最新 `ScreeningDecision.included_paper_ids`，不会精读被用户或 Agent 排除的候选论文。若写作阶段意外中断，同一接口也会从 `REVIEWED`、`OUTLINED` 或 `NARRATED` 恢复，并跳过已经保存的章节。用户反馈、补充检索报告和每版候选集快照均以 append-only 产物保存。
 
-`/continue` 接受 `SCREENED`、`REVIEWED`、`OUTLINED` 和 `NARRATED` 项目。旧版本错误标记为 `COMPLETED`、但缺少完整综述或逐节事实核查的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
+`/continue` 接受 `SCREENED`、`REVIEWED`、`OUTLINED` 和旧版本遗留的 `NARRATED` 项目。错误标记为 `COMPLETED`、但缺少完整综述的项目，也可通过该接口受控恢复；恢复会写入状态事件且不会重新检索。`INCONCLUSIVE` 仍是终态，已有 `PaperCard` 和 Evidence 会保留在 SQLite。
 
 ### 8. 文献库
 
@@ -279,7 +279,7 @@ ruff check .
 ## 核心能力
 
 - `research-supervisor` 统一接收 CLI 和 API 请求并控制科研状态主线。
-- 八个窄工具子 Agent 覆盖检索、单篇阅读、综合、证据审查、提纲设计、分节写作、总编整合和事实核查。
+- 七个窄工具子 Agent 覆盖检索、单篇阅读、综合、证据审查、提纲设计、分节写作和总编整合。
 - OpenAlex、Crossref、开放 PDF 下载与本地 PDF 文本提取。
 - Pydantic 结构化输出及 SQLite 原子产物提交。
 - Python 状态机、Reviewer 门禁和 append-only 状态事件。
@@ -289,7 +289,7 @@ ruff check .
 - 模型或网络不可用时生成可追踪的 `RuntimeFallback`，不伪造文献、证据或结论。
 - 前端 HTML/JSON 双视图、CLI 实时进度、完整运行日志、JSON 产物镜像和 Markdown 报告。
 
-## 八个子 Agent
+## 七个子 Agent
 
 | Agent | 职责 | 实际可用 Tool | 结构化输出 | 运行保护 |
 |---|---|---|---|---|
@@ -299,10 +299,9 @@ ruff check .
 | `evidence-reviewer` | 审查结论、引文和 Evidence 对应关系 | `get_active_research_project` | `ReviewResult` | 项目最多读取一次；模型最多调用三次 |
 | `research-outliner` | 根据论文卡片、综合结果和证据设计综述章节 | `get_active_research_project` | `ReviewOutline` | 仅在 `REVIEWED` 委派；最多两次工具调用 |
 | `narrative-writer` | 按提纲逐节撰写连贯正文 | `get_active_research_project` | `SectionDraft` | 每次只写一个 `section_id`；草稿逐份保存 |
-| `chief-editor` | 整合分节草稿、摘要、引言、结论和参考文献 | `get_active_research_project` | `NarrativeReview` | 仅在 `OUTLINED` 委派；提交后进入 `NARRATED` |
-| `fact-checker` | 按节核查正文论断和 Evidence 是否一致 | `get_active_research_project` | `FactCheckReport` | 仅在 `NARRATED` 委派；报告只诊断、不直接改正文 |
+| `chief-editor` | 整合分节草稿、摘要、引言、结论和参考文献 | `get_active_research_project` | `NarrativeReview` | 仅在 `OUTLINED` 委派；提交后直接进入 `COMPLETED` |
 
-主 Agent 使用完整的 `research-protocol` Skill。检索、阅读、综合和证据审查四个子 Agent 分别注入 `literature-search`、`paper-reading`、`research-synthesis` 和 `evidence-review` Skill；四个综述写作子 Agent 使用各自的专用 system prompt。所有子 Agent 都只获得表中列出的业务工具，并受结构化响应 schema、中间件和 Python 状态机约束。
+主 Agent 使用完整的 `research-protocol` Skill。检索、阅读、综合和证据审查四个子 Agent 分别注入 `literature-search`、`paper-reading`、`research-synthesis` 和 `evidence-review` Skill；三个综述写作子 Agent 使用各自的专用 system prompt。所有子 Agent 都只获得表中列出的业务工具，并受结构化响应 schema、中间件和 Python 状态机约束。
 
 `verify_doi` 未分配给任何 Agent，由 `SearchReviewService` 在用户手动添加 DOI 时调用。Reviewer 依据项目内的 `claim`、`evidence_id`、quote、page 和 section 审查证据对应关系。
 
@@ -320,14 +319,14 @@ CREATED
   → SYNTHESIZED
   → REVIEW_PENDING
   → REVIEWED
-      ├─ PASS   → OUTLINED → NARRATED → COMPLETED
+      ├─ PASS   → OUTLINED → COMPLETED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
-CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED / NARRATED
+CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED
   └─ 证据不足或无法继续 → INCONCLUSIVE
 ```
 
-`ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`，`NarrativeReview` 提交后进入 `NARRATED`；各节 `FactCheckReport` 保存完成后，主 Agent 才推进到 `COMPLETED`。所有状态变化都经过 `ResearchService → Repository → validate_transition`。等待用户审核时运行结果为 `awaiting_input`，其他未闭环结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
+`ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`；`NarrativeReview` 提交后直接进入 `COMPLETED`。所有状态变化都经过 `ResearchService → Repository → validate_transition`。
 
 ## 分层架构
 
@@ -336,7 +335,7 @@ CLI / FastAPI
       ↓
 ResearchSupervisor
       ├─ 主 Agent + research-protocol Skill
-      └─ 八个窄化子 Agent
+      └─ 七个窄化子 Agent
               ↓
        LangChain Tools
               ↓

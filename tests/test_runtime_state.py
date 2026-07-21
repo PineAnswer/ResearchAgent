@@ -241,8 +241,42 @@ def test_runtime_state_preserves_local_library_identity_and_search_order() -> No
     assert state.has_search_source("thread-a", "search_library") is True
 
 
+def test_runtime_state_normalizes_search_source_types_for_public_schema() -> None:
+    state = ResearchRuntimeState()
+    state.store_search_results(
+        "thread-a",
+        json.dumps(
+            [
+                {
+                    "paper_id": "W-repository",
+                    "title": "Repository paper",
+                    "source": "OpenAlex",
+                    "venue_type": "repository",
+                },
+                {
+                    "paper_id": "W-proceedings",
+                    "title": "Conference paper",
+                    "source": "OpenAlex",
+                    "venue_type": "proceedings",
+                },
+            ]
+        ),
+    )
+
+    results = state.get_search_results("thread-a")
+    assert results[0]["venue_type"] is None
+    assert results[1]["venue_type"] == "conference"
+
+
 def test_search_middleware_blocks_external_search_until_library_was_queried() -> None:
     state = ResearchRuntimeState()
+    state.set_search_constraints(
+        "thread-a",
+        year_from=2024,
+        year_to=2026,
+        quality_venues_only=False,
+        prefer_library_search=True,
+    )
     middleware = ExecutedSearchTrackingMiddleware(state)
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
 
@@ -437,6 +471,20 @@ def test_rejected_result_is_consumed_and_retry_count_resets_on_success() -> None
     assert state.rejection_count("thread-a", "research-synthesizer") == 0
 
 
+def test_paper_reader_rejections_are_isolated_by_paper_id() -> None:
+    state = ResearchRuntimeState()
+
+    assert state.reject_result("thread-a", "paper-reader", "W1") == 1
+    assert state.reject_result("thread-a", "paper-reader", "W1") == 2
+    assert state.rejection_count("thread-a", "paper-reader", "W1") == 2
+    assert state.rejection_count("thread-a", "paper-reader", "W2") == 0
+
+    assert state.reject_result("thread-a", "paper-reader", "W2") == 1
+    state.mark_consumed("thread-a", "paper-reader", "W2")
+    assert state.rejection_count("thread-a", "paper-reader", "W2") == 0
+    assert state.rejection_count("thread-a", "paper-reader", "W1") == 2
+
+
 def test_paper_fetch_guard_blocks_duplicates_and_per_paper_overflow() -> None:
     state = ResearchRuntimeState()
     guard = PaperFetchGuardMiddleware(state, max_attempts_per_paper=2)
@@ -520,8 +568,35 @@ def test_missing_structured_response_preserves_invalid_tool_call_details() -> No
     diagnostics = pending["_diagnostics"]
     assert diagnostics["expected_schema_tool"] == "SynthesisReport"
     assert diagnostics["finish_reason"] == "tool_calls"
+    assert diagnostics["parse_status"] == "invalid_tool_calls"
     assert diagnostics["invalid_tool_calls"][0]["args"] == '{"topic": "broken"'
     assert diagnostics["invalid_tool_calls"][0]["error"] == "invalid JSON"
+
+
+def test_missing_structured_response_redacts_sensitive_diagnostics() -> None:
+    state = ResearchRuntimeState()
+    message = AIMessage(
+        content="Bearer private-token",
+        response_metadata={
+            "finish_reason": "stop",
+            "api_key": "sk-private",
+        },
+    )
+    runnable = recording_runnable(
+        FakeStructuredAgent(None, messages=[message]),
+        "research-synthesizer",
+        state,
+    )
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="synthesize")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    diagnostics = state.pending_result("thread-a", "research-synthesizer")["_diagnostics"]
+    assert diagnostics["parse_status"] == "unparsed_content"
+    assert diagnostics["content"] == "Bearer [REDACTED]"
+    assert diagnostics["response_metadata"]["api_key"] == "[REDACTED]"
 
 
 def test_missing_structured_response_recovers_schema_tool_call_payload() -> None:

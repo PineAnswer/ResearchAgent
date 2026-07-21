@@ -24,33 +24,21 @@
 
 最终报告偶尔会使用“项目已完成”描述本轮程序调用已经结束。正式科研完成仍要求 `status=completed`、`project_stage=COMPLETED` 且 `review_verdict=PASS`；`error=null` 也只表示没有未处理的顶层异常。
 
-## 3. 已确认问题：技术术语中的数字被误判
+## 3. 数值声明校验
 
-`ResearchService` 会检查研究空白的 `proposed_hypothesis`，防止生成 Evidence 原文没有支持的精确数字。当前实现使用：
+`ResearchService` 会检查研究空白的 `proposed_hypothesis`，防止生成 Evidence 原文没有支持的精确数字。当前实现会忽略 `2D`、`3DVG`、`FFL-3DOG`、`ResNet-50` 和 `GPT-4` 等技术标识，并规范化千位分隔符、空格、百分号、`x/×/倍` 后执行精确集合比较。
 
-```python
-re.findall(r"\d+(?:\.\d+)?%?", proposed_hypothesis)
-```
-
-该表达式也会从以下技术术语中提取数字：
-
-- `2D` → `2`
-- `3D`、`3DVG` → `3`
-- `FFL-3DOG` → `3`
-
-如果对应 Evidence 引文没有出现相同字符，提交会返回：
+如果对应 Evidence 引文没有相同的规范化数值，提交会返回：
 
 ```text
 Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 ```
 
-这类错误可能是校验误判。诊断时应检查被拒绝假设中的数字是否属于百分比、指标、样本量等真正的定量声明，还是 `2D/3D` 等术语的一部分。
-
-当前比较方式还使用 `token in quote_text` 字符串包含判断。例如引文中的 `2023` 可能让单独的 `3` 被视为已支持。后续实现应对假设和 Evidence 分别提取规范化数值，忽略维度缩写，并执行精确集合比较。
+诊断时应确认被拒绝的数值是否确实出现在当前 gap 引用的 Evidence 原文中；年份 `2023` 不会再被错误地用于支持单独的 `3`。
 
 ## 4. `structured_response_missing`
 
-子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft`、`NarrativeReview` 或 `FactCheckReport`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
+子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft` 或 `NarrativeReview`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
 
 ```json
 {
@@ -83,8 +71,7 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 - `action` 只接受 `refine`、`accept` 和 `stop`。
 - 每轮默认最多提交 3 条新检索词，默认最多补充 3 轮；重复查询不消耗轮次。
-- 排除操作提交后，论文会从新版 `CandidateSetSnapshot` 移除，当前没有一键恢复接口。
-- `accept` 和 `stop` 没有撤销接口；可视化测试台会在提交前要求确认。
+- `refine`、`accept` 和人工 `stop` 在后续运行开始前可以撤销；撤销会追加补偿事件和上一版 `CandidateSetSnapshot`，不会删除历史产物。
 - 多个测试人员同时修改同一项目可能形成并发反馈；前端按钮锁只能降低单浏览器重复提交风险。
 
 ## 7. 当前恢复边界
@@ -93,10 +80,10 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 - `SCREENED`：可以调用 `/continue`，从逐篇精读开始。
 - `REVIEWED + REVISE`：状态机允许返回 `EXTRACTED` 修订。
 - `OUTLINED`：提纲已保存，可能正在逐节生成 `SectionDraft` 或等待 `chief-editor`。
-- `NARRATED`：完整 `NarrativeReview` 已保存，可能正在逐节生成 `FactCheckReport`。
-- `COMPLETED`、`INCONCLUSIVE`：终态，当前 API 不支持重新打开。
-
-当前主流程在所有章节事实核查任务结束后进入 `COMPLETED`；`FactCheckReport.verdict=REVISE` 会作为诊断产物保留，尚未自动触发正文改写或阻止完成。验收长篇综述时应同时查看最新 `NarrativeReview` 和全部 `FactCheckReport`。
+- `NARRATED`：旧版本遗留状态；完整 `NarrativeReview` 已保存，可以直接完成。
+- `COMPLETED`：完整 NarrativeReview 已生成时为终态；旧版缺产物的错误完成可恢复。
+- `INCONCLUSIVE`：真实证据不足仍为终态；结构化输出、模型超时等执行故障可从最近安全阶段恢复。
+当前主流程在 `chief-editor` 成功提交完整 `NarrativeReview` 后直接进入 `COMPLETED`。
 
 如果项目在综合阶段因格式或校验故障进入 `INCONCLUSIVE`，已保存的 `PaperCard` 和 Evidence 仍保留在 SQLite，从数据和设计上可以复用。当前 `/continue` 只接受 `SCREENED`，系统也没有从 `EXTRACTED` 重新执行综合或重新打开 `INCONCLUSIVE` 的恢复用例，因此现有产品路径无法自动复用这些产物；直接调用 `/continue` 会返回阶段冲突。
 

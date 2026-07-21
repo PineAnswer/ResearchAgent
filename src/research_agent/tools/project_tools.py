@@ -161,8 +161,8 @@ def build_project_tools(
         """Commit the exact structured output returned by the latest subagent.
 
         Supported subagents are the registered search, reading, synthesis,
-        review, outlining, writing, editing, and fact-checking agents. The model
-        does not resubmit or reconstruct JSON fields.
+        review, outlining, writing, and editing agents. The model does not
+        resubmit or reconstruct JSON fields.
         """
         thread_id = thread_id_from_config(runtime.config)
         active_id = state.project_id(thread_id)
@@ -188,6 +188,41 @@ def build_project_tools(
             )
         search_review = None
         deterministic_fallback = False
+        rejection_scope = None
+        if subagent_type == "paper-reader":
+            rejection_scope = str(
+                payload.get("_paper_id") or payload.get("paper_id") or ""
+            ).strip() or None
+        if (
+            subagent_type == "literature-scout"
+            and not payload.get("candidates")
+            and state.has_search_source(thread_id, "search_library")
+            and state.search_result_count(thread_id, "search_library") == 0
+            and not state.has_search_source(thread_id, "search_openalex")
+        ):
+            rejection_count = state.reject_result(thread_id, subagent_type)
+            retry_allowed = rejection_count < 2
+            instruction = (
+                "本地文献库结果为空，但尚未执行外部学术检索。重新委派"
+                "literature-scout一次，并明确告知它本地检索已经完成；首次工具调用"
+                "必须是search_openalex，禁止再次调用search_library。"
+                if retry_allowed
+                else "外部检索仍未执行；停止重试并调用finish_inconclusive。"
+            )
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error_code": "external_search_required",
+                    "message": (
+                        "Empty local-library results cannot be committed before "
+                        "an OpenAlex search is attempted."
+                    ),
+                    "rejection_count": rejection_count,
+                    "retry_allowed": retry_allowed,
+                    "instruction": instruction,
+                },
+                ensure_ascii=False,
+            )
         try:
             if subagent_type == "literature-scout":
                 artifact, project = service.save_artifact_and_transition(
@@ -242,15 +277,12 @@ def build_project_tools(
                             project_id,
                             "NarrativeReview",
                             payload,
-                            ResearchStage.NARRATED,
+                            ResearchStage.COMPLETED,
                             actor="chief-editor",
                         )
                     except (ValidationError, WorkflowPrerequisiteError, ValueError):
                         artifact, project = service.assemble_narrative_review(project_id)
                         deterministic_fallback = True
-            elif subagent_type == "fact-checker":
-                artifact = service.save_artifact(project_id, "FactCheckReport", payload)
-                project = service.get_project(project_id)
             else:
                 raise ValueError(f"Unsupported subagent_type: {subagent_type}")
         except (
@@ -260,15 +292,31 @@ def build_project_tools(
             ProjectNotFound,
             ValueError,
         ) as exc:
-            if subagent_type == "paper-reader" and payload.get("_paper_id"):
-                state.reset_paper_fetch(thread_id, str(payload["_paper_id"]))
-            rejection_count = state.reject_result(thread_id, subagent_type)
+            if subagent_type == "paper-reader" and rejection_scope:
+                state.reset_paper_fetch(thread_id, rejection_scope)
+            rejection_count = state.reject_result(
+                thread_id, subagent_type, rejection_scope
+            )
             retry_allowed = rejection_count < 2
             if retry_allowed:
+                if subagent_type == "literature-scout":
+                    instruction = (
+                        "该无效检索结果已被系统丢弃。根据message修正任务说明后，"
+                        "允许纠正性地重新委派literature-scout一次；只把搜索工具真实"
+                        "返回的paper_id或DOI写入candidate_ids，不要复制或改写候选论文"
+                        "元数据。随后再次调用commit_subagent_result。"
+                    )
+                else:
+                    instruction = (
+                        "该无效结果已被系统丢弃。根据message修正任务说明后，"
+                        f"重新委派{subagent_type}一次，再调用commit_subagent_result；"
+                        "禁止Supervisor手工重建JSON。"
+                    )
+            elif subagent_type == "paper-reader":
                 instruction = (
-                    "该无效结果已被系统丢弃。根据message修正任务说明后，"
-                    f"重新委派{subagent_type}一次，再调用commit_subagent_result；"
-                    "禁止Supervisor手工重建JSON。"
+                    "当前论文已连续两次生成无效结果，停止重试该论文；"
+                    "继续处理ScreeningDecision中的下一篇入选论文。全部论文处理后再尝试"
+                    "推进EXTRACTED；禁止Supervisor手工重建JSON。"
                 )
             else:
                 instruction = (
@@ -284,11 +332,15 @@ def build_project_tools(
                     "message": str(exc),
                     "rejection_count": rejection_count,
                     "retry_allowed": retry_allowed,
+                    "rejection_scope": rejection_scope,
+                    "skip_current_paper": (
+                        subagent_type == "paper-reader" and not retry_allowed
+                    ),
                     "instruction": instruction,
                 },
                 ensure_ascii=False,
             )
-        state.mark_consumed(thread_id, subagent_type)
+        state.mark_consumed(thread_id, subagent_type, rejection_scope)
         return json.dumps(
             {
                 "artifact": artifact.model_dump(mode="json"),
@@ -451,8 +503,8 @@ def build_project_tools(
     ) -> str:
         """Advance a stage that does not require a newly submitted artifact.
 
-        Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING, and
-        COMPLETED after NarrativeReview plus one FactCheckReport per section.
+        Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING,
+        and COMPLETED for legacy NARRATED projects with a saved NarrativeReview.
         """
         try:
             target = ResearchStage(target_stage)

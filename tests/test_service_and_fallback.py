@@ -4,6 +4,7 @@ import pytest
 from research_agent.application.research_service import (
     ResearchService,
     WorkflowPrerequisiteError,
+    _numeric_claims,
 )
 from research_agent.domain.models import (
     ResearchStage,
@@ -31,6 +32,12 @@ def _enter_search_review(service, project_id: str, paper_ids: list[str]) -> None
         ResearchStage.SEARCH_REVIEW_PENDING,
         actor="human-search-review",
     )
+
+
+def test_numeric_claim_extraction_ignores_technical_identifiers_and_matches_exact_values() -> None:
+    assert _numeric_claims("2D、3DVG、FFL-3DOG、ResNet-50 与 GPT-4") == []
+    assert _numeric_claims("提升 3x、准确率 95 %，样本数 1,024") == ["3x", "95%", "1024"]
+    assert "3" not in _numeric_claims("结果发表于 2023 年")
 
 
 def _create_reviewed_project(service: ResearchService):
@@ -736,7 +743,7 @@ def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) ->
         )
 
 
-def test_completion_requires_narrative_and_fact_check_for_every_section(tmp_path) -> None:
+def test_narrative_review_completes_project_without_post_processing(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = _create_reviewed_project(service)
     _, project = service.save_artifact_and_transition(
@@ -786,25 +793,23 @@ def test_completion_requires_narrative_and_fact_check_for_every_section(tmp_path
             "references": [],
             "word_count": 4,
         },
-        ResearchStage.NARRATED,
+        ResearchStage.COMPLETED,
         actor="chief-editor",
     )
 
-    with pytest.raises(WorkflowPrerequisiteError, match="FactCheckReport"):
-        service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
+    assert project.stage is ResearchStage.COMPLETED
+    assert service.get_snapshot(project.project_id)["artifacts"][-1]["kind"] == "NarrativeReview"
 
-    service.save_artifact(
-        project.project_id,
-        "FactCheckReport",
-        {"section_id": "sec-1", "verdict": "PASS", "issues": []},
-    )
-    completed = service.transition(
-        project.project_id,
-        ResearchStage.COMPLETED,
-        actor="pi",
-    )
 
-    assert completed.stage is ResearchStage.COMPLETED
+def test_fact_check_artifacts_are_no_longer_supported(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = _create_reviewed_project(service)
+    with pytest.raises(ValueError, match="Unsupported artifact kind 'FactCheckReport'"):
+        service.save_artifact(
+            project.project_id,
+            "FactCheckReport",
+            {"section_id": "sec-1", "verdict": "PASS", "issues": []},
+        )
 
 
 def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
@@ -813,11 +818,6 @@ def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
     project = service.repository.transition(
         project.project_id,
         ResearchStage.OUTLINED,
-        actor="legacy-supervisor",
-    )
-    project = service.repository.transition(
-        project.project_id,
-        ResearchStage.NARRATED,
         actor="legacy-supervisor",
     )
     service.repository.transition(
@@ -980,6 +980,72 @@ def test_prepare_continuation_recovers_operational_writing_failure(tmp_path) -> 
     assert recovery_event["actor"] == "workflow-recovery"
 
 
+def test_prepare_continuation_recovers_partial_reading_without_skipping_missing_papers(
+    tmp_path,
+) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "q",
+            "search_terms": ["q"],
+            "candidates": [
+                {"paper_id": "P1", "title": "One", "source": "test"},
+                {"paper_id": "P2", "title": "Two", "source": "test"},
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="scout",
+    )
+    _enter_search_review(service, project.project_id, ["P1", "P2"])
+    service.save_artifact_and_transition(
+        project.project_id,
+        "ScreeningDecision",
+        {
+            "included_paper_ids": ["P1", "P2"],
+            "excluded_paper_ids": [],
+            "reasons": ["relevant"],
+        },
+        ResearchStage.SCREENED,
+        actor="human-search-review",
+    )
+    service.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "P1",
+            "title": "One",
+            "research_question": "question",
+            "methods": [],
+            "findings": [
+                {
+                    "evidence_id": "P1:E1",
+                    "paper_id": "P1",
+                    "claim": "finding",
+                    "quote": "finding",
+                }
+            ],
+        },
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "InsufficientEvidence",
+        {
+            "reason": "paper-reader structured_response failed twice",
+            "recommendation": "retry the missing subagent result",
+        },
+        ResearchStage.INCONCLUSIVE,
+        actor="research-supervisor",
+    )
+
+    continuation = service.prepare_continuation(project.project_id)
+
+    assert continuation["project"].stage is ResearchStage.SCREENED
+    assert continuation["context"]["saved_paper_card_ids"] == ["P1"]
+
+
 def test_prepare_continuation_does_not_reopen_true_evidence_failure(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = _create_reviewed_project(service)
@@ -997,7 +1063,7 @@ def test_prepare_continuation_does_not_reopen_true_evidence_failure(tmp_path) ->
         actor="research-supervisor",
     )
 
-    with pytest.raises(WorkflowPrerequisiteError, match="recoverable writing-system"):
+    with pytest.raises(WorkflowPrerequisiteError, match="recoverable operational"):
         service.prepare_continuation(project.project_id)
 
     assert service.get_project(project.project_id).stage is ResearchStage.INCONCLUSIVE
@@ -1010,7 +1076,7 @@ def test_deterministic_narrative_assembly_preserves_saved_drafts(tmp_path) -> No
 
     artifact, updated = service.assemble_narrative_review(project.project_id)
 
-    assert updated.stage is ResearchStage.NARRATED
+    assert updated.stage is ResearchStage.COMPLETED
     assert artifact.kind == "NarrativeReview"
     assert artifact.payload["sections"][0]["content"] == (
         "Persisted evidence-backed text [P1:E1]."

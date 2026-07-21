@@ -32,7 +32,7 @@ ALLOWED_TRANSITIONS: dict[ResearchStage, set[ResearchStage]] = {
         ResearchStage.INCONCLUSIVE,
     },
     ResearchStage.OUTLINED: {
-        ResearchStage.NARRATED,
+        ResearchStage.COMPLETED,
         ResearchStage.INCONCLUSIVE,
     },
     ResearchStage.NARRATED: {

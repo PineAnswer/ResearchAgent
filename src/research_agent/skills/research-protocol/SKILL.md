@@ -42,34 +42,11 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 按入选论文逐篇完成，禁止一次发出多个 `task`：
 
-1. 从 SearchReport 复制该论文完整元数据，包括 paper_id、title、authors、year、abstract、doi、url、source。
-2. 委派一个 paper-reader。它会使用 `fetch_paper_text` 自动尝试 OpenAlex/arXiv 开放全文。
+1. 从 SearchReport 复制该论文完整元数据，包括 paper_id、library_id、title、authors、year、abstract、doi、url、source。
+2. 委派一个 paper-reader。`library_id` 非空时它只检索一次本地索引；为空时才尝试 OpenAlex/arXiv 开放全文。任务描述只传元数据和研究问题，禁止复制工具调用签名或定义 PaperCard JSON。
 3. 收到 PaperCard 后立即调用 `commit_subagent_result(project_id, "paper-reader")` 原样保存。
 4. 保存成功后再处理下一篇。
 5. 全部入选论文保存完成后，调用 `advance_project_stage(project_id, "EXTRACTED", "paper-reader")`。
-
-PaperCard 官方字段固定为：
-
-```json
-{
-  "paper_id": "P001",
-  "title": "论文标题",
-  "research_question": "研究问题",
-  "methods": [],
-  "datasets": [],
-  "findings": [
-    {
-      "evidence_id": "P001-E1",
-      "paper_id": "P001",
-      "claim": "有证据支持的结论",
-      "quote": "PDF原文",
-      "page": 1,
-      "section": "章节"
-    }
-  ],
-  "limitations": []
-}
-```
 
 全文不可用但摘要非空时，可保存明确标记为 abstract 的摘要级 Evidence。全文和摘要均不可用时 findings 为空。
 全部卡片的 findings 都为空时仍推进到 EXTRACTED。后续 SynthesisReport 的四个结论列表保持为空，并明确说明只有元数据、没有可定位证据；不得虚构综合结论。
@@ -99,21 +76,14 @@ PaperCard 官方字段固定为：
 - 调用 `commit_subagent_result(project_id, "research-outliner")` 原样提交 ReviewOutline 并进入 OUTLINED。
 - ReviewOutline 的每个 `section_id` 必须唯一，并明确分配论文、Evidence、核心论点和目标字数。
 
-## 第九步：分节写作与总编整合 → NARRATED
+## 第九步：分节写作与总编整合 → COMPLETED
 
 - 按 ReviewOutline 顺序逐节委派 `narrative-writer`，每次任务只指定一个 `section_id`。
 - 每节完成后立即调用 `commit_subagent_result(project_id, "narrative-writer")` 保存 SectionDraft，再处理下一节。
 - 已保存的 SectionDraft 不得重复生成；恢复执行时只补写缺失章节。
 - 全部提纲章节都有 SectionDraft 后，委派 `chief-editor` 整合完整 NarrativeReview。
-- 调用 `commit_subagent_result(project_id, "chief-editor")` 原样提交并进入 NARRATED。
-
-## 第十步：逐节事实核查 → COMPLETED
-
-- 按 NarrativeReview.sections 逐节委派 `fact-checker`，每次任务只指定一个 `section_id`。
-- 每节完成后立即调用 `commit_subagent_result(project_id, "fact-checker")` 保存 FactCheckReport。
-- 已保存的 FactCheckReport 不得重复生成；恢复执行时只核查缺失章节。
-- 只有 NarrativeReview 的每一节都有对应 FactCheckReport 后，才能调用 `advance_project_stage(project_id, "COMPLETED", "research-supervisor")`。
-- FactCheckReport 为 REVISE 时保留问题和修订建议；所有章节核查均已完成后仍可结束，但不得把 REVISE 描述为“没有问题”。
+- 调用 `commit_subagent_result(project_id, "chief-editor")` 原样提交完整 NarrativeReview 并直接进入 COMPLETED。
+- NarrativeReview 保存成功后立即结束执行，不再委派任何后续 Agent，也不再执行事实核查或正文修订流程。
 
 ## 停止规则
 

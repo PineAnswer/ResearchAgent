@@ -58,6 +58,7 @@ class Settings:
     search_max_retry_wait_seconds: float = 30.0
     max_search_review_rounds: int = 3
     max_suggested_queries_per_round: int = 3
+    graph_recursion_limit: int = 512
 
     def resolved_model(self) -> tuple[str, str]:
         """Resolve the provider and provider-native model ID.
@@ -158,5 +159,8 @@ class Settings:
             max_suggested_queries_per_round=max(
                 1,
                 int(os.getenv("RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND", "3")),
+            ),
+            graph_recursion_limit=max(
+                50, int(os.getenv("RESEARCH_AGENT_GRAPH_RECURSION_LIMIT", "512"))
             ),
         )

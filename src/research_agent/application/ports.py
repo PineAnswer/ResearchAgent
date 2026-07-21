@@ -12,6 +12,7 @@ from research_agent.domain.models import (
     LibraryCollection,
     LibraryNote,
     LibraryPaper,
+    PaperAnnotation,
     ProjectPaper,
     ResearchConversation,
     ResearchProject,
@@ -140,6 +141,14 @@ class ResearchRepositoryPort(Protocol):
 
     def delete_library_note(self, note_id: str) -> None: ...
 
+    def save_paper_annotation(self, annotation: PaperAnnotation) -> PaperAnnotation: ...
+
+    def list_paper_annotations(self, library_id: str) -> list[PaperAnnotation]: ...
+
+    def get_paper_annotation(self, annotation_id: str) -> PaperAnnotation: ...
+
+    def delete_paper_annotation(self, annotation_id: str) -> None: ...
+
     def save_library_attachment(
         self, attachment: LibraryAttachment
     ) -> LibraryAttachment: ...
@@ -203,7 +212,7 @@ class ResearchRepositoryPort(Protocol):
         project_id: str,
         target: ResearchStage,
         actor: str,
-        review: ReviewResult,
+        review: ReviewResult | None = None,
     ) -> ResearchProject: ...
 
     def save_artifact(

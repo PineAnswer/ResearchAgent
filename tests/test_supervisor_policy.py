@@ -45,8 +45,8 @@ def test_supervisor_has_atomic_commit_tool_and_explicit_ordering_policy(tmp_path
     assert "每次只委派一篇论文给 paper-reader" in PI_PROMPT
     assert "fetch_paper_text" in PI_PROMPT
     assert "必须复制 create_research_project 返回的原始 project_id" in PI_PROMPT
-    assert "REVIEWED → OUTLINED → NARRATED → COMPLETED" in PI_PROMPT
-    assert "research-outliner、narrative-writer、chief-editor、fact-checker" in PI_PROMPT
+    assert "chief-editor 提交完整 NarrativeReview 后流程立即结束" in PI_PROMPT
+    assert "research-outliner、narrative-writer、chief-editor" in PI_PROMPT
 
 
 def test_narrative_continuation_prompt_skips_completed_work() -> None:
@@ -55,7 +55,6 @@ def test_narrative_continuation_prompt_skips_completed_work() -> None:
         {
             "current_stage": "OUTLINED",
             "saved_section_draft_ids": ["sec-1"],
-            "fact_checked_section_ids": [],
         },
     )
 
@@ -172,6 +171,11 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(supervisor_module, "create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr(registry_module, "create_agent", fake_create_scout_agent)
+    monkeypatch.setattr(
+        supervisor_module.ResearchSupervisor,
+        "_build_model",
+        lambda _self: "test-model",
+    )
     settings = Settings(
         model="test-model",
         data_dir=tmp_path,
@@ -207,11 +211,11 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert "skills" not in captured
     assert '<skill name="research-protocol">' in captured["system_prompt"]
     assert "禁止为了继续流程而跳过前置产物" in captured["system_prompt"]
-    assert "每一节都有对应 FactCheckReport" in captured["system_prompt"]
+    assert "NarrativeReview 保存成功后立即结束执行" in captured["system_prompt"]
     configured_subagents = captured["subagents"]
-    assert len(configured_subagents) == 8
+    assert len(configured_subagents) == 7
     assert all(set(agent) == {"name", "description", "runnable"} for agent in configured_subagents)
-    assert len(agent_configs) == 8
+    assert len(agent_configs) == 7
     assert all(
         isinstance(config["middleware"][0], SerialToolExecutionMiddleware)
         for config in agent_configs
@@ -226,10 +230,10 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert reader["middleware"][1].exit_behavior == "end"
     assert reader["middleware"][2].tool_name == "retrieve_library_passages"
     assert reader["middleware"][2].run_limit == 1
-    assert reader["middleware"][2].exit_behavior == "end"
+    assert reader["middleware"][2].exit_behavior == "continue"
     assert reader["middleware"][3].tool_name == "extract_pdf_text"
     assert reader["middleware"][3].run_limit == 1
-    assert reader["middleware"][3].exit_behavior == "end"
+    assert reader["middleware"][3].exit_behavior == "continue"
     assert isinstance(reader["middleware"][4], PaperFetchGuardMiddleware)
     assert reader["middleware"][4].max_attempts_per_paper == 2
     assert [tool.name for tool in reader["tools"]] == [

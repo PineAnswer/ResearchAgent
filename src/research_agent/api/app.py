@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,6 +28,8 @@ from research_agent.api.schemas import (
     LibraryImportRequest,
     LibraryMergeRequest,
     LibraryNoteRequest,
+    PaperAnnotationRequest,
+    PaperQuestionRequest,
     LibraryPaperRequest,
     LibraryPaperUpdateRequest,
     LibrarySelectionRequest,
@@ -48,6 +51,7 @@ from research_agent.infrastructure.sqlite_repository import (
 
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+mimetypes.add_type("text/javascript", ".mjs")
 
 
 def _json_safe(value: Any) -> Any:
@@ -460,6 +464,165 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (ValueError, LibraryPaperNotFound) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ApiEnvelope(data=data)
+
+    @app.get(
+        "/api/library/papers/{library_id}/workspace",
+        response_model=ApiEnvelope,
+    )
+    async def get_paper_workspace(library_id: str) -> ApiEnvelope:
+        try:
+            data = await asyncio.to_thread(
+                supervisor.service.library.paper_workspace,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return ApiEnvelope(data=data)
+
+    @app.post(
+        "/api/library/papers/{library_id}/workspace/acquire-full-text",
+        response_model=ApiEnvelope,
+    )
+    async def acquire_paper_full_text(library_id: str) -> ApiEnvelope:
+        try:
+            result = await supervisor.acquire_library_full_text(library_id)
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(
+            message="library_full_text_acquisition_finished",
+            data=result,
+        )
+
+    @app.post(
+        "/api/library/papers/{library_id}/workspace/question",
+        response_model=ApiEnvelope,
+    )
+    async def ask_paper_question(
+        library_id: str,
+        request: PaperQuestionRequest,
+    ) -> ApiEnvelope:
+        try:
+            data = await supervisor.answer_paper_question(
+                library_id,
+                request.question,
+                scope=request.scope,
+                attachment_id=request.attachment_id,
+                page=request.page,
+                selected_text=request.selected_text,
+                prefix=request.prefix,
+                suffix=request.suffix,
+            )
+        except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=data)
+
+    @app.post(
+        "/api/library/papers/{library_id}/workspace/reading-card",
+        response_model=ApiEnvelope,
+    )
+    async def generate_paper_reading_card(
+        library_id: str,
+        attachment_id: str | None = None,
+    ) -> ApiEnvelope:
+        try:
+            result = await supervisor.generate_library_reading_card(
+                library_id,
+                attachment_id,
+            )
+        except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(message="paper_reading_card_generated", data=result)
+
+    @app.get(
+        "/api/library/papers/{library_id}/workspace/report.md",
+        response_class=PlainTextResponse,
+    )
+    async def export_paper_reading_report(library_id: str) -> PlainTextResponse:
+        try:
+            report = await asyncio.to_thread(
+                supervisor.service.library.export_reading_report,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return PlainTextResponse(
+            report,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="reading-report-{library_id}.md"'
+            },
+        )
+
+    @app.get(
+        "/api/library/papers/{library_id}/annotations",
+        response_model=ApiEnvelope,
+    )
+    async def list_paper_annotations(library_id: str) -> ApiEnvelope:
+        try:
+            annotations = await asyncio.to_thread(
+                supervisor.repository.list_paper_annotations,
+                library_id,
+            )
+        except LibraryPaperNotFound as exc:
+            raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
+        return ApiEnvelope(data=[item.model_dump(mode="json") for item in annotations])
+
+    @app.post(
+        "/api/library/papers/{library_id}/annotations",
+        response_model=ApiEnvelope,
+    )
+    async def create_paper_annotation(
+        library_id: str,
+        request: PaperAnnotationRequest,
+    ) -> ApiEnvelope:
+        try:
+            annotation = await asyncio.to_thread(
+                supervisor.service.library.save_annotation,
+                library_id,
+                request.model_dump(),
+            )
+        except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(
+            message="paper_annotation_saved",
+            data=annotation.model_dump(mode="json"),
+        )
+
+    @app.patch(
+        "/api/library/papers/{library_id}/annotations/{annotation_id}",
+        response_model=ApiEnvelope,
+    )
+    async def update_paper_annotation(
+        library_id: str,
+        annotation_id: str,
+        request: PaperAnnotationRequest,
+    ) -> ApiEnvelope:
+        try:
+            annotation = await asyncio.to_thread(
+                supervisor.service.library.save_annotation,
+                library_id,
+                request.model_dump(),
+                annotation_id=annotation_id,
+            )
+        except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=annotation.model_dump(mode="json"))
+
+    @app.delete("/api/library/annotations/{annotation_id}", response_model=ApiEnvelope)
+    async def delete_paper_annotation(annotation_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(
+                supervisor.repository.delete_paper_annotation,
+                annotation_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="paper_annotation_not_found") from exc
+        return ApiEnvelope(
+            message="paper_annotation_deleted",
+            data={"annotation_id": annotation_id},
+        )
 
     @app.post("/api/library/collections", response_model=ApiEnvelope)
     async def create_library_collection(request: LibraryCollectionRequest) -> ApiEnvelope:
@@ -883,6 +1046,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except WorkflowPrerequisiteError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return ApiEnvelope(data=_json_safe(result))
+
+    @app.post(
+        "/api/projects/{project_id}/search-feedback/undo",
+        response_model=ApiEnvelope,
+    )
+    async def undo_search_feedback(project_id: str) -> ApiEnvelope:
+        try:
+            result = await asyncio.to_thread(
+                supervisor.search_review.undo_last_feedback,
+                project_id,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except WorkflowPrerequisiteError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ApiEnvelope(message="search_feedback_undone", data=_json_safe(result))
 
     @app.post(
         "/api/projects/{project_id}/continue",

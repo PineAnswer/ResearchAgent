@@ -5,24 +5,41 @@ const STAGES = [
   ["SEARCHED", "检索"],
   ["SEARCH_REVIEW_PENDING", "人工审核"],
   ["SCREENED", "候选确认"],
-  ["EXTRACTED", "证据提取"],
-  ["SYNTHESIZED", "综合"],
-  ["REVIEW_PENDING", "等待审查"],
-  ["REVIEWED", "审查完成"],
+  ["EXTRACTED", "论文精读"],
+  ["SYNTHESIZED", "结果整理"],
+  ["REVIEW_PENDING", "整理中"],
+  ["REVIEWED", "整理完成"],
   ["OUTLINED", "提纲设计"],
   ["NARRATED", "综述已生成"],
   ["COMPLETED", "完成"],
 ];
 
+const PROGRESS_STAGES = [
+  { key: "create", label: "创建项目", stages: ["CREATED"] },
+  {
+    key: "search",
+    label: "检索与筛选",
+    stages: ["SEARCHED", "SEARCH_REVIEW_PENDING", "SCREENED"],
+  },
+  { key: "extract", label: "精读论文", stages: ["EXTRACTED"] },
+  {
+    key: "synthesize",
+    label: "整理结果",
+    stages: ["SYNTHESIZED", "REVIEW_PENDING", "REVIEWED"],
+  },
+  { key: "write", label: "生成综述", stages: ["OUTLINED", "NARRATED"] },
+  { key: "complete", label: "完成", stages: ["COMPLETED"] },
+];
+
 const STAGE_LABELS = Object.fromEntries(STAGES);
-STAGE_LABELS.INCONCLUSIVE = "证据不足";
+STAGE_LABELS.INCONCLUSIVE = "等待补充文献";
 STAGE_LABELS.OUTLINED = "提纲设计";
 STAGE_LABELS.NARRATED = "综述已生成";
 
 const RUN_PHASES = {
   thinking: {
-    title: "正在理解研究问题",
-    detail: "分析研究目标、边界与下一步行动。",
+    title: "正在准备文献检索",
+    detail: "分析研究问题并生成检索方案。",
     icon: "brain",
   },
   searching: {
@@ -36,14 +53,14 @@ const RUN_PHASES = {
     icon: "book-open",
   },
   synthesizing: {
-    title: "正在综合证据",
-    detail: "连接跨论文发现并识别一致与冲突之处。",
+    title: "正在整理研究结果",
+    detail: "汇总各论文的主要发现、差异与局限。",
     icon: "network",
   },
   reviewing: {
-    title: "正在审查证据链",
-    detail: "核对结论是否由可追踪证据支持。",
-    icon: "shield-check",
+    title: "正在整理研究结果",
+    detail: "检查内容是否完整并准备综述结构。",
+    icon: "list-checks",
   },
   outlining: {
     title: "正在设计综述结构",
@@ -54,11 +71,6 @@ const RUN_PHASES = {
     title: "正在撰写文献综述",
     detail: "依据提纲逐节整合正文与引用。",
     icon: "pen-line",
-  },
-  verifying: {
-    title: "正在核查最终综述",
-    detail: "逐节检查事实、证据引用与结论边界。",
-    icon: "file-check-2",
   },
   done: {
     title: "研究执行已完成",
@@ -75,20 +87,20 @@ const RUN_PHASES = {
 const STAGE_RUN_PHASES = {
   CREATED: "searching",
   SEARCHED: "searching",
-  SEARCH_REVIEW_PENDING: "reviewing",
+  SEARCH_REVIEW_PENDING: "searching",
   SCREENED: "reading",
   EXTRACTED: "synthesizing",
   SYNTHESIZED: "reviewing",
   REVIEW_PENDING: "reviewing",
   REVIEWED: "outlining",
   OUTLINED: "writing",
-  NARRATED: "verifying",
+  NARRATED: "done",
   COMPLETED: "done",
   INCONCLUSIVE: "stopped",
 };
 
 const ACTOR_LABELS = {
-  "literature-scout": "文献检索 Agent",
+  "literature-scout": "文献检索助手",
   "human-search-review": "人工检索审核",
   "research-supervisor": "研究调度器",
   "paper-reader": "论文精读 Agent",
@@ -99,23 +111,21 @@ const ACTOR_LABELS = {
   "narrative-writer": "综述写作 Agent",
   "chief-editor": "综述主编 Agent",
   "chief-editor-fallback": "综述主编恢复流程",
-  "fact-checker": "事实核查 Agent",
   "workflow-recovery": "工作流恢复器",
 };
 
 const ARTIFACT_LABELS = {
   SearchReport: "检索结果",
-  SupplementalSearchReport: "补充检索结果",
+  SupplementalSearchReport: "检索结果",
   CandidateSetSnapshot: "候选集快照",
-  SearchFeedback: "反馈与补搜",
+  SearchFeedback: "人工审核反馈",
   ScreeningDecision: "入选论文",
   PaperCard: "论文精读卡",
-  SynthesisReport: "综合结论",
-  ReviewResult: "证据审查",
+  SynthesisReport: "研究结果",
+  ReviewResult: "内容校对",
   ReviewOutline: "综述提纲",
   SectionDraft: "章节草稿",
   NarrativeReview: "最终综述",
-  FactCheckReport: "事实核查",
   InsufficientEvidence: "停止原因",
 };
 
@@ -126,6 +136,9 @@ function artifactLabel(kind) {
 const state = {
   projects: [],
   projectsLoading: false,
+  projectSelectionMode: false,
+  selectedProjectIds: new Set(),
+  projectBulkDeleting: false,
   projectId: null,
   project: null,
   snapshot: null,
@@ -134,6 +147,7 @@ const state = {
   activeRunId: null,
   review: null,
   candidates: [],
+  manualCandidates: new Map(),
   selectedIds: new Set(),
   busy: false,
   agentAvailable: false,
@@ -142,6 +156,8 @@ const state = {
   sidebarPreference: null,
   inspectorOpen: false,
   inspectorPreviousFocus: null,
+  usageGuideOpen: false,
+  usageGuidePreviousFocus: null,
   libraryPapers: [],
   libraryOverview: { counts: {}, collections: [] },
   projectLibrary: new Map(),
@@ -150,6 +166,14 @@ const state = {
   libraryView: "all",
   libraryCollectionId: null,
   libraryAssistantScope: "all",
+  paperWorkspace: null,
+  paperPdf: null,
+  paperPdfLoadingTask: null,
+  paperPdfJs: null,
+  paperZoom: 1,
+  paperSelection: null,
+  paperLastAnswer: null,
+  paperRenderSession: 0,
   runStartedAt: null,
   runClockTimer: null,
   runPollTimer: null,
@@ -160,6 +184,7 @@ const state = {
   runLastActivity: "",
   runPhase: "thinking",
   runSessionId: 0,
+  projectLoadSession: 0,
   openConversationMenuId: null,
 };
 
@@ -168,14 +193,47 @@ const byId = (id) => document.getElementById(id);
 const elements = {
   appShell: byId("appShell"),
   sidebarToggle: byId("sidebarToggle"),
+  brandHome: byId("brandHome"),
+  homeToggle: byId("homeToggle"),
   healthBadge: byId("healthBadge"),
   toolsMenuToggle: byId("toolsMenuToggle"),
   toolsMenu: byId("toolsMenu"),
+  usageGuideOpen: byId("usageGuideOpen"),
   newProjectToggle: byId("newProjectToggle"),
   libraryToggle: byId("libraryToggle"),
   newProjectForm: byId("newProjectForm"),
   createView: byId("createView"),
   libraryView: byId("libraryView"),
+  paperWorkspaceView: byId("paperWorkspaceView"),
+  paperWorkspaceBack: byId("paperWorkspaceBack"),
+  paperWorkspaceTitle: byId("paperWorkspaceTitle"),
+  paperWorkspaceMeta: byId("paperWorkspaceMeta"),
+  generateReadingCard: byId("generateReadingCard"),
+  exportReadingReport: byId("exportReadingReport"),
+  paperPageStatus: byId("paperPageStatus"),
+  paperZoomOut: byId("paperZoomOut"),
+  paperZoomIn: byId("paperZoomIn"),
+  paperZoomLabel: byId("paperZoomLabel"),
+  paperSelectionBar: byId("paperSelectionBar"),
+  paperSelectionPage: byId("paperSelectionPage"),
+  paperSelectionPreview: byId("paperSelectionPreview"),
+  highlightSelection: byId("highlightSelection"),
+  noteSelection: byId("noteSelection"),
+  askSelection: byId("askSelection"),
+  paperPdfPages: byId("paperPdfPages"),
+  paperAskContext: byId("paperAskContext"),
+  paperQuestionForm: byId("paperQuestionForm"),
+  paperQuestionInput: byId("paperQuestionInput"),
+  clearPaperSelection: byId("clearPaperSelection"),
+  paperAnswer: byId("paperAnswer"),
+  paperAskPanel: byId("paperAskPanel"),
+  paperAnnotationsPanel: byId("paperAnnotationsPanel"),
+  paperCardPanel: byId("paperCardPanel"),
+  paperNoteForm: byId("paperNoteForm"),
+  paperNoteInput: byId("paperNoteInput"),
+  cancelPaperNote: byId("cancelPaperNote"),
+  paperAnnotationsList: byId("paperAnnotationsList"),
+  paperReadingCard: byId("paperReadingCard"),
   librarySearch: byId("librarySearch"),
   refreshLibrary: byId("refreshLibrary"),
   askLibrary: byId("askLibrary"),
@@ -207,9 +265,16 @@ const elements = {
   cancelNewProject: byId("cancelNewProject"),
   cancelNewProjectSecondary: byId("cancelNewProjectSecondary"),
   emptyNewProject: byId("emptyNewProject"),
-  recentProjects: byId("recentProjects"),
-  recentProjectList: byId("recentProjectList"),
+  emptyReadPaper: byId("emptyReadPaper"),
+  emptyOpenLibrary: byId("emptyOpenLibrary"),
   projectList: byId("projectList"),
+  projectSearch: byId("projectSearch"),
+  toggleProjectSelection: byId("toggleProjectSelection"),
+  projectBulkBar: byId("projectBulkBar"),
+  projectSelectedCount: byId("projectSelectedCount"),
+  selectAllProjects: byId("selectAllProjects"),
+  cancelProjectSelection: byId("cancelProjectSelection"),
+  deleteSelectedProjects: byId("deleteSelectedProjects"),
   refreshProjects: byId("refreshProjects"),
   projectLookupForm: byId("projectLookupForm"),
   projectIdInput: byId("projectIdInput"),
@@ -239,6 +304,7 @@ const elements = {
   resultHighlights: byId("resultHighlights"),
   primaryOutcome: byId("primaryOutcome"),
   runPanel: byId("runPanel"),
+  currentTask: byId("currentTask"),
   runVisualizer: byId("runVisualizer"),
   runPhaseIcon: byId("runPhaseIcon"),
   runPhaseTitle: byId("runPhaseTitle"),
@@ -248,19 +314,22 @@ const elements = {
   reviewPanel: byId("reviewPanel"),
   candidateCount: byId("candidateCount"),
   selectedCount: byId("selectedCount"),
-  roundCount: byId("roundCount"),
   reviewConstraints: byId("reviewConstraints"),
+  reviewQueryRounds: byId("reviewQueryRounds"),
+  reviewNotice: byId("reviewNotice"),
   candidateFilter: byId("candidateFilter"),
   candidateGrid: byId("candidateGrid"),
+  filteredCandidatesPanel: byId("filteredCandidatesPanel"),
+  filteredCandidateCount: byId("filteredCandidateCount"),
+  filteredCandidateGrid: byId("filteredCandidateGrid"),
   selectAll: byId("selectAll"),
   clearAll: byId("clearAll"),
   minPapers: byId("minPapers"),
   maxPapers: byId("maxPapers"),
-  maxSearchRounds: byId("maxSearchRounds"),
-  querySuggestions: byId("querySuggestions"),
   manualDois: byId("manualDois"),
   feedbackComment: byId("feedbackComment"),
   refineReview: byId("refineReview"),
+  undoReview: byId("undoReview"),
   acceptReview: byId("acceptReview"),
   stopReview: byId("stopReview"),
   continuePanel: byId("continuePanel"),
@@ -269,6 +338,7 @@ const elements = {
   continueText: byId("continueText"),
   continueButtonLabel: byId("continueButtonLabel"),
   continueResearch: byId("continueResearch"),
+  undoDecision: byId("undoDecision"),
   projectInspector: byId("projectInspector"),
   inspectorBackdrop: byId("inspectorBackdrop"),
   closeInspector: byId("closeInspector"),
@@ -280,10 +350,15 @@ const elements = {
   artifactSummary: byId("artifactSummary"),
   eventTimeline: byId("eventTimeline"),
   artifactList: byId("artifactList"),
+  usageGuide: byId("usageGuide"),
+  usageGuideBackdrop: byId("usageGuideBackdrop"),
+  usageGuideClose: byId("usageGuideClose"),
+  usageGuideDismiss: byId("usageGuideDismiss"),
   toast: byId("toast"),
 };
 
 const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
+const USAGE_GUIDE_STORAGE_KEY = "research-agent.usage-guide-dismissed.v1";
 
 function iconNode(name) {
   const icon = document.createElement("i");
@@ -300,8 +375,18 @@ function showWorkspace(view) {
   elements.emptyState.hidden = view !== "empty";
   elements.createView.hidden = view !== "create";
   elements.libraryView.hidden = view !== "library";
+  elements.paperWorkspaceView.hidden = view !== "paper";
   elements.projectView.hidden = view !== "project";
-  elements.libraryToggle.classList.toggle("is-active", view === "library");
+  const navigationStates = [
+    [elements.homeToggle, view === "empty"],
+    [elements.newProjectToggle, view === "create"],
+    [elements.libraryToggle, ["library", "paper"].includes(view)],
+  ];
+  navigationStates.forEach(([button, active]) => {
+    button.classList.toggle("is-active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
 }
 
 function setPopover(toggle, popover, open) {
@@ -327,6 +412,48 @@ function closeConversationMenus(except = null) {
   state.openConversationMenuId = except
     ? except.closest(".project-list-entry")?.dataset.conversationId || null
     : null;
+}
+
+function openUsageGuide() {
+  if (state.usageGuideOpen) return;
+  const previousFocus = document.activeElement === elements.usageGuideOpen
+    ? elements.toolsMenuToggle
+    : document.activeElement;
+  closeMenus();
+  if (state.inspectorOpen) closeInspector({ restoreFocus: false });
+  state.usageGuidePreviousFocus = previousFocus;
+  state.usageGuideOpen = true;
+  elements.usageGuide.hidden = false;
+  elements.usageGuideBackdrop.hidden = false;
+  window.setTimeout(() => elements.usageGuideDismiss.focus(), 0);
+}
+
+function closeUsageGuide({ remember = true, restoreFocus = true } = {}) {
+  if (!state.usageGuideOpen) return;
+  state.usageGuideOpen = false;
+  elements.usageGuide.hidden = true;
+  elements.usageGuideBackdrop.hidden = true;
+  if (remember) {
+    try {
+      window.localStorage.setItem(USAGE_GUIDE_STORAGE_KEY, "true");
+    } catch {
+      // The guide can still be closed when browser storage is unavailable.
+    }
+  }
+  if (restoreFocus && state.usageGuidePreviousFocus instanceof HTMLElement) {
+    state.usageGuidePreviousFocus.focus();
+  }
+  state.usageGuidePreviousFocus = null;
+}
+
+function maybeOpenUsageGuide() {
+  let dismissed = false;
+  try {
+    dismissed = window.localStorage.getItem(USAGE_GUIDE_STORAGE_KEY) === "true";
+  } catch {
+    // Show the guide when the browser does not expose persistent storage.
+  }
+  if (!dismissed) window.setTimeout(openUsageGuide, 0);
 }
 
 function readSidebarPreference() {
@@ -500,11 +627,18 @@ function notify(message, isError = false) {
 function setBusy(busy) {
   state.busy = busy;
   elements.runPanel.setAttribute("aria-busy", String(busy));
-  elements.stageStepper.classList.toggle("is-running", busy);
+  if (state.project) {
+    renderStageBadge(state.project);
+    renderStepper(state.project.stage, state.snapshot?.events || []);
+  } else {
+    elements.stageStepper.classList.toggle("is-running", busy);
+  }
   [
     elements.refineReview,
+    elements.undoReview,
     elements.acceptReview,
     elements.stopReview,
+    elements.undoDecision,
     elements.reloadProject,
     elements.deleteProject,
   ].forEach((button) => {
@@ -809,6 +943,25 @@ function renderLibraryDetail(detail) {
     starred: !paper.starred,
   }));
   controls.append(star);
+  if (!paper.archived_at) {
+    const indexedPdf = (detail.attachments || []).some((attachment) => (
+      String(attachment.url || "").startsWith("/api/library/attachments/")
+      && attachment.full_text_status === "indexed"
+    ));
+    const onlineWorkspace = document.createElement("button");
+    onlineWorkspace.type = "button";
+    onlineWorkspace.className = indexedPdf ? "secondary" : "primary";
+    onlineWorkspace.append(iconNode(indexedPdf ? "book-open-text" : "cloud-download"));
+    onlineWorkspace.append(document.createTextNode(
+      indexedPdf ? "打开论文研读工作台" : "在线获取并打开全文",
+    ));
+    onlineWorkspace.addEventListener("click", () => openPaperWorkspace(
+      paper.library_id,
+      null,
+      !indexedPdf,
+    ));
+    controls.append(onlineWorkspace);
+  }
 
   const metadata = document.createElement("details");
   metadata.className = "library-detail-section library-metadata-editor";
@@ -1114,6 +1267,20 @@ function renderLibraryDetail(detail) {
     const rowActions = document.createElement("div");
     rowActions.className = "library-attachment-row-actions";
     const isUploaded = String(attachment.url || "").startsWith("/api/library/attachments/");
+    const isPdf = String(attachment.media_type || "").toLowerCase() === "application/pdf"
+      || String(attachment.name || "").toLowerCase().endsWith(".pdf");
+    if (isUploaded && isPdf) {
+      const openWorkspace = document.createElement("button");
+      openWorkspace.type = "button";
+      openWorkspace.className = "primary compact-button";
+      openWorkspace.append(iconNode("book-open-text"));
+      openWorkspace.append(document.createTextNode("打开论文研读工作台"));
+      openWorkspace.addEventListener("click", () => openPaperWorkspace(
+        paper.library_id,
+        attachment.attachment_id,
+      ));
+      rowActions.append(openWorkspace);
+    }
     if (isUploaded && ["uploaded", "failed", "ready"].includes(attachment.full_text_status)) {
       const ingest = document.createElement("button");
       ingest.type = "button";
@@ -1265,6 +1432,516 @@ function renderLibraryDetail(detail) {
     actions,
   );
   refreshIcons();
+}
+
+function setPaperTab(tab) {
+  document.querySelectorAll("[data-paper-tab]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.paperTab === tab);
+  });
+  elements.paperAskPanel.hidden = tab !== "ask";
+  elements.paperAnnotationsPanel.hidden = tab !== "annotations";
+  elements.paperCardPanel.hidden = tab !== "card";
+}
+
+function clearPaperSelection() {
+  state.paperSelection = null;
+  elements.paperSelectionBar.hidden = true;
+  elements.clearPaperSelection.hidden = true;
+  elements.paperAskContext.querySelector("strong").textContent = "论文全文";
+  elements.paperAskContext.querySelector("p").textContent = "回答将基于当前论文，并给出可点击的引用页码。";
+  window.getSelection()?.removeAllRanges();
+}
+
+function setPaperSelection(selection) {
+  state.paperSelection = selection;
+  elements.paperSelectionPage.textContent = String(selection.page);
+  elements.paperSelectionPreview.textContent = selection.text;
+  elements.paperSelectionBar.hidden = false;
+}
+
+function capturePaperSelection() {
+  const selection = window.getSelection();
+  const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
+  if (!text || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  const start = range.startContainer.parentElement?.closest(".pdf-page");
+  const end = range.endContainer.parentElement?.closest(".pdf-page");
+  if (!start || start !== end) {
+    if (start || end) notify("第一版暂支持在同一页内选择文本", true);
+    return;
+  }
+  const pageRect = start.getBoundingClientRect();
+  const rects = [...range.getClientRects()]
+    .filter((rect) => rect.width > 1 && rect.height > 1)
+    .map((rect) => ({
+      x: Math.max(0, (rect.left - pageRect.left) / pageRect.width),
+      y: Math.max(0, (rect.top - pageRect.top) / pageRect.height),
+      width: Math.min(1, rect.width / pageRect.width),
+      height: Math.min(1, rect.height / pageRect.height),
+    }));
+  if (!rects.length) return;
+  const pageText = start.querySelector(".pdf-text-layer")?.textContent || "";
+  const textIndex = pageText.indexOf(text);
+  setPaperSelection({
+    page: Number(start.dataset.page),
+    text: text.slice(0, 12000),
+    prefix: textIndex >= 0 ? pageText.slice(Math.max(0, textIndex - 180), textIndex) : "",
+    suffix: textIndex >= 0 ? pageText.slice(textIndex + text.length, textIndex + text.length + 180) : "",
+    rects,
+  });
+}
+
+function renderPaperReadingCard() {
+  const analyses = (state.paperWorkspace?.analyses || [])
+    .filter((item) => item.kind === "PaperCard");
+  elements.paperReadingCard.replaceChildren();
+  if (!analyses.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "尚未生成精读卡。点击页面顶部的“生成精读卡”开始分析。";
+    elements.paperReadingCard.append(empty);
+    return;
+  }
+  const card = analyses[0].payload || {};
+  const level = document.createElement("span");
+  level.className = "library-analysis-mode";
+  level.textContent = card.evidence_level === "abstract" ? "摘要级精读卡" : "全文级精读卡";
+  const summaryTitle = document.createElement("h3");
+  summaryTitle.textContent = "研究摘要";
+  const summary = document.createElement("p");
+  summary.textContent = card.summary || "尚未提取摘要";
+  elements.paperReadingCard.append(level, summaryTitle, summary);
+  [["方法", card.methods], ["数据集", card.datasets], ["局限", card.limitations], ["关键词", card.keywords]]
+    .forEach(([label, values]) => {
+      const heading = document.createElement("h4");
+      heading.textContent = label;
+      const list = document.createElement("ul");
+      (values || []).forEach((value) => {
+        const item = document.createElement("li");
+        item.textContent = value;
+        list.append(item);
+      });
+      if (!list.children.length) {
+        const item = document.createElement("li");
+        item.textContent = "尚未提取";
+        list.append(item);
+      }
+      elements.paperReadingCard.append(heading, list);
+    });
+  const findingsTitle = document.createElement("h4");
+  findingsTitle.textContent = "主要发现";
+  elements.paperReadingCard.append(findingsTitle);
+  (card.findings || []).forEach((finding) => {
+    const article = document.createElement("article");
+    article.className = "paper-card-finding";
+    const claim = document.createElement("strong");
+    claim.textContent = finding.claim || "研究发现";
+    const quote = document.createElement("blockquote");
+    quote.textContent = finding.quote || "";
+    article.append(claim, quote);
+    if (finding.page) {
+      const page = document.createElement("button");
+      page.type = "button";
+      page.className = "paper-page-link";
+      page.textContent = `第 ${finding.page} 页`;
+      page.addEventListener("click", () => scrollToPaperPage(finding.page));
+      article.append(page);
+    } else if (finding.source_scope === "abstract") {
+      const source = document.createElement("span");
+      source.className = "library-analysis-mode";
+      source.textContent = "来源：论文摘要";
+      article.append(source);
+    }
+    elements.paperReadingCard.append(article);
+  });
+  refreshIcons();
+}
+
+function renderPaperAnnotations() {
+  const annotations = state.paperWorkspace?.annotations || [];
+  elements.paperAnnotationsList.replaceChildren();
+  if (!annotations.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "选择 PDF 文本后，可以添加高亮、普通批注，或把问答保存到这里。";
+    elements.paperAnnotationsList.append(empty);
+  }
+  annotations.forEach((annotation) => {
+    const item = document.createElement("article");
+    item.className = `paper-annotation paper-annotation-${annotation.kind}`;
+    const header = document.createElement("header");
+    const kind = document.createElement("strong");
+    kind.textContent = { highlight: "高亮", note: "批注", qa: "问答" }[annotation.kind] || "批注";
+    const actions = document.createElement("div");
+    if (annotation.page) {
+      const page = document.createElement("button");
+      page.type = "button";
+      page.className = "paper-page-link";
+      page.textContent = `第 ${annotation.page} 页`;
+      page.addEventListener("click", () => scrollToPaperPage(annotation.page));
+      actions.append(page);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button";
+    remove.setAttribute("aria-label", "删除批注");
+    remove.append(iconNode("trash-2"));
+    remove.addEventListener("click", () => deletePaperAnnotation(annotation.annotation_id));
+    actions.append(remove);
+    header.append(kind, actions);
+    item.append(header);
+    if (annotation.selected_text) {
+      const quote = document.createElement("blockquote");
+      quote.textContent = annotation.selected_text;
+      item.append(quote);
+    }
+    if (annotation.content) {
+      const content = document.createElement("p");
+      content.textContent = annotation.content;
+      item.append(content);
+    }
+    if (annotation.question) {
+      const question = document.createElement("p");
+      question.className = "paper-annotation-question";
+      question.textContent = `问：${annotation.question}`;
+      item.append(question);
+    }
+    if (annotation.answer) {
+      const answer = document.createElement("p");
+      answer.className = "paper-annotation-answer";
+      answer.textContent = annotation.answer;
+      item.append(answer);
+    }
+    elements.paperAnnotationsList.append(item);
+  });
+  drawPaperHighlights();
+  refreshIcons();
+}
+
+function drawPaperHighlights() {
+  elements.paperPdfPages.querySelectorAll(".paper-highlight-overlay").forEach((node) => node.remove());
+  (state.paperWorkspace?.annotations || []).forEach((annotation) => {
+    if (!annotation.page || !(annotation.rects || []).length) return;
+    const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${annotation.page}"]`);
+    if (!page) return;
+    annotation.rects.forEach((rect) => {
+      const mark = document.createElement("button");
+      mark.type = "button";
+      mark.className = `paper-highlight-overlay paper-highlight-${annotation.kind}`;
+      mark.style.left = `${rect.x * 100}%`;
+      mark.style.top = `${rect.y * 100}%`;
+      mark.style.width = `${rect.width * 100}%`;
+      mark.style.height = `${rect.height * 100}%`;
+      mark.title = annotation.content || annotation.question || annotation.selected_text || "论文批注";
+      mark.addEventListener("click", () => {
+        setPaperTab("annotations");
+        elements.paperAnnotationsList.querySelectorAll(".paper-annotation").forEach((item) => item.classList.remove("is-target"));
+        const index = (state.paperWorkspace.annotations || []).findIndex((item) => item.annotation_id === annotation.annotation_id);
+        const target = elements.paperAnnotationsList.children[index];
+        target?.classList.add("is-target");
+        target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      page.append(mark);
+    });
+  });
+}
+
+async function savePaperAnnotation(kind, extra = {}) {
+  const workspace = state.paperWorkspace;
+  if (!workspace) return null;
+  const selection = state.paperSelection || {};
+  const payload = await api(`/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/annotations`, {
+    method: "POST",
+    body: JSON.stringify({
+      kind,
+      attachment_id: workspace.workspace_attachment?.attachment_id || null,
+      page: selection.page || null,
+      selected_text: selection.text || "",
+      prefix: selection.prefix || "",
+      suffix: selection.suffix || "",
+      rects: selection.rects || [],
+      color: "yellow",
+      content: "",
+      question: "",
+      answer: "",
+      citations: [],
+      ...extra,
+    }),
+  });
+  workspace.annotations = [...(workspace.annotations || []), payload.data];
+  renderPaperAnnotations();
+  return payload.data;
+}
+
+async function deletePaperAnnotation(annotationId) {
+  if (!window.confirm("删除这条批注？")) return;
+  await api(`/api/library/annotations/${encodeURIComponent(annotationId)}`, { method: "DELETE" });
+  state.paperWorkspace.annotations = (state.paperWorkspace.annotations || [])
+    .filter((item) => item.annotation_id !== annotationId);
+  renderPaperAnnotations();
+  notify("批注已删除");
+}
+
+function scrollToPaperPage(pageNumber) {
+  const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${pageNumber}"]`);
+  if (!page) return;
+  page.scrollIntoView({ behavior: "smooth", block: "start" });
+  page.classList.add("is-cited");
+  window.setTimeout(() => page.classList.remove("is-cited"), 1600);
+}
+
+function renderPaperAnswer(answer) {
+  elements.paperAnswer.replaceChildren();
+  elements.paperAnswer.hidden = false;
+  const heading = document.createElement("h3");
+  heading.textContent = answer.scope === "selection" ? "选文回答" : "全文回答";
+  const mode = document.createElement("p");
+  mode.className = "muted";
+  mode.textContent = answer.mode === "agent" && answer.context_scope === "full_text"
+    ? `LLM 全文分析 · 已发送 ${answer.pages_sent || 0} 页`
+    : "本地证据检索（LLM 全文分析当前不可用）";
+  const text = document.createElement("p");
+  text.className = "paper-answer-text";
+  text.textContent = answer.answer || "未获得可追溯回答。";
+  elements.paperAnswer.append(heading, mode, text);
+  if ((answer.citations || []).length) {
+    const citations = document.createElement("ol");
+    citations.className = "paper-citations";
+    answer.citations.forEach((citation) => {
+      const item = document.createElement("li");
+      const title = document.createElement("strong");
+      title.textContent = `${citation.citation || ""} ${citation.title || "论文证据"}`.trim();
+      const quote = document.createElement("blockquote");
+      quote.textContent = citation.quote || "";
+      item.append(title, quote);
+      if (citation.page) {
+        const page = document.createElement("button");
+        page.type = "button";
+        page.className = "paper-page-link";
+        page.textContent = `跳转第 ${citation.page} 页`;
+        page.addEventListener("click", () => scrollToPaperPage(citation.page));
+        item.append(page);
+      }
+      citations.append(item);
+    });
+    elements.paperAnswer.append(citations);
+  }
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "secondary paper-save-answer";
+  save.append(iconNode("message-square-plus"), document.createTextNode("将问答保存为批注"));
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      await savePaperAnnotation("qa", {
+        page: answer.selection?.page || null,
+        selected_text: answer.selection?.text || "",
+        prefix: answer.selection?.prefix || "",
+        suffix: answer.selection?.suffix || "",
+        rects: answer.selection_rects || [],
+        question: answer.question,
+        answer: answer.answer,
+        citations: answer.citations || [],
+      });
+      save.textContent = "已保存为批注";
+      notify("问答已加入论文批注");
+    } catch (error) {
+      save.disabled = false;
+      notify(`保存失败：${error.message}`, true);
+    }
+  });
+  elements.paperAnswer.append(save);
+  refreshIcons();
+}
+
+async function renderPdfPage(pageNumber, sessionId) {
+  const page = await state.paperPdf.getPage(pageNumber);
+  if (sessionId !== state.paperRenderSession) return;
+  const viewport = page.getViewport({ scale: 1.25 * state.paperZoom });
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const wrapper = document.createElement("article");
+  wrapper.className = "pdf-page";
+  wrapper.dataset.page = String(pageNumber);
+  wrapper.style.width = `${viewport.width}px`;
+  wrapper.style.height = `${viewport.height}px`;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width * pixelRatio);
+  canvas.height = Math.floor(viewport.height * pixelRatio);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  const context = canvas.getContext("2d", { alpha: false });
+  const textLayer = document.createElement("div");
+  textLayer.className = "pdf-text-layer";
+  const pageLabel = document.createElement("span");
+  pageLabel.className = "pdf-page-number";
+  pageLabel.textContent = String(pageNumber);
+  wrapper.append(canvas, textLayer, pageLabel);
+  elements.paperPdfPages.append(wrapper);
+  await page.render({
+    canvasContext: context,
+    viewport,
+    transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+  }).promise;
+  const textContent = await page.getTextContent();
+  const styles = textContent.styles || {};
+  textContent.items.forEach((item) => {
+    if (!item.str) return;
+    const transform = state.paperPdfJs.Util.transform(viewport.transform, item.transform);
+    const angle = Math.atan2(transform[1], transform[0]);
+    const fontHeight = Math.hypot(transform[2], transform[3]);
+    const fontStyle = styles[item.fontName] || {};
+    const ascent = fontStyle.ascent ?? (fontStyle.descent ? 1 + fontStyle.descent : 0.8);
+    const span = document.createElement("span");
+    span.textContent = item.str;
+    span.style.left = `${transform[4]}px`;
+    span.style.top = `${transform[5] - fontHeight * ascent}px`;
+    span.style.fontSize = `${fontHeight}px`;
+    span.style.fontFamily = fontStyle.fontFamily || "sans-serif";
+    span.style.transform = angle ? `rotate(${angle}rad)` : "none";
+    textLayer.append(span);
+    const measured = span.getBoundingClientRect().width;
+    const expected = Math.abs(item.width * viewport.scale);
+    if (measured > 0 && expected > 0) {
+      const rotation = angle ? `rotate(${angle}rad) ` : "";
+      span.style.transform = `${rotation}scaleX(${expected / measured})`;
+    }
+  });
+}
+
+async function renderPaperPdf() {
+  if (!state.paperPdf) return;
+  const sessionId = ++state.paperRenderSession;
+  elements.paperPdfPages.replaceChildren();
+  elements.paperZoomLabel.textContent = `${Math.round(state.paperZoom * 100)}%`;
+  const pageCount = state.paperPdf.numPages;
+  for (let page = 1; page <= pageCount; page += 1) {
+    if (sessionId !== state.paperRenderSession) return;
+    elements.paperPageStatus.textContent = `正在渲染第 ${page} / ${pageCount} 页`;
+    await renderPdfPage(page, sessionId);
+  }
+  if (sessionId !== state.paperRenderSession) return;
+  elements.paperPageStatus.textContent = `全文共 ${pageCount} 页 · 可选择文本提问或批注`;
+  drawPaperHighlights();
+}
+
+async function loadPaperPdf(attachment) {
+  elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在通过 PDF.js 加载全文…</p></div>';
+  try {
+    if (!state.paperPdfJs) {
+      state.paperPdfJs = await import("/ui-assets/vendor/pdfjs/pdf.mjs?v=6.1.200");
+      state.paperPdfJs.GlobalWorkerOptions.workerSrc = "/ui-assets/vendor/pdfjs/pdf.worker.mjs?v=6.1.200";
+    }
+    if (state.paperPdfLoadingTask) {
+      await state.paperPdfLoadingTask.destroy();
+      state.paperPdfLoadingTask = null;
+    } else if (state.paperPdf?.cleanup) {
+      await state.paperPdf.cleanup();
+    }
+    state.paperPdf = null;
+    const loadingTask = state.paperPdfJs.getDocument({
+      url: attachment.url,
+      cMapUrl: "/ui-assets/vendor/pdfjs/cmaps/",
+      cMapPacked: true,
+      wasmUrl: "/ui-assets/vendor/pdfjs/wasm/",
+      standardFontDataUrl: "/ui-assets/vendor/pdfjs/standard_fonts/",
+    });
+    state.paperPdfLoadingTask = loadingTask;
+    const documentProxy = await loadingTask.promise;
+    if (state.paperPdfLoadingTask !== loadingTask) {
+      await loadingTask.destroy();
+      return;
+    }
+    state.paperPdf = documentProxy;
+    await renderPaperPdf();
+  } catch (error) {
+    elements.paperPageStatus.textContent = "PDF 加载失败";
+    elements.paperPdfPages.replaceChildren();
+    const message = document.createElement("div");
+    message.className = "paper-pdf-placeholder is-error";
+    message.textContent = `无法加载 PDF：${error.message}`;
+    elements.paperPdfPages.append(message);
+  }
+}
+
+async function openPaperWorkspace(libraryId, attachmentId = null, forceAcquire = false) {
+  showWorkspace("paper");
+  elements.paperWorkspaceTitle.textContent = "正在加载论文…";
+  elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在准备论文全文…</p></div>';
+  clearPaperSelection();
+  elements.paperAnswer.hidden = true;
+  try {
+    const payload = await api(`/api/library/papers/${encodeURIComponent(libraryId)}/workspace`);
+    let workspace = payload.data;
+    if (attachmentId) {
+      workspace.workspace_attachment = (workspace.attachments || [])
+        .find((item) => item.attachment_id === attachmentId) || workspace.workspace_attachment;
+    }
+    const hasInternalPdf = (workspace.attachments || []).some((item) => (
+      String(item.url || "").startsWith("/api/library/attachments/")
+      && (String(item.media_type || "").toLowerCase() === "application/pdf"
+        || String(item.name || "").toLowerCase().endsWith(".pdf"))
+    ));
+    if (!attachmentId && (forceAcquire || !hasInternalPdf)) {
+      elements.paperWorkspaceTitle.textContent = workspace.paper.title;
+      elements.paperPageStatus.textContent = "正在查找可公开获取的论文全文…";
+      const acquisition = await api(
+        `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/acquire-full-text`,
+        { method: "POST" },
+      );
+      const result = acquisition.data || {};
+      if (!["acquired", "existing", "failed"].includes(result.status)) {
+        const attempted = (result.attempted_urls || []).length;
+        const firstError = result.errors?.[0]?.error || "";
+        const reason = firstError.includes("403")
+          ? "来源站点拒绝后端下载（HTTP 403）"
+          : firstError === "response_is_not_pdf"
+            ? "来源地址返回了网页而非 PDF"
+            : firstError;
+        notify(
+          attempted
+            ? `尝试了 ${attempted} 个开放获取地址，均未取得有效 PDF${reason ? `：${reason}` : ""}`
+            : "未发现可公开获取的全文，可继续使用摘要或手动上传 PDF",
+          true,
+        );
+      } else {
+        const refreshed = await api(`/api/library/papers/${encodeURIComponent(libraryId)}/workspace`);
+        workspace = refreshed.data;
+      }
+      if (result.status === "acquired") notify("已在线获取全文并完成索引");
+      if (result.status === "failed") {
+        notify(result.message || result.attachment?.error || "全文已获取，但文本解析失败", true);
+      }
+    }
+    state.paperWorkspace = workspace;
+    const paper = workspace.paper;
+    elements.paperWorkspaceTitle.textContent = paper.title;
+    elements.paperWorkspaceMeta.textContent = [
+      (paper.authors || []).join(", "),
+      paper.year,
+      workspace.workspace_attachment?.name,
+    ].filter(Boolean).join(" · ");
+    elements.exportReadingReport.href = `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/report.md`;
+    renderPaperAnnotations();
+    renderPaperReadingCard();
+    setPaperTab("ask");
+    const attachment = workspace.workspace_attachment;
+    if (!attachment || !String(attachment.url || "").startsWith("/api/library/attachments/")) {
+      elements.paperPageStatus.textContent = "当前未加载 PDF";
+      elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>可直接生成摘要级精读卡，或手动上传 PDF 后升级为全文级精读卡。</p></div>';
+      refreshIcons();
+      return;
+    }
+    await loadPaperPdf(attachment);
+    refreshIcons();
+  } catch (error) {
+    elements.paperWorkspaceTitle.textContent = "论文研读工作台";
+    elements.paperPdfPages.replaceChildren();
+    const message = document.createElement("div");
+    message.className = "paper-pdf-placeholder is-error";
+    message.textContent = error.message;
+    elements.paperPdfPages.append(message);
+    notify(`工作台加载失败：${error.message}`, true);
+  }
 }
 
 async function selectLibraryPaper(libraryId) {
@@ -1542,7 +2219,7 @@ async function askLibraryAssistant(event) {
     elements.libraryAssistantAnswer.replaceChildren();
     const working = document.createElement("p");
     working.className = "library-assistant-working";
-    working.append(iconNode("loader-circle"), document.createTextNode(" Agent 正在拆解问题并迭代取证…"));
+    working.append(iconNode("loader-circle"), document.createTextNode(" 研究助手正在拆解问题并迭代取证…"));
     elements.libraryAssistantAnswer.append(working);
     refreshIcons();
     const payload = await api("/api/library/assistant", {
@@ -1554,7 +2231,7 @@ async function askLibraryAssistant(event) {
     const resultHeader = document.createElement("div");
     resultHeader.className = "library-assistant-result-header";
     const badge = document.createElement("span");
-    badge.textContent = data.mode === "agent" ? "Agent 取证" : "本地检索";
+    badge.textContent = data.mode === "agent" ? "智能取证" : "本地检索";
     const coverage = document.createElement("p");
     coverage.textContent = data.coverage_note || "";
     resultHeader.append(badge, coverage);
@@ -1622,6 +2299,16 @@ async function importLibraryRecords() {
   } catch (error) {
     notify(`导入失败：${error.message}`, true);
   }
+}
+
+function filteredProjects() {
+  const query = elements.projectSearch.value.trim().toLocaleLowerCase();
+  return state.projects.filter((project) => {
+    if (!query) return true;
+    return [projectDisplayTitle(project), project.research_question, project.project_id]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase().includes(query));
+  });
 }
 
 function projectConversation(project) {
@@ -1736,12 +2423,88 @@ function renderRecentProjects() {
     button.addEventListener("click", () => loadProject(project.project_id));
     elements.recentProjectList.append(button);
   });
-  refreshIcons();
+}
+
+function updateProjectBulkControls(projects = filteredProjects()) {
+  const availableIds = new Set(state.projects.map((project) => project.project_id));
+  state.selectedProjectIds = new Set(
+    [...state.selectedProjectIds].filter((projectId) => availableIds.has(projectId)),
+  );
+  const selectedCount = state.selectedProjectIds.size;
+  const allVisibleSelected = projects.length > 0
+    && projects.every((project) => state.selectedProjectIds.has(project.project_id));
+  elements.projectBulkBar.hidden = !state.projectSelectionMode;
+  elements.projectSelectedCount.textContent = `已选 ${selectedCount} 项`;
+  elements.selectAllProjects.textContent = allVisibleSelected ? "取消全选" : "全选";
+  elements.selectAllProjects.disabled = state.projectBulkDeleting || !projects.length;
+  elements.deleteSelectedProjects.disabled = state.projectBulkDeleting || !selectedCount;
+  elements.deleteSelectedProjects.lastChild.textContent = state.projectBulkDeleting ? "删除中…" : "删除";
+  elements.toggleProjectSelection.classList.toggle("is-active", state.projectSelectionMode);
+  elements.toggleProjectSelection.setAttribute("aria-pressed", String(state.projectSelectionMode));
+  const toggleLabel = state.projectSelectionMode ? "退出批量管理" : "批量管理历史研究";
+  elements.toggleProjectSelection.setAttribute("aria-label", toggleLabel);
+  elements.toggleProjectSelection.title = toggleLabel;
+}
+
+function setProjectSelectionMode(enabled) {
+  if (state.projectBulkDeleting) return;
+  state.projectSelectionMode = enabled;
+  if (!enabled) state.selectedProjectIds.clear();
+  renderProjectList();
+}
+
+function toggleVisibleProjectSelection() {
+  const projects = filteredProjects();
+  const allSelected = projects.length > 0
+    && projects.every((project) => state.selectedProjectIds.has(project.project_id));
+  projects.forEach((project) => {
+    if (allSelected) state.selectedProjectIds.delete(project.project_id);
+    else state.selectedProjectIds.add(project.project_id);
+  });
+  renderProjectList();
+}
+
+async function deleteSelectedProjectRecords() {
+  if (state.projectBulkDeleting || !state.selectedProjectIds.size) return;
+  const projectIds = [...state.selectedProjectIds];
+  const confirmed = window.confirm(
+    `确定永久删除选中的 ${projectIds.length} 项研究吗？\n\n相关研究产物和状态记录都会被删除，此操作无法撤销。`,
+  );
+  if (!confirmed) return;
+
+  state.projectBulkDeleting = true;
+  updateProjectBulkControls();
+  const deletedIds = [];
+  const failedIds = [];
+  for (const projectId of projectIds) {
+    try {
+      await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+      deletedIds.push(projectId);
+    } catch {
+      failedIds.push(projectId);
+    }
+  }
+
+  state.projectBulkDeleting = false;
+  state.selectedProjectIds = new Set(failedIds);
+  state.projectSelectionMode = failedIds.length > 0;
+  state.projects = state.projects.filter((project) => !deletedIds.includes(project.project_id));
+  const currentProjectDeleted = deletedIds.includes(state.projectId);
+  if (currentProjectDeleted) clearProjectView();
+  else renderProjectList();
+  await loadProjects();
+
+  if (failedIds.length) {
+    notify(`已删除 ${deletedIds.length} 项，${failedIds.length} 项删除失败，请重试`, true);
+  } else {
+    notify(`已删除 ${deletedIds.length} 项历史研究`);
+  }
 }
 
 function renderProjectList() {
   elements.projectList.replaceChildren();
-  renderRecentProjects();
+  const projects = filteredProjects();
+  updateProjectBulkControls(projects);
   if (!state.projects.length) {
     const empty = document.createElement("p");
     empty.className = "muted small sidebar-label";
@@ -1750,7 +2513,15 @@ function renderProjectList() {
     return;
   }
 
-  state.projects.forEach((project) => {
+  if (!projects.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted small sidebar-label";
+    empty.textContent = "没有找到匹配的研究";
+    elements.projectList.append(empty);
+    return;
+  }
+
+  projects.forEach((project) => {
     const isRunning = ["queued", "running"].includes(project.active_run?.status);
     const isReviewRevision =
       project.stage === "REVIEWED"
@@ -1775,21 +2546,33 @@ function renderProjectList() {
     button.type = "button";
     button.className = "project-list-item";
     button.classList.toggle("is-active", project.project_id === state.projectId);
+    button.classList.toggle("is-selecting", state.projectSelectionMode);
+    button.classList.toggle("is-selected", state.selectedProjectIds.has(project.project_id));
+    if (state.projectSelectionMode) {
+      button.setAttribute(
+        "aria-pressed",
+        String(state.selectedProjectIds.has(project.project_id)),
+      );
+    }
     button.setAttribute("aria-current", project.project_id === state.projectId ? "page" : "false");
     button.setAttribute("aria-label", `${displayTitle}，${displayStage}`);
     button.title = displayTitle;
 
     const icon = document.createElement("span");
     icon.className = "project-list-icon";
-    icon.append(
-      iconNode(
-        isRunning
-          ? "loader-circle"
-          : project.project_id === state.projectId
-            ? "folder-open"
-            : "folder",
-      ),
-    );
+    if (state.projectSelectionMode) {
+      icon.classList.add("project-selection-box");
+    } else {
+      icon.append(
+        iconNode(
+          isRunning
+            ? "loader-circle"
+            : project.project_id === state.projectId
+              ? "folder-open"
+              : "folder",
+        ),
+      );
+    }
     icon.classList.toggle("is-running", isRunning);
 
     const content = document.createElement("span");
@@ -1822,6 +2605,15 @@ function renderProjectList() {
     button.append(icon, content);
     button.addEventListener("click", () => {
       closeConversationMenus();
+      if (state.projectSelectionMode) {
+        if (state.selectedProjectIds.has(project.project_id)) {
+          state.selectedProjectIds.delete(project.project_id);
+        } else {
+          state.selectedProjectIds.add(project.project_id);
+        }
+        renderProjectList();
+        return;
+      }
       loadProject(project.project_id);
     });
 
@@ -1831,6 +2623,7 @@ function renderProjectList() {
     menuToggle.setAttribute("aria-label", `打开“${displayTitle}”的对话操作`);
     menuToggle.setAttribute("aria-haspopup", "menu");
     menuToggle.setAttribute("aria-expanded", "false");
+    menuToggle.hidden = state.projectSelectionMode;
     menuToggle.append(iconNode("ellipsis"));
 
     const menu = document.createElement("div");
@@ -1884,6 +2677,7 @@ async function loadProjects() {
 }
 
 function clearProjectView() {
+  state.projectLoadSession += 1;
   stopRunTimers();
   state.projectId = null;
   state.project = null;
@@ -1928,6 +2722,10 @@ async function deleteCurrentProject() {
 
 function stageIndex(stage) {
   return STAGES.findIndex(([key]) => key === stage);
+}
+
+function progressStageIndex(stage) {
+  return PROGRESS_STAGES.findIndex((group) => group.stages.includes(stage));
 }
 
 function orderedWorkflowEvents(events = []) {
@@ -1987,11 +2785,19 @@ function deriveStepperState(stage, events = [], actualStage = stage) {
 function renderStepper(stage, events = [], actualStage = stage) {
   elements.stageStepper.replaceChildren();
   const progress = deriveStepperState(stage, events, actualStage);
-  const current = stageIndex(progress.activeStage);
+  const displayStage = (
+    state.busy
+    && progress.activeStage === "CREATED"
+    && ["thinking", "searching"].includes(state.runPhase)
+  ) ? "SEARCHED" : progress.activeStage;
+  const current = progressStageIndex(displayStage);
   const visited = new Set(progress.visitedStages);
   const visitCounts = new Map();
   orderedWorkflowEvents(events).forEach((event) => {
-    visitCounts.set(event.to_stage, (visitCounts.get(event.to_stage) || 0) + 1);
+    const groupIndex = progressStageIndex(event.to_stage);
+    if (groupIndex < 0) return;
+    const groupKey = PROGRESS_STAGES[groupIndex].key;
+    visitCounts.set(groupKey, (visitCounts.get(groupKey) || 0) + 1);
   });
   elements.stageStepper.classList.toggle("is-running", state.busy);
   elements.stageStepper.classList.toggle("is-syncing", !progress.aligned);
@@ -1999,33 +2805,47 @@ function renderStepper(stage, events = [], actualStage = stage) {
     "aria-label",
     progress.aligned ? "研究进度" : "研究进度正在与事件记录同步",
   );
-  STAGES.forEach(([key, label], index) => {
+  PROGRESS_STAGES.forEach((group, index) => {
     const item = document.createElement("li");
     item.className = "stage-step";
-    item.dataset.stage = key;
-    if (
-      index > 0
-      && visited.has(key)
-      && visited.has(STAGES[index - 1][0])
-    ) {
+    item.dataset.stage = group.key;
+    const groupVisited = group.stages.some((internalStage) => visited.has(internalStage));
+    if (index > 0 && index <= current) {
       item.classList.add("has-complete-connector");
     }
-    if (visited.has(key) && index !== current) {
-      item.classList.add(current >= 0 && index > current ? "is-revisited" : "is-complete");
+    if (index < current) {
+      item.classList.add("is-complete");
+    } else if (groupVisited && index !== current) {
+      item.classList.add("is-revisited");
     }
     if (index === current) {
       item.classList.add("is-current");
       item.setAttribute("aria-current", "step");
       if (progress.terminal) item.classList.add("is-terminal");
     }
-    const visits = visitCounts.get(key) || (key === "CREATED" ? 1 : 0);
-    if (visits > 1) item.title = `${label}，已到达 ${visits} 次`;
+    const visits = visitCounts.get(group.key) || (group.key === "create" ? 1 : 0);
+    if (visits > 1) item.title = `${group.label}，已更新 ${visits} 次`;
     if (index === current && progress.terminal) {
-      item.title = `流程停止于${label}，项目状态为证据不足`;
+      item.title = `流程停止于${group.label}，项目状态为证据不足`;
+    } else if (index === current) {
+      item.title = `当前阶段：${group.label}（${STAGE_LABELS[progress.activeStage] || progress.activeStage}）`;
     }
-    item.textContent = label;
+    item.textContent = group.label;
     elements.stageStepper.append(item);
   });
+}
+
+function renderStageBadge(project) {
+  elements.stageBadge.textContent = state.busy
+    ? "研究进行中"
+    : STAGE_LABELS[project.stage] || project.stage;
+  elements.stageBadge.className = "stage-badge";
+  if (["COMPLETED", "REVIEWED", "NARRATED"].includes(project.stage) && !state.busy) {
+    elements.stageBadge.classList.add("is-done");
+  }
+  if (project.stage === "INCONCLUSIVE") {
+    elements.stageBadge.classList.add("is-terminal");
+  }
 }
 
 function renderProjectHeader(project, events = state.snapshot?.events || []) {
@@ -2273,8 +3093,8 @@ function renderCandidateSetSnapshotHTML(payload) {
     ])
   ]));
   parts.push(h('div',{cls:'aw-row'}, [
-    h('span',{cls:'aw-label'},'检索轮次'),
-    h('span',{},`第 ${payload.search_round||0} / ${payload.max_search_rounds||3} 轮`)
+    h('span',{cls:'aw-label'},'系统自动检索'),
+    h('span',{},`${payload.search_round||0} / ${payload.max_search_rounds||3} 轮`)
   ]));
   const queries = payload.executed_queries || [];
   if (queries.length) {
@@ -2334,7 +3154,7 @@ function renderSearchFeedbackHTML(payload) {
   const queries = payload.suggested_queries || [];
   if (queries.length) {
     parts.push(h('div',{cls:'aw-row'}, [
-      h('span',{cls:'aw-label'},'补充查询'),
+      h('span',{cls:'aw-label'},'用户提交查询'),
       h('ul',{cls:'aw-tags'}, queries.map(q => h('li',{cls:'aw-tag'},q)))
     ]));
   }
@@ -2639,31 +3459,6 @@ function renderNarrativeReviewHTML(payload) {
   return h('div',{cls:'artifact-html narrative-review'}, parts);
 }
 
-function renderFactCheckReportHTML(payload) {
-  const parts = [];
-  const verdict = payload.verdict || '';
-  parts.push(h('div',{cls:'aw-row'}, [
-    h('span',{cls:'aw-label'},'核查结论'),
-    h('span',{cls:`aw-verdict ${verdict==='PASS'?'pass':'revise'}`}, verdict==='PASS' ? '通过' : '需修订'),
-  ]));
-  parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'章节'), h('code',{},payload.section_id||'')]));
-  const issues = payload.issues || [];
-  if (issues.length) {
-    parts.push(h('div',{cls:'aw-row'}, [
-      h('span',{cls:'aw-label'},`问题（${issues.length}）`),
-      h('div',{}, issues.map(iss => h('div',{cls:'aw-fc-issue'}, [
-        h('p',{cls:'aw-fc-claim'}, h('q',{}, iss.claim||'')),
-        h('div',{cls:'aw-fc-meta'}, [
-          h('code',{cls:'aw-ev-ref warn'}, iss.evidence_id||''),
-          h('span',{cls:'aw-pill exc'}, iss.problem||''),
-        ]),
-        iss.correction ? h('p',{cls:'aw-fc-fix'}, `建议: ${iss.correction}`) : null,
-      ])))
-    ]));
-  }
-  return h('div',{cls:'artifact-html'}, parts);
-}
-
 function renderGenericArtifactHTML(payload) {
   return h('div',{cls:'artifact-html'}, [
     h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'内容'), h('pre',{cls:'aw-pre'}, JSON.stringify(payload, null, 2))])
@@ -2683,7 +3478,6 @@ const ARTIFACT_HTML_RENDERERS = {
   ReviewOutline: renderReviewOutlineHTML,
   SectionDraft: renderSectionDraftHTML,
   NarrativeReview: renderNarrativeReviewHTML,
-  FactCheckReport: renderFactCheckReportHTML,
 };
 
 // ── Tiny DOM builder ────────────────────────────────────────────────
@@ -2708,7 +3502,7 @@ function h(tag, attrs, children) {
 }
 
 const USER_STAGE_GUIDANCE = {
-  CREATED: ["准备检索", "Agent 正在准备研究项目，下一步会开始查找相关论文。"],
+  CREATED: ["准备检索", "研究助手正在分析研究问题并生成检索方案。"],
   SEARCHED: ["已找到候选论文", "系统已完成初步检索，正在生成可供你审核的候选集。"],
   SEARCH_REVIEW_PENDING: ["请审核候选论文", "勾选需要精读的论文；你也可以补充检索词或手动加入 DOI。"],
   SCREENED: ["可以开始精读", "候选集已经确认，点击继续研究后将逐篇读取论文并提取证据。"],
@@ -2717,8 +3511,8 @@ const USER_STAGE_GUIDANCE = {
   REVIEW_PENDING: ["等待证据审查", "系统将检查综合结论是否都有证据支撑。"],
   REVIEWED: ["证据审查完成", "请根据审查结论继续写作，或先修订综合结论并重新审查。"],
   OUTLINED: ["大纲已生成", "系统已规划章节结构，下一步逐节撰写正文。"],
-  NARRATED: ["综述已生成", "完整综述已经生成，接下来进行事实核查。"],
-  COMPLETED: ["研究已完成", "最终综述已生成并完成事实核查，可查看下方成果。"],
+  NARRATED: ["综述已生成", "完整综述已经生成，可直接结束当前研究。"],
+  COMPLETED: ["研究已完成", "最终综述已生成，可查看下方成果。"],
   INCONCLUSIVE: ["研究已停止", "系统认为证据不足或流程遇到阻断，请查看原因和建议。"],
 };
 
@@ -2738,16 +3532,6 @@ function countFindings(snapshot) {
   );
 }
 
-function factCheckSummary(snapshot) {
-  const reports = artifactsOf(snapshot, "FactCheckReport");
-  const revise = reports.filter((artifact) => artifact.payload?.verdict === "REVISE");
-  const issues = reports.reduce(
-    (total, artifact) => total + (artifact.payload?.issues || []).length,
-    0,
-  );
-  return { reports: reports.length, revise: revise.length, issues };
-}
-
 function latestReviewPassed(snapshot) {
   return latestArtifact(snapshot, "ReviewResult")?.payload?.verdict === "PASS";
 }
@@ -2762,17 +3546,7 @@ function narrativeCompletion(snapshot) {
   const narrativeArtifact = latestArtifact(snapshot, "NarrativeReview");
   const sections = narrativeArtifact?.payload?.sections || [];
   if (!sections.length) return { complete: false, missing: [], narrative: null };
-  const narrativeId = Number(narrativeArtifact.artifact_id || 0);
-  const checked = new Set(
-    artifactsOf(snapshot, "FactCheckReport")
-      .filter((artifact) => Number(artifact.artifact_id || 0) > narrativeId)
-      .map((artifact) => artifact.payload?.section_id)
-      .filter(Boolean),
-  );
-  const missing = sections
-    .map((section) => section.section_id)
-    .filter((sectionId) => sectionId && !checked.has(sectionId));
-  return { complete: missing.length === 0, missing, narrative: narrativeArtifact.payload };
+  return { complete: true, missing: [], narrative: narrativeArtifact.payload };
 }
 
 function currentSectionDrafts(snapshot) {
@@ -2790,14 +3564,13 @@ function currentSectionDrafts(snapshot) {
 }
 
 function recoverableOperationalFailure(snapshot) {
-  if (snapshot?.project?.stage !== "INCONCLUSIVE" || !latestReviewPassed(snapshot)) {
+  if (snapshot?.project?.stage !== "INCONCLUSIVE") {
     return false;
   }
   const failure = latestArtifact(snapshot, "InsufficientEvidence")?.payload;
   const details = `${failure?.reason || ""}\n${failure?.recommendation || ""}`.toLowerCase();
   return [
     "chief-editor",
-    "fact-checker",
     "narrative-writer",
     "research-outliner",
     "structured_response",
@@ -2823,6 +3596,9 @@ function continuationMode(snapshot) {
   ) {
     return "revision";
   }
+  if (["EXTRACTED", "SYNTHESIZED", "REVIEW_PENDING"].includes(stage)) {
+    return "pipeline";
+  }
   if (["REVIEWED", "OUTLINED", "NARRATED"].includes(stage) && reviewVerdict === "PASS") {
     return "narrative";
   }
@@ -2836,6 +3612,10 @@ function continuationMode(snapshot) {
 function effectiveRecoveryStage(snapshot) {
   if (latestArtifact(snapshot, "NarrativeReview")) return "NARRATED";
   if (latestArtifact(snapshot, "ReviewOutline")) return "OUTLINED";
+  if (latestArtifact(snapshot, "ReviewResult")) return "EXTRACTED";
+  if (latestArtifact(snapshot, "SynthesisReport")) return "REVIEW_PENDING";
+  if (latestArtifact(snapshot, "PaperCard")) return "EXTRACTED";
+  if (latestArtifact(snapshot, "ScreeningDecision")) return "SCREENED";
   return "REVIEWED";
 }
 
@@ -2853,7 +3633,6 @@ function renderOutcome(snapshot) {
   const insufficient = snapshot?.project?.stage === "INCONCLUSIVE"
     ? latestArtifact(snapshot, "InsufficientEvidence")?.payload
     : null;
-  const facts = factCheckSummary(snapshot);
   const needsRecovery = continuationMode(snapshot) === "recovery";
   const operationalRecovery = recoverableOperationalFailure(snapshot);
   const savedDrafts = currentSectionDrafts(snapshot);
@@ -2866,7 +3645,7 @@ function renderOutcome(snapshot) {
     elements.primaryOutcome.append(
       h("div", { cls: "outcome-header" }, [
         h("div", {}, [
-          h("p", { cls: "eyebrow" }, needsRecovery ? "成果待核查" : "最终成果"),
+          h("p", { cls: "eyebrow" }, needsRecovery ? "成果待补全" : "最终成果"),
           h("h3", {}, narrative.title || "文献综述已生成"),
         ]),
         h(
@@ -2879,15 +3658,6 @@ function renderOutcome(snapshot) {
         ? h("p", { cls: "outcome-abstract" }, narrative.abstract)
         : h("p", { cls: "outcome-abstract muted" }, "综述已生成，摘要暂未填写。"),
     );
-    if (facts.issues) {
-      elements.primaryOutcome.append(
-        h(
-          "p",
-          { cls: "quality-note" },
-          `事实核查发现 ${facts.issues} 条可改进点，主要用于修订引用粒度和措辞。`,
-        ),
-      );
-    }
     elements.primaryOutcome.append(renderNarrativeReviewHTML(narrative));
     return;
   }
@@ -2913,8 +3683,8 @@ function renderOutcome(snapshot) {
         "p",
         { cls: "outcome-abstract" },
         operationalRecovery
-          ? "检索、筛选、证据提取和章节写作均已保留；本次停止来自主编输出格式故障，不代表证据不足。继续后将直接恢复综述整合与事实核查。"
-          : "检索、论文筛选、证据提取和证据审查均已完成，但旧流程提前结束了项目。可复用现有证据继续生成提纲、正文与事实核查。",
+          ? "检索、筛选、证据提取和章节写作均已保留；本次停止来自主编输出格式故障，不代表证据不足。继续后将直接恢复综述整合。"
+          : "检索、论文筛选和研究结果整理均已完成，但旧流程提前结束了项目。可复用现有研究材料继续生成提纲和正文。",
       ),
     );
     return;
@@ -2993,14 +3763,10 @@ function renderProjectSummary(snapshot) {
     const completion = narrativeCompletion(snapshot);
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDrafts = currentSectionDrafts(snapshot);
-    title = completion.narrative
-      ? "事实核查尚未完成"
-      : operationalRecovery && savedDrafts.length
+    title = operationalRecovery && savedDrafts.length
         ? `${savedDrafts.length} 个章节草稿等待整合`
         : "综述正文尚未生成";
-    text = completion.narrative
-      ? `还需核查 ${completion.missing.length} 个章节，点击下方按钮即可继续。`
-      : operationalRecovery
+    text = operationalRecovery
         ? "主编结构化输出中断，现有论文、证据、提纲和章节草稿均已保留。点击下方按钮从整合阶段继续。"
         : "旧流程提前结束了项目；点击下方按钮可复用现有证据补全最终综述。";
     elements.stageBadge.textContent = operationalRecovery ? "写作待恢复" : "成果待补全";
@@ -3017,13 +3783,28 @@ function renderProjectSummary(snapshot) {
   const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
   const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
-  const facts = factCheckSummary(snapshot);
+  const metricsAvailable = [
+    "EXTRACTED",
+    "SYNTHESIZED",
+    "REVIEW_PENDING",
+    "REVIEWED",
+    "OUTLINED",
+    "NARRATED",
+    "COMPLETED",
+  ].includes(project.stage);
+  const metrics = [
+    ["候选论文", latestCandidateSet?.candidates?.length || latestSearch?.candidates?.length || 0, "当前可审核范围"],
+    ["入选精读", latestScreening?.included_paper_ids?.length || 0, "已确认的论文"],
+    ["证据摘录", countFindings(snapshot), "可追踪的研究证据"],
+    ["综述章节", narrative?.sections?.length || 0, "最终正文"],
+  ].filter(([, value]) => metricsAvailable && value > 0);
   elements.resultHighlights.replaceChildren(
     metricCard("候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"),
     metricCard("入选精读", latestScreening?.included_paper_ids?.length || 0, "你确认的论文"),
     metricCard("证据摘录", countFindings(snapshot), "可追踪 evidence"),
     metricCard("综述章节", narrative?.sections?.length || 0, facts.revise ? `${facts.revise} 章需修订` : "最终正文"),
   );
+  elements.resultHighlights.hidden = metrics.length === 0;
 
   renderOutcome(snapshot);
 }
@@ -3032,7 +3813,7 @@ function renderProjectSummary(snapshot) {
 
 function renderDetails(snapshot) {
   state.snapshot = snapshot;
-  const artifacts = snapshot?.artifacts || [];
+  const artifacts = (snapshot?.artifacts || []).filter((artifact) => artifact.kind !== "FactCheckReport");
   const events = snapshot?.events || [];
   elements.projectDetails.hidden = false;
 
@@ -3152,8 +3933,14 @@ function switchArtifactView(mode) {
 
 function renderStagePanels(snapshot) {
   const mode = continuationMode(snapshot);
+  const canUndoDecision = Boolean(
+    state.review?.can_undo && snapshot?.project?.stage !== "SEARCH_REVIEW_PENDING",
+  );
   elements.reviewPanel.hidden = true;
-  elements.continuePanel.hidden = !mode;
+  const showContinuePanel = Boolean(mode && mode !== "screening");
+  elements.continuePanel.hidden = !showContinuePanel;
+  elements.undoDecision.hidden = !canUndoDecision;
+  elements.continueResearch.hidden = !showContinuePanel;
   if (mode === "screening") {
     elements.continueEyebrow.textContent = "Screening complete";
     elements.continueTitle.textContent = "候选集已经确认";
@@ -3170,18 +3957,23 @@ function renderStagePanels(snapshot) {
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDraftCount = currentSectionDrafts(snapshot).length;
     elements.continueEyebrow.textContent =
-      mode === "recovery" ? "Outcome recovery" : "Resume writing";
+      mode === "recovery" ? "成果恢复" : "继续写作";
     elements.continueTitle.textContent =
       operationalRecovery ? "恢复综述整合" : mode === "recovery" ? "补全最终综述" : "继续综述写作";
     elements.continueText.textContent =
       operationalRecovery
         ? `系统将复用已保存的 ${savedDraftCount} 个章节草稿，从整合阶段继续，不会重新检索或重写章节。`
-        : "系统将复用已保存的论文卡片和证据，从当前写作阶段继续，不会重新检索。";
+        : "系统将复用已保存的论文卡片和研究结果，从当前写作阶段继续，不会重新检索。";
     elements.continueButtonLabel.textContent = "继续生成综述";
+  } else if (canUndoDecision) {
+    const stopped = snapshot?.project?.stage === "INCONCLUSIVE";
+    elements.continueEyebrow.textContent = "可撤销操作";
+    elements.continueTitle.textContent = stopped ? "项目已按审核意见停止" : "候选集已经确认";
+    elements.continueText.textContent = "在后续研究尚未开始前，可以恢复到上一版候选集。";
   }
   if (mode && !state.agentAvailable) {
     elements.continueResearch.disabled = true;
-    elements.continueResearch.title = "Agent 当前不可用，请检查模型配置";
+    elements.continueResearch.title = "研究助手当前不可用，请检查模型配置";
   } else {
     elements.continueResearch.disabled = state.busy;
     elements.continueResearch.title = "";
@@ -3210,8 +4002,16 @@ function snapshotSignature(snapshot) {
 }
 
 function activeSnapshotRun(snapshot) {
+  if (snapshot?.project?.stage === "SEARCH_REVIEW_PENDING") return null;
   const run = snapshot?.active_run;
   return run && ["queued", "running"].includes(run.status) ? run : null;
+}
+
+function displayRunMessage(message, phaseName) {
+  if (!message || message === "任务已排队") {
+    return RUN_PHASES[phaseName]?.detail || "研究任务正在执行。";
+  }
+  return message;
 }
 
 function conversationIdForSnapshot(snapshot = state.snapshot) {
@@ -3249,13 +4049,13 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
       beginRunSession({
         stage: snapshot.project?.stage || "CREATED",
         phase: activeRun.phase || "",
-        message: activeRun.message || "研究正在后台运行",
+        message: displayRunMessage(activeRun.message, activeRun.phase),
         snapshot,
       });
     } else {
       setRunPhase(
         activeRun.phase || STAGE_RUN_PHASES[snapshot.project?.stage] || "thinking",
-        activeRun.message || "",
+        displayRunMessage(activeRun.message, activeRun.phase),
       );
     }
     setBusy(true);
@@ -3269,11 +4069,13 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
     state.activeRunId = null;
     setBusy(false);
   }
+  elements.currentTask.hidden = continuationMode(snapshot) === "screening";
   elements.runPanel.hidden = !keepRunPanel;
 }
 
 async function loadProject(projectId, quiet = false, force = false) {
   if (!projectId) return;
+  const loadSession = ++state.projectLoadSession;
   if (projectId !== state.projectId) {
     stopRunTimers();
     state.runSessionId += 1;
@@ -3284,18 +4086,36 @@ async function loadProject(projectId, quiet = false, force = false) {
   }
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
+    if (loadSession !== state.projectLoadSession) return;
     const snapshot = payload.data;
     await loadProjectLibrary(projectId);
+    if (loadSession !== state.projectLoadSession) return;
     applyProjectSnapshot(snapshot);
-    if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
+    const hasCandidateSnapshot = (snapshot.artifacts || []).some(
+      (artifact) => artifact.kind === "CandidateSetSnapshot",
+    );
+    if (
+      ["SEARCH_REVIEW_PENDING", "SCREENED", "INCONCLUSIVE"].includes(snapshot.project.stage)
+      || (snapshot.project.stage === "SEARCHED" && hasCandidateSnapshot)
+    ) {
       const reviewPayload = await api(
         `/api/projects/${encodeURIComponent(projectId)}/search-review`,
       );
-      renderReview(reviewPayload.data);
+      if (loadSession !== state.projectLoadSession) return;
+      if (
+        snapshot.project.stage === "SEARCH_REVIEW_PENDING"
+        || (snapshot.project.stage === "SEARCHED" && reviewPayload.data.manual_recovery_allowed)
+      ) {
+        renderReview(reviewPayload.data);
+      } else {
+        state.review = reviewPayload.data;
+        renderStagePanels(snapshot);
+      }
     }
     elements.projectIdInput.value = projectId;
     if (!quiet) notify("项目状态已载入");
   } catch (error) {
+    if (loadSession !== state.projectLoadSession) return;
     notify(`无法打开项目：${error.message}`, true);
   }
 }
@@ -3377,22 +4197,31 @@ function renderCandidateCards() {
     const title = document.createElement("h4");
     title.className = "candidate-title";
     title.textContent = candidate.title || "未命名论文";
-    head.append(checkbox, title);
 
     const meta = document.createElement("div");
     meta.className = "candidate-meta";
     const source = document.createElement("span");
     source.className = "candidate-source";
-    source.textContent = candidate.source || "未知来源";
+    source.textContent = candidate.source === "library"
+      ? "文献库"
+      : candidate.source || "未知来源";
     const year = document.createElement("span");
-    year.textContent = candidate.year || "年份未知";
+    year.className = "candidate-year";
+    year.textContent = candidate.year ? `${candidate.year} 年` : "年份未知";
     meta.append(source, year);
     if (agentDecision) {
       const badge = document.createElement("span");
-      badge.className = "candidate-source";
-      badge.textContent = `Agent: ${agentDecision}`;
+      badge.className = `candidate-decision is-${agentDecision}`;
+      const decisionLabel = agentDecision === "include"
+        ? "建议保留"
+        : agentDecision === "exclude" ? "建议排除" : "需要判断";
+      badge.textContent = decisionLabel;
       meta.append(badge);
     }
+    const heading = document.createElement("div");
+    heading.className = "candidate-heading";
+    heading.append(title, meta);
+    head.append(checkbox, heading);
 
     const venue = document.createElement("div");
     venue.className = "candidate-venue";
@@ -3451,22 +4280,59 @@ function renderCandidateCards() {
 
     const authors = document.createElement("p");
     authors.className = "candidate-authors";
-    authors.textContent = (candidate.authors || []).length
-      ? candidate.authors.join("、")
+    const authorList = candidate.authors || [];
+    authors.textContent = authorList.length
+      ? authorList.length > 5
+        ? `${authorList.slice(0, 5).join("、")} 等 ${authorList.length} 位作者`
+        : authorList.join("、")
       : "作者信息暂缺";
+    if (authorList.length > 5) authors.title = authorList.join("、");
+    const authorsRow = document.createElement("div");
+    authorsRow.className = "candidate-detail-row";
+    const authorsLabel = document.createElement("span");
+    authorsLabel.textContent = "作者";
+    authorsRow.append(authorsLabel, authors);
 
-    const reason = document.createElement("p");
+    const reason = document.createElement("div");
     reason.className = "candidate-reason";
-    reason.textContent = agentReason ? `筛选意见：${agentReason}` : "";
+    if (agentReason) {
+      const reasonLabel = document.createElement("strong");
+      reasonLabel.textContent = "筛选依据";
+      const reasonText = document.createElement("span");
+      reasonText.textContent = agentReason;
+      reason.append(reasonLabel, reasonText);
+    }
 
     const abstract = document.createElement("p");
     abstract.className = "candidate-abstract";
     abstract.textContent = candidate.abstract || "暂无摘要，可在后续精读阶段尝试获取全文。";
+    const abstractSection = document.createElement("section");
+    abstractSection.className = "candidate-abstract-section";
+    const abstractHeader = document.createElement("div");
+    abstractHeader.className = "candidate-abstract-header";
+    const abstractLabel = document.createElement("strong");
+    abstractLabel.textContent = "摘要";
+    abstractHeader.append(abstractLabel);
+    if ((candidate.abstract || "").length > 320) {
+      abstract.classList.add("is-collapsed");
+      const toggleAbstract = document.createElement("button");
+      toggleAbstract.type = "button";
+      toggleAbstract.className = "candidate-abstract-toggle";
+      toggleAbstract.textContent = "展开摘要";
+      toggleAbstract.setAttribute("aria-expanded", "false");
+      toggleAbstract.addEventListener("click", () => {
+        const collapsed = abstract.classList.toggle("is-collapsed");
+        toggleAbstract.textContent = collapsed ? "展开摘要" : "收起摘要";
+        toggleAbstract.setAttribute("aria-expanded", String(!collapsed));
+      });
+      abstractHeader.append(toggleAbstract);
+    }
+    abstractSection.append(abstractHeader, abstract);
 
     const identifiers = document.createElement("div");
     identifiers.className = "candidate-identifiers";
     const code = document.createElement("code");
-    code.textContent = candidate.doi || id;
+    code.textContent = candidate.doi ? `DOI ${candidate.doi}` : `标识符 ${id}`;
     identifiers.append(code);
     const url = safeHttpUrl(candidate.url);
     if (url) {
@@ -3489,23 +4355,133 @@ function renderCandidateCards() {
     libraryButton.addEventListener("click", () => saveCandidateToLibrary(candidate));
     identifiers.append(libraryButton);
 
-    card.append(head, meta, venue, authors);
-    if (agentReason) card.append(reason);
-    card.append(abstract, identifiers);
+    const body = document.createElement("div");
+    body.className = "candidate-body";
+    body.append(authorsRow, venue);
+    if (agentReason) body.append(reason);
+    body.append(abstractSection);
+    card.append(head, body, identifiers);
     elements.candidateGrid.append(card);
   });
   refreshIcons();
 }
 
+function acceptedPaperCount(selectedIds, addedPapers) {
+  const acceptedIds = new Set([...selectedIds].map(normalizePaperId));
+  addedPapers.forEach((paper) => {
+    // Match the backend's _candidate_id precedence so a paper carrying both
+    // paper_id and DOI is counted once.
+    const id = paper.paper_id || paper.doi;
+    if (id) acceptedIds.add(normalizePaperId(id));
+  });
+  return acceptedIds.size;
+}
+
+function renderFilteredCandidateCards() {
+  const snapshot = state.review?.candidate_set || {};
+  const filtered = (snapshot.filtered_candidates || []).filter(
+    (candidate) => !state.manualCandidates.has(candidateId(candidate)),
+  );
+  elements.filteredCandidateCount.textContent = String(filtered.length);
+  elements.filteredCandidatesPanel.hidden = !(snapshot.filtered_candidates || []).length;
+  elements.filteredCandidateGrid.replaceChildren();
+
+  filtered.forEach((candidate) => {
+    const id = candidateId(candidate);
+    const card = document.createElement("article");
+    card.className = "filtered-candidate-card";
+    const title = document.createElement("h4");
+    title.textContent = candidate.title || "未命名论文";
+    const reasons = document.createElement("p");
+    const reasonList = snapshot.filtered_candidate_reasons?.[id] || [];
+    reasons.textContent = [
+      candidate.year ? `年份 ${candidate.year}` : "年份未知",
+      ...reasonList,
+    ].join(" · ");
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "secondary";
+    addButton.textContent = "手动加入候选";
+    addButton.addEventListener("click", () => {
+      state.manualCandidates.set(id, {
+        paper_id: candidate.paper_id || id,
+        title: candidate.title || "手动加入的论文",
+        authors: candidate.authors || [],
+        year: candidate.year || null,
+        doi: candidate.doi || "",
+        url: candidate.url || null,
+        source: "user",
+      });
+      if (!state.candidates.some((item) => candidateId(item) === id)) {
+        state.candidates.push(candidate);
+      }
+      state.selectedIds.add(id);
+      renderCandidateCards();
+      renderFilteredCandidateCards();
+      updateReviewStats();
+      notify("论文已手动加入候选集，提交后保存");
+    });
+    card.append(title, reasons, addButton);
+    elements.filteredCandidateGrid.append(card);
+  });
+
+  if (!filtered.length && (snapshot.filtered_candidates || []).length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = "所有未达要求的论文均已手动加入";
+    elements.filteredCandidateGrid.append(empty);
+  }
+}
+
 function updateReviewStats() {
   elements.candidateCount.textContent = String(state.candidates.length);
   elements.selectedCount.textContent = String(state.selectedIds.size);
-  const snapshot = state.review?.candidate_set;
-  elements.roundCount.textContent = `${snapshot?.search_round || 0} / ${snapshot?.max_search_rounds ?? 3}`;
+}
+
+function normalizeQueryRounds(snapshot) {
+  const rounds = Array.isArray(snapshot?.query_rounds) ? snapshot.query_rounds : [];
+  const normalized = rounds
+    .map((round) => (Array.isArray(round) ? round : []))
+    .map((round) => round.map((query) => String(query || "").trim()).filter(Boolean))
+    .filter((round) => round.length);
+  if (normalized.length) return normalized;
+  const executed = Array.isArray(snapshot?.executed_queries) ? snapshot.executed_queries : [];
+  const fallback = executed.map((query) => String(query || "").trim()).filter(Boolean);
+  return fallback.length ? [fallback] : [];
+}
+
+function renderReviewQueryRounds(snapshot) {
+  elements.reviewQueryRounds.replaceChildren();
+  const rounds = normalizeQueryRounds(snapshot);
+  if (!rounds.length) {
+    const empty = document.createElement("p");
+    empty.className = "review-query-empty";
+    empty.textContent = "暂无检索词记录";
+    elements.reviewQueryRounds.append(empty);
+    return;
+  }
+
+  rounds.forEach((queries, index) => {
+    const group = document.createElement("div");
+    group.className = "review-query-round";
+    const label = document.createElement("span");
+    label.className = "review-query-round-label";
+    label.textContent = `第 ${index + 1} 轮`;
+    const list = document.createElement("ul");
+    list.className = "review-query-list";
+    queries.forEach((query) => {
+      const item = document.createElement("li");
+      item.textContent = query;
+      list.append(item);
+    });
+    group.append(label, list);
+    elements.reviewQueryRounds.append(group);
+  });
 }
 
 function renderReview(review) {
   state.review = review;
+  state.manualCandidates = new Map();
   state.candidates = review.candidate_set?.candidates || [];
   const snapshot = review.candidate_set || {};
   const agentIncluded = new Set(
@@ -3520,7 +4496,6 @@ function renderReview(review) {
     : new Set(state.candidates.map(candidateId));
   elements.minPapers.value = snapshot.min_papers ?? 1;
   elements.maxPapers.value = snapshot.max_papers ?? 8;
-  elements.maxSearchRounds.value = snapshot.max_search_rounds ?? 3;
   const yearConstraint = snapshot.year_from != null && snapshot.year_to != null
     ? `年份 ${snapshot.year_from}-${snapshot.year_to}`
     : snapshot.year_from != null
@@ -3528,12 +4503,23 @@ function renderReview(review) {
       : snapshot.year_to != null
         ? `年份截至 ${snapshot.year_to}`
         : "历史候选 · 年份范围未记录";
+  const roundCount = normalizeQueryRounds(snapshot).length;
+  const roundSummary = roundCount
+    ? `系统自动检索 ${roundCount} 轮`
+    : "系统自动检索轮次未记录";
   elements.reviewConstraints.textContent = [
+    roundSummary,
     yearConstraint,
     snapshot.quality_venues_only
       ? "仅 CCF-A、JCR Q1 或 Nature Portfolio"
       : "出版物等级不限",
   ].join(" · ");
+  renderReviewQueryRounds(snapshot);
+  const shouldShowNotice = Boolean(
+    snapshot.blocked_reason || snapshot.search_failures?.length || review.search_failures?.length,
+  );
+  elements.reviewNotice.hidden = !shouldShowNotice;
+  elements.reviewNotice.textContent = shouldShowNotice ? (review.message || "") : "";
   renderProjectHeader(review.project);
   renderProjectSummary({
     project: review.project,
@@ -3541,8 +4527,11 @@ function renderReview(review) {
     events: state.snapshot?.events || [],
   });
   elements.reviewPanel.hidden = false;
+  elements.currentTask.hidden = true;
   elements.continuePanel.hidden = true;
+  elements.undoReview.hidden = !review.can_undo;
   renderCandidateCards();
+  renderFilteredCandidateCards();
   updateReviewStats();
 }
 
@@ -3550,27 +4539,30 @@ function feedbackBody(action) {
   const exclusions = state.candidates
     .map(candidateId)
     .filter((id) => !state.selectedIds.has(id));
-  const queries = parseList(elements.querySuggestions.value);
   const dois = parseList(elements.manualDois.value, true);
+  const manualCandidates = [...state.manualCandidates.values()];
+  const knownManualIds = new Set(
+    manualCandidates.flatMap((paper) => [paper.doi, paper.paper_id].filter(Boolean).map(normalizePaperId)),
+  );
   return {
     action,
-    suggested_queries: queries,
-    added_papers: dois.map((doi) => ({ doi })),
+    suggested_queries: [],
+    added_papers: [
+      ...manualCandidates,
+      ...dois
+        .filter((doi) => !knownManualIds.has(normalizePaperId(doi)))
+        .map((doi) => ({ doi })),
+    ],
     excluded_paper_ids: exclusions,
     comment: elements.feedbackComment.value.trim(),
     min_papers: numberInputValue(elements.minPapers, 1),
     max_papers: numberInputValue(elements.maxPapers, 8),
-    max_search_rounds: numberInputValue(elements.maxSearchRounds, 3),
   };
 }
 
 async function submitFeedback(action) {
   if (!state.projectId || state.busy) return;
   const body = feedbackBody(action);
-  if (body.suggested_queries.length > 3) {
-    notify("每轮最多提交 3 条补充检索词", true);
-    return;
-  }
   if (body.min_papers > body.max_papers) {
     notify("精读篇数下限不能大于上限", true);
     return;
@@ -3579,16 +4571,14 @@ async function submitFeedback(action) {
     const snapshot = state.review?.candidate_set || {};
     const controlsChanged =
       body.min_papers !== (snapshot.min_papers ?? 1) ||
-      body.max_papers !== (snapshot.max_papers ?? 8) ||
-      body.max_search_rounds !== (snapshot.max_search_rounds ?? 3);
+      body.max_papers !== (snapshot.max_papers ?? 8);
     const hasChange =
-      body.suggested_queries.length ||
       body.added_papers.length ||
       body.excluded_paper_ids.length ||
       controlsChanged ||
       body.comment;
     if (!hasChange) {
-      notify("请先填写检索建议、DOI、排除论文或审核说明", true);
+      notify("请先填写 DOI、排除论文或审核说明", true);
       return;
     }
     if (
@@ -3602,7 +4592,7 @@ async function submitFeedback(action) {
   }
 
   if (action === "accept") {
-    const acceptedCount = state.selectedIds.size + body.added_papers.length;
+    const acceptedCount = acceptedPaperCount(state.selectedIds, body.added_papers);
     if (!acceptedCount) {
       notify("至少保留或加入一篇论文后才能确认", true);
       return;
@@ -3635,7 +4625,6 @@ async function submitFeedback(action) {
       { method: "POST", body: JSON.stringify(body) },
     );
     const result = payload.data;
-    elements.querySuggestions.value = "";
     elements.manualDois.value = "";
     elements.feedbackComment.value = "";
     if (action === "refine") {
@@ -3643,33 +4632,22 @@ async function submitFeedback(action) {
       const failures = result.search_failures || [];
       notify(
         failures.length
-          ? `候选集已更新，${failures.length} 条检索出现失败，请查看项目产物`
+          ? `候选集已更新，${failures.length} 条记录处理失败，请查看项目产物`
           : "候选集已更新",
         failures.length > 0,
       );
     } else if (action === "accept" && result.ready_to_continue) {
-      elements.reviewPanel.hidden = true;
-      beginRunSession({
-        stage: "SCREENED",
-        message: "候选集已确认，正在直接进入论文精读",
-        snapshot: state.snapshot,
-      });
-      const conversationId = conversationIdForSnapshot();
-      if (!conversationId) throw new Error("当前项目没有独立对话记录");
-      const runPayload = await api(
-        `/api/conversations/${encodeURIComponent(conversationId)}/continue`,
-        {
-          method: "POST",
-          body: "{}",
-        },
-      );
-      backgroundStarted = true;
-      state.activeRun = runPayload.data;
-      state.activeRunId = runPayload.data.run_id;
-      if (state.snapshot) state.snapshot.active_run = runPayload.data;
-      startRunPolling();
       await loadProjects();
-      notify("候选集已确认，后续研究正在后台运行");
+      await loadProject(state.projectId, true, true);
+      backgroundStarted = await continueResearch({
+        allowBusy: true,
+        skipConfirm: true,
+        startMessage: "候选集已确认，正在开始精读",
+        successMessage: "候选集已确认，已开始精读",
+      });
+      if (!backgroundStarted) {
+        notify("候选集已确认，但自动开始精读失败，请稍后重试", true);
+      }
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -3687,48 +4665,109 @@ async function submitFeedback(action) {
   }
 }
 
+async function undoSearchFeedback() {
+  if (!state.projectId || state.busy) return;
+  if (!window.confirm("撤销最近一次人工审核操作并恢复上一版候选集？")) return;
+  setBusy(true);
+  try {
+    const payload = await api(
+      `/api/projects/${encodeURIComponent(state.projectId)}/search-feedback/undo`,
+      { method: "POST", body: "{}" },
+    );
+    renderReview(payload.data);
+    await loadProjects();
+    notify("已恢复上一版候选集");
+  } catch (error) {
+    notify(`撤销失败：${error.message}`, true);
+    await loadProject(state.projectId, true, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 function formatRunElapsed(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function runTimestamp(value, fallback = Date.now()) {
+  const timestamp = typeof value === "number" ? value : Date.parse(value || "");
+  return Number.isFinite(timestamp) ? timestamp : fallback;
+}
+
+function formatActivityTime(timestamp, current = false) {
+  const elapsed = formatRunElapsed(
+    Math.max(0, runTimestamp(timestamp) - (state.runStartedAt || Date.now())),
+  );
+  return current ? `进行中 ${elapsed}` : `完成于 ${elapsed}`;
+}
+
+function refreshActivityTimes(now = Date.now()) {
+  elements.activityLog.querySelectorAll("li").forEach((item) => {
+    const time = item.querySelector(".activity-time");
+    if (!time) return;
+    const current = item.classList.contains("is-current");
+    const timestamp = current ? now : Number(item.dataset.completedAt || now);
+    time.textContent = formatActivityTime(timestamp, current);
+  });
 }
 
 function updateRunClock() {
   if (!state.runStartedAt) return;
-  elements.runElapsed.textContent = formatRunElapsed(Date.now() - state.runStartedAt);
+  const now = Date.now();
+  elements.runElapsed.textContent = `已运行 ${formatRunElapsed(now - state.runStartedAt)}`;
+  refreshActivityTimes(now);
 }
 
 function setRunPhase(phaseName, detail = "") {
   const phase = RUN_PHASES[phaseName] || RUN_PHASES.thinking;
   const changed = state.runPhase !== phaseName;
+  const statusDetail = detail || phase.detail;
   state.runPhase = phaseName;
   elements.runVisualizer.dataset.phase = phaseName;
   elements.runPhaseTitle.textContent = phase.title;
-  elements.runStatusText.textContent = detail || phase.detail;
+  elements.runStatusText.textContent = statusDetail;
+  if (state.runStartedAt) {
+    elements.nextActionTitle.textContent = phase.title;
+    elements.nextActionText.textContent = statusDetail;
+  }
   elements.runPhaseIcon.replaceChildren(iconNode(phase.icon));
   refreshIcons();
   return changed;
 }
 
-function markCurrentActivityComplete() {
+function markCurrentActivityComplete(completedAt = Date.now()) {
   const current = elements.activityLog.querySelector("li.is-current");
   if (!current) return;
   current.classList.remove("is-current");
   current.classList.add("is-complete");
+  current.dataset.completedAt = String(runTimestamp(completedAt));
   const marker = current.querySelector(".activity-marker");
   if (marker) marker.replaceChildren(iconNode("check"));
+  refreshActivityTimes();
 }
 
-function addActivity(message, { updateStatus = true, kind = "progress" } = {}) {
+function addActivity(
+  message,
+  { updateStatus = true, kind = "progress", completedAt = null } = {},
+) {
   if (!message) return;
   if (message === state.runLastActivity) {
     if (updateStatus) elements.runStatusText.textContent = message;
     return;
   }
-  markCurrentActivityComplete();
+  markCurrentActivityComplete(completedAt || Date.now());
   const item = document.createElement("li");
   item.className = kind === "complete" ? "is-complete" : `is-current is-${kind}`;
+  if (kind === "complete") {
+    item.dataset.completedAt = String(runTimestamp(completedAt));
+  }
   const marker = document.createElement("span");
   marker.className = "activity-marker";
   marker.append(iconNode(
@@ -3737,7 +4776,13 @@ function addActivity(message, { updateStatus = true, kind = "progress" } = {}) {
   const text = document.createElement("span");
   text.className = "activity-text";
   text.textContent = message;
-  item.append(marker, text);
+  const time = document.createElement("time");
+  time.className = "activity-time";
+  time.textContent = formatActivityTime(
+    kind === "complete" ? item.dataset.completedAt : Date.now(),
+    kind !== "complete",
+  );
+  item.append(marker, text, time);
   elements.activityLog.append(item);
   while (elements.activityLog.children.length > 7) {
     elements.activityLog.firstElementChild?.remove();
@@ -3758,7 +4803,7 @@ function stopRunTimers() {
 function beginRunSession({ stage = "CREATED", message = "", snapshot = null, phase = "" } = {}) {
   stopRunTimers();
   state.runSessionId += 1;
-  state.runStartedAt = Date.now();
+  state.runStartedAt = runTimestamp(snapshot?.project?.created_at);
   state.runKnownEvents = new Set(
     (snapshot?.events || []).map((event, index) => eventIdentity(event, index)),
   );
@@ -3768,8 +4813,16 @@ function beginRunSession({ stage = "CREATED", message = "", snapshot = null, pha
   state.runSnapshotSignature = snapshot ? snapshotSignature(snapshot) : "";
   state.runLastActivity = "";
   elements.activityLog.replaceChildren();
+  elements.currentTask.hidden = true;
   elements.runPanel.hidden = false;
-  elements.runElapsed.textContent = "00:00";
+  elements.runElapsed.textContent = `已运行 ${formatRunElapsed(Date.now() - state.runStartedAt)}`;
+  orderedWorkflowEvents(snapshot?.events || []).forEach((event) => {
+    addActivity(transitionActivity(event), {
+      updateStatus: false,
+      kind: "complete",
+      completedAt: event.created_at,
+    });
+  });
   const activePhase = phase || STAGE_RUN_PHASES[stage] || "thinking";
   setRunPhase(activePhase, message);
   addActivity(message || RUN_PHASES[activePhase].detail);
@@ -3782,6 +4835,7 @@ function finishRunSession() {
   markCurrentActivityComplete();
   refreshIcons();
   state.runStartedAt = null;
+  elements.currentTask.hidden = false;
 }
 
 function transitionActivity(event) {
@@ -3789,13 +4843,13 @@ function transitionActivity(event) {
     SEARCHED: "初步文献检索已完成",
     SEARCH_REVIEW_PENDING: "候选论文已提交人工审核",
     SCREENED: "候选论文已确认",
-    EXTRACTED: "论文精读与证据提取已完成",
-    SYNTHESIZED: "跨论文证据综合已完成",
-    REVIEW_PENDING: "综合结论已提交证据审查",
-    REVIEWED: "证据审查已完成",
+    EXTRACTED: "论文精读已完成",
+    SYNTHESIZED: "研究结果整理已完成",
+    REVIEW_PENDING: "研究结果正在进行完整性检查",
+    REVIEWED: "研究结果整理已完成",
     OUTLINED: "综述提纲已生成",
     NARRATED: "综述正文已生成",
-    COMPLETED: "事实核查完成，研究已结束",
+    COMPLETED: "最终综述已生成，研究已结束",
     INCONCLUSIVE: "研究因证据不足停止",
   };
   return labels[event?.to_stage]
@@ -3811,9 +4865,6 @@ function artifactActivity(artifact) {
     const title = payload.title || payload.section_title || payload.section_id;
     return title ? `章节草稿已生成：${title}` : "一个章节草稿已生成";
   }
-  if (artifact?.kind === "FactCheckReport") {
-    return "一个综述章节已完成事实核查";
-  }
   return "";
 }
 
@@ -3827,14 +4878,24 @@ function syncRunningSnapshot(snapshot) {
     if (state.runKnownArtifacts.has(identity)) return;
     state.runKnownArtifacts.add(identity);
     const message = artifactActivity(artifact);
-    if (message) addActivity(message, { updateStatus: false, kind: "complete" });
+    if (message) {
+      addActivity(message, {
+        updateStatus: false,
+        kind: "complete",
+        completedAt: artifact.created_at,
+      });
+    }
   });
 
   orderedWorkflowEvents(snapshot?.events || []).forEach((event, index) => {
     const identity = eventIdentity(event, index);
     if (state.runKnownEvents.has(identity)) return;
     state.runKnownEvents.add(identity);
-    addActivity(transitionActivity(event), { updateStatus: false, kind: "complete" });
+    addActivity(transitionActivity(event), {
+      updateStatus: false,
+      kind: "complete",
+      completedAt: event.created_at,
+    });
   });
 
   state.runSnapshotSignature = signature;
@@ -3879,6 +4940,22 @@ async function pollRunningProject() {
   }
 }
 
+async function openPendingSearchReview(projectId) {
+  if (!projectId || projectId !== state.projectId) return;
+  try {
+    const reviewPayload = await api(
+      `/api/projects/${encodeURIComponent(projectId)}/search-review`,
+    );
+    if (projectId !== state.projectId) return;
+    renderReview(reviewPayload.data);
+    elements.currentTask.hidden = true;
+    elements.runPanel.hidden = true;
+    notify("检索已完成，请审核候选论文");
+  } catch (error) {
+    notify(`候选论文已生成，但审核界面加载失败：${error.message}`, true);
+  }
+}
+
 function startRunPolling() {
   if (state.runPollTimer || !state.projectId || state.projectId.includes("正在")) return;
   void pollRunningProject();
@@ -3904,7 +4981,6 @@ function streamPhase(eventName, payload) {
   if (eventName === "error" || eventName === "fallback") return "stopped";
   if (eventName === "awaiting_input") return "reviewing";
   const serialized = JSON.stringify(payload || {}).toLowerCase();
-  if (serialized.includes("fact-checker")) return "verifying";
   if (serialized.includes("narrative-writer") || serialized.includes("chief-editor")) return "writing";
   if (serialized.includes("research-outliner")) return "outlining";
   if (serialized.includes("evidence-reviewer")) return "reviewing";
@@ -3924,18 +5000,17 @@ function streamPhase(eventName, payload) {
 
 function streamUpdateLabel(eventName, payload, phaseName = "thinking") {
   if (eventName === "awaiting_input") return "初次检索完成，等待人工审核";
-  if (eventName === "done") return "本轮 Agent 执行结束";
+  if (eventName === "done") return "本轮研究任务执行结束";
   if (eventName === "fallback") return "模型不可用，已进入降级流程";
-  if (eventName === "error") return payload?.message || "Agent 执行失败";
+  if (eventName === "error") return payload?.message || "研究助手执行失败";
   const labels = {
     thinking: "正在分析当前材料并规划下一步",
     searching: "正在扩展检索词并查找候选论文",
     reading: "正在读取论文并提取结构化信息",
-    synthesizing: "正在比较研究发现并组织证据",
-    reviewing: "正在核对结论与证据引用",
+    synthesizing: "正在比较并整理各论文的研究发现",
+    reviewing: "正在检查研究结果是否完整",
     outlining: "正在规划综述章节与论证顺序",
     writing: "正在整合章节正文与参考文献",
-    verifying: "正在逐节执行事实核查",
   };
   return labels[phaseName] || "正在执行研究任务";
 }
@@ -3945,6 +5020,11 @@ async function handleStreamEvent(eventName, payload) {
   let phaseName = streamPhase(eventName, payload);
   if (project) {
     state.projectId = project.project_id;
+    const projectStartedAt = runTimestamp(project.created_at, state.runStartedAt || Date.now());
+    if (!state.runStartedAt || projectStartedAt < state.runStartedAt) {
+      state.runStartedAt = projectStartedAt;
+      updateRunClock();
+    }
     renderProjectHeader(project, state.snapshot?.events || []);
     renderProjectSummary({
       project,
@@ -3967,7 +5047,7 @@ async function handleStreamEvent(eventName, payload) {
     await loadProjects();
   }
   if (eventName === "error") {
-    throw new Error(payload?.message || "Agent 流式执行失败");
+    throw new Error(payload?.message || "研究助手流式执行失败");
   }
 }
 
@@ -4047,7 +5127,7 @@ async function startResearchLegacy(topic, question, reviewLimits = {}) {
     if (state.projectId && !state.projectId.includes("正在")) {
       await loadProject(state.projectId, true, true);
     }
-    notify("本轮 Agent 执行结束");
+    notify("本轮研究任务执行结束");
   } catch (error) {
     notify(`研究执行失败：${error.message}`, true);
     if (state.projectId && !state.projectId.includes("正在")) {
@@ -4063,7 +5143,7 @@ async function startResearchLegacy(topic, question, reviewLimits = {}) {
 async function continueResearchLegacy() {
   if (!state.projectId || state.busy) return;
   if (!state.agentAvailable) {
-    notify("Agent 当前不可用，请先检查模型配置", true);
+    notify("研究助手当前不可用，请先检查模型配置", true);
     return;
   }
   const mode = continuationMode(state.snapshot);
@@ -4072,8 +5152,8 @@ async function continueResearchLegacy() {
     : mode === "revision"
       ? "将复用已保存的论文和证据，根据审查意见修订综合结论并重新审查；不会重新检索或重新精读论文。确认开始吗？"
     : recoverableOperationalFailure(state.snapshot)
-      ? "将从已保存的章节草稿恢复综述整合与事实核查，不会重新检索、重读论文或重写章节。确认开始吗？"
-      : "将复用已保存的证据继续生成综述，不会重新检索或重读论文。确认开始吗？";
+      ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
+      : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
   if (!window.confirm(confirmation)) {
     return;
   }
@@ -4158,16 +5238,25 @@ async function startResearch(topic, question, reviewLimits = {}) {
   }
 }
 
-async function continueResearch() {
-  if (!state.projectId || state.busy) return;
+async function continueResearch(options = {}) {
+  const {
+    skipConfirm = false,
+    allowBusy = false,
+    startMessage = "正在从已保存进度恢复研究",
+    successMessage = "后续研究已在后台启动；可以切换到其他对话",
+  } = options;
+  if (!state.projectId || (state.busy && !allowBusy)) return false;
   if (!state.agentAvailable) {
-    notify("Agent 当前不可用，请先检查模型配置", true);
-    return;
+    notify("研究助手当前不可用，请先检查模型配置", true);
+    return false;
   }
   const conversationId = conversationIdForSnapshot();
   if (!conversationId) {
     notify("旧项目没有独立对话记录，请重新创建一个研究对话", true);
-    return;
+    return false;
+  }
+  if (!skipConfirm && !window.confirm("将从已保存进度继续，并在后台运行。确认开始吗？")) {
+    return false;
   }
   const mode = continuationMode(state.snapshot);
   const confirmation = mode === "revision"
@@ -4204,6 +5293,7 @@ async function continueResearch() {
     elements.runPanel.hidden = true;
     setBusy(false);
     notify(`继续执行失败：${error.message}`, true);
+    return false;
   }
 }
 
@@ -4236,12 +5326,149 @@ elements.closeLibraryCompare.addEventListener("click", () => {
   elements.libraryComparePanel.hidden = true;
 });
 elements.libraryAssistantForm.addEventListener("submit", askLibraryAssistant);
+elements.paperWorkspaceBack.addEventListener("click", async () => {
+  showWorkspace("library");
+  if (state.selectedLibraryId) await selectLibraryPaper(state.selectedLibraryId);
+});
+document.querySelectorAll("[data-paper-tab]").forEach((button) => {
+  button.addEventListener("click", () => setPaperTab(button.dataset.paperTab));
+});
+elements.paperPdfPages.addEventListener("mouseup", () => window.setTimeout(capturePaperSelection, 0));
+elements.paperPdfPages.addEventListener("pointerup", () => window.setTimeout(capturePaperSelection, 0));
+let paperSelectionFrame = null;
+document.addEventListener("selectionchange", () => {
+  if (elements.paperWorkspaceView.hidden || paperSelectionFrame !== null) return;
+  paperSelectionFrame = window.requestAnimationFrame(() => {
+    paperSelectionFrame = null;
+    capturePaperSelection();
+  });
+});
+elements.highlightSelection.addEventListener("click", async () => {
+  if (!state.paperSelection) return;
+  try {
+    await savePaperAnnotation("highlight");
+    notify("高亮已保存");
+  } catch (error) {
+    notify(`高亮保存失败：${error.message}`, true);
+  }
+});
+elements.noteSelection.addEventListener("click", () => {
+  if (!state.paperSelection) return;
+  setPaperTab("annotations");
+  elements.paperNoteForm.hidden = false;
+  elements.paperNoteInput.focus();
+});
+elements.cancelPaperNote.addEventListener("click", () => {
+  elements.paperNoteForm.hidden = true;
+  elements.paperNoteInput.value = "";
+});
+elements.paperNoteForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const content = elements.paperNoteInput.value.trim();
+  if (!content || !state.paperSelection) return;
+  try {
+    await savePaperAnnotation("note", { content });
+    elements.paperNoteInput.value = "";
+    elements.paperNoteForm.hidden = true;
+    notify("批注已保存");
+  } catch (error) {
+    notify(`批注保存失败：${error.message}`, true);
+  }
+});
+elements.askSelection.addEventListener("click", () => {
+  if (!state.paperSelection) return;
+  setPaperTab("ask");
+  elements.paperAskContext.querySelector("strong").textContent = `第 ${state.paperSelection.page} 页选中文本`;
+  elements.paperAskContext.querySelector("p").textContent = state.paperSelection.text;
+  elements.clearPaperSelection.hidden = false;
+  elements.paperQuestionInput.focus();
+});
+elements.clearPaperSelection.addEventListener("click", clearPaperSelection);
+elements.paperQuestionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const question = elements.paperQuestionInput.value.trim();
+  const workspace = state.paperWorkspace;
+  if (!question || !workspace) return;
+  const selection = state.paperSelection;
+  const submit = elements.paperQuestionForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  elements.paperAnswer.hidden = false;
+  elements.paperAnswer.textContent = "正在检索论文证据并组织回答…";
+  try {
+    const payload = await api(
+      `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace/question`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          scope: selection ? "selection" : "paper",
+          attachment_id: workspace.workspace_attachment?.attachment_id || null,
+          question,
+          page: selection?.page || null,
+          selected_text: selection?.text || "",
+          prefix: selection?.prefix || "",
+          suffix: selection?.suffix || "",
+        }),
+      },
+    );
+    state.paperLastAnswer = {
+      ...payload.data,
+      selection_rects: selection?.rects || [],
+    };
+    renderPaperAnswer(state.paperLastAnswer);
+  } catch (error) {
+    elements.paperAnswer.textContent = `提问失败：${error.message}`;
+    notify(`论文提问失败：${error.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+elements.generateReadingCard.addEventListener("click", async () => {
+  const workspace = state.paperWorkspace;
+  if (!workspace?.paper?.library_id) return;
+  elements.generateReadingCard.disabled = true;
+  const original = elements.generateReadingCard.textContent;
+  elements.generateReadingCard.textContent = "正在生成精读卡…";
+  try {
+    const attachmentQuery = workspace.workspace_attachment?.attachment_id
+      ? `?attachment_id=${encodeURIComponent(workspace.workspace_attachment.attachment_id)}`
+      : "";
+    const generated = await api(
+      `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace/reading-card${attachmentQuery}`,
+      { method: "POST" },
+    );
+    const refreshed = await api(`/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace`);
+    state.paperWorkspace.analyses = refreshed.data.analyses || [];
+    renderPaperReadingCard();
+    setPaperTab("card");
+    notify(generated.data?.evidence_level === "abstract" ? "摘要级精读卡已生成" : "全文级精读卡已生成");
+  } catch (error) {
+    notify(`精读卡生成失败：${error.message}`, true);
+  } finally {
+    elements.generateReadingCard.disabled = false;
+    elements.generateReadingCard.textContent = original;
+    refreshIcons();
+  }
+});
+elements.paperZoomOut.addEventListener("click", async () => {
+  state.paperZoom = Math.max(0.6, Number((state.paperZoom - 0.15).toFixed(2)));
+  await renderPaperPdf();
+});
+elements.paperZoomIn.addEventListener("click", async () => {
+  state.paperZoom = Math.min(2, Number((state.paperZoom + 0.15).toFixed(2)));
+  await renderPaperPdf();
+});
 let librarySearchTimer = null;
 elements.librarySearch.addEventListener("input", () => {
   window.clearTimeout(librarySearchTimer);
   librarySearchTimer = window.setTimeout(loadLibrary, 220);
 });
 elements.emptyNewProject.addEventListener("click", () => toggleNewProject(true));
+elements.emptyReadPaper.addEventListener("click", async () => {
+  await openLibrary();
+  notify("请选择一篇论文，点击“打开论文研读工作台”开始精读");
+});
+elements.emptyOpenLibrary.addEventListener("click", openLibrary);
+elements.projectSearch.addEventListener("input", renderProjectList);
 elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false));
 elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
 elements.newProjectForm.addEventListener("submit", async (event) => {
@@ -4274,6 +5501,12 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
   await startResearch(topic, question, reviewLimits);
 });
 elements.refreshProjects.addEventListener("click", loadProjects);
+elements.toggleProjectSelection.addEventListener("click", () => {
+  setProjectSelectionMode(!state.projectSelectionMode);
+});
+elements.selectAllProjects.addEventListener("click", toggleVisibleProjectSelection);
+elements.cancelProjectSelection.addEventListener("click", () => setProjectSelectionMode(false));
+elements.deleteSelectedProjects.addEventListener("click", deleteSelectedProjectRecords);
 elements.projectLookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const projectId = elements.projectIdInput.value.trim();
@@ -4304,20 +5537,28 @@ elements.clearAll.addEventListener("click", () => {
   updateReviewStats();
 });
 elements.refineReview.addEventListener("click", () => submitFeedback("refine"));
+elements.undoReview.addEventListener("click", undoSearchFeedback);
 elements.acceptReview.addEventListener("click", () => submitFeedback("accept"));
 elements.stopReview.addEventListener("click", () => submitFeedback("stop"));
 elements.continueResearch.addEventListener("click", continueResearch);
+elements.undoDecision.addEventListener("click", undoSearchFeedback);
 
 elements.sidebarToggle.addEventListener("click", () => {
   const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";
   applySidebarState(next, true);
 });
+elements.brandHome.addEventListener("click", clearProjectView);
+elements.homeToggle.addEventListener("click", clearProjectView);
 elements.toolsMenuToggle.addEventListener("click", () => {
   const open = elements.toolsMenu.hidden;
   setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, open);
   if (open) elements.toolsMenu.querySelector("a, button, input")?.focus();
 });
+elements.usageGuideOpen.addEventListener("click", openUsageGuide);
+elements.usageGuideClose.addEventListener("click", () => closeUsageGuide());
+elements.usageGuideDismiss.addEventListener("click", () => closeUsageGuide());
+elements.usageGuideBackdrop.addEventListener("click", () => closeUsageGuide());
 elements.projectMenuToggle.addEventListener("click", () => {
   const open = elements.projectMenu.hidden;
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
@@ -4344,6 +5585,23 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (state.usageGuideOpen && event.key === "Tab") {
+    const focusable = [...elements.usageGuide.querySelectorAll(
+      'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.getClientRects().length > 0);
+    if (focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
   if (state.inspectorOpen && event.key === "Tab") {
     const focusable = [...elements.projectInspector.querySelectorAll(
       'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
@@ -4362,6 +5620,11 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  if (state.usageGuideOpen) {
+    event.preventDefault();
+    closeUsageGuide();
+    return;
+  }
   if (state.inspectorOpen) {
     event.preventDefault();
     closeInspector();
@@ -4376,7 +5639,9 @@ document.addEventListener("keydown", (event) => {
 
 async function initialize() {
   initializeSidebar();
+  showWorkspace("empty");
   refreshIcons();
+  maybeOpenUsageGuide();
   await Promise.all([checkHealth(), loadProjects()]);
   const params = new URLSearchParams(window.location.search);
   if (params.get("view") === "library") {

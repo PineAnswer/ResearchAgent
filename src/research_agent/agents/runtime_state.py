@@ -36,7 +36,6 @@ SUBAGENT_SCHEMA_TOOLS = {
     "research-outliner": "ReviewOutline",
     "narrative-writer": "SectionDraft",
     "chief-editor": "NarrativeReview",
-    "fact-checker": "FactCheckReport",
 }
 
 SUBAGENT_REQUIRED_KEYS = {
@@ -47,7 +46,6 @@ SUBAGENT_REQUIRED_KEYS = {
     "research-outliner": {"title", "narrative_arc", "sections"},
     "narrative-writer": {"section_id", "heading", "content", "cited_evidence"},
     "chief-editor": {"title", "abstract", "sections", "references"},
-    "fact-checker": {"section_id", "verdict", "issues"},
 }
 
 
@@ -95,6 +93,41 @@ def _diagnostic_value(value: Any) -> Any:
     return str(value)
 
 
+_SENSITIVE_DIAGNOSTIC_KEYS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "cookie",
+    "access_token",
+    "refresh_token",
+)
+
+
+def _redact_diagnostic(value: Any) -> Any:
+    value = _diagnostic_value(value)
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(marker in key.casefold() for marker in _SENSITIVE_DIAGNOSTIC_KEYS)
+                else _redact_diagnostic(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_diagnostic(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+",
+            "Bearer [REDACTED]",
+            value,
+        )
+    return value
+
+
 def _structured_response_diagnostics(
     result: dict[str, Any], subagent_type: str
 ) -> dict[str, Any]:
@@ -116,19 +149,34 @@ def _structured_response_diagnostics(
         response_metadata = field("response_metadata", {})
         tool_calls = field("tool_calls", [])
         invalid_tool_calls = field("invalid_tool_calls", [])
+        finish_reason = (
+            response_metadata.get("finish_reason")
+            if isinstance(response_metadata, dict)
+            else None
+        )
+        if invalid_tool_calls:
+            parse_status = "invalid_tool_calls"
+        elif finish_reason == "tool_calls" and not tool_calls:
+            parse_status = "tool_call_finish_without_parsed_calls"
+        elif tool_calls:
+            parse_status = "schema_tool_call_not_promoted"
+        elif field("content", None):
+            parse_status = "unparsed_content"
+        else:
+            parse_status = "empty_model_response"
         return {
             "subagent_type": subagent_type,
             "expected_schema_tool": SUBAGENT_SCHEMA_TOOLS.get(subagent_type),
-            "content": _diagnostic_value(field("content", None)),
-            "tool_calls": _diagnostic_value(tool_calls),
-            "invalid_tool_calls": _diagnostic_value(invalid_tool_calls),
-            "additional_kwargs": _diagnostic_value(field("additional_kwargs", {})),
-            "response_metadata": _diagnostic_value(response_metadata),
-            "finish_reason": (
-                response_metadata.get("finish_reason")
-                if isinstance(response_metadata, dict)
-                else None
-            ),
+            "content": _redact_diagnostic(field("content", None)),
+            "tool_calls": _redact_diagnostic(tool_calls),
+            "invalid_tool_calls": _redact_diagnostic(invalid_tool_calls),
+            "additional_kwargs": _redact_diagnostic(field("additional_kwargs", {})),
+            "response_metadata": _redact_diagnostic(response_metadata),
+            "usage_metadata": _redact_diagnostic(field("usage_metadata", {})),
+            "message_id": field("id", None),
+            "finish_reason": finish_reason,
+            "parse_status": parse_status,
+            "diagnostic_hint": "See the matching llm.response entry in messages.jsonl.",
             "raw_provider_response_captured": False,
         }
     return {
@@ -248,6 +296,21 @@ def _temporary_candidate_ids(candidate_ids: list[Any]) -> bool:
     )
 
 
+def _normalized_candidate_venue_type(value: Any) -> str | None:
+    normalized = str(value or "").casefold().strip()
+    if normalized in {"journal", "journal-article", "periodical"}:
+        return "journal"
+    if normalized in {
+        "conference",
+        "conference-paper",
+        "conference-proceedings",
+        "proceedings",
+        "proceedings-article",
+    }:
+        return "conference"
+    return None
+
+
 def _remap_screening_dict(
     value: Any,
     id_map: dict[str, str],
@@ -272,11 +335,12 @@ class ResearchRuntimeState:
         self._search_terms: dict[str, list[str]] = {}
         self._search_keys: dict[str, set[str]] = {}
         self._search_sources: dict[str, set[str]] = {}
+        self._search_result_counts: dict[str, dict[str, int]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
         self._search_constraints: dict[str, dict[str, Any]] = {}
         self._prefer_library_search: dict[str, bool] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
-        self._rejections: dict[tuple[str, str], int] = {}
+        self._rejections: dict[tuple[str, str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
 
     def register_project(
@@ -296,6 +360,7 @@ class ResearchRuntimeState:
             self._search_terms[thread_id] = []
             self._search_keys[thread_id] = set()
             self._search_sources[thread_id] = set()
+            self._search_result_counts[thread_id] = {}
             self._raw_search_results[thread_id] = []
             self._search_constraints.setdefault(thread_id, {})
             self._prefer_library_search.setdefault(thread_id, True)
@@ -369,7 +434,13 @@ class ResearchRuntimeState:
         with self._lock:
             return source in self._search_sources.get(thread_id, set())
 
-    def store_search_results(self, thread_id: str, results_json: str) -> None:
+    def search_result_count(self, thread_id: str, source: str) -> int:
+        with self._lock:
+            return self._search_result_counts.get(thread_id, {}).get(source, 0)
+
+    def store_search_results(
+        self, thread_id: str, results_json: str, *, source: str = ""
+    ) -> None:
         """Persist raw search tool output so the LLM does not need to
         reproduce full paper metadata in its structured_response."""
         import json as _json
@@ -434,7 +505,9 @@ class ResearchRuntimeState:
                     "relevance_score": item.get("relevance_score"),
                     "library_id": str(item.get("library_id", "")),
                     "venue": str(item.get("venue", "")),
-                    "venue_type": item.get("venue_type"),
+                    "venue_type": _normalized_candidate_venue_type(
+                        item.get("venue_type")
+                    ),
                     "venue_acronym": str(item.get("venue_acronym", "")),
                     "ccf_rank": item.get("ccf_rank"),
                     "ccf_category": item.get("ccf_category"),
@@ -455,6 +528,9 @@ class ResearchRuntimeState:
         with self._lock:
             stored = self._raw_search_results.setdefault(thread_id, [])
             stored.extend(candidates)
+            if source:
+                counts = self._search_result_counts.setdefault(thread_id, {})
+                counts[source] = counts.get(source, 0) + len(candidates)
 
     def get_search_results(self, thread_id: str) -> list[dict]:
         with self._lock:
@@ -473,27 +549,48 @@ class ResearchRuntimeState:
                 return None
             return deepcopy(record.payload)
 
-    def mark_consumed(self, thread_id: str, subagent_type: str) -> None:
+    @staticmethod
+    def _rejection_key(
+        thread_id: str, subagent_type: str, scope: str | None = None
+    ) -> tuple[str, str, str]:
+        normalized_scope = ""
+        if scope:
+            normalized_scope = (
+                normalize_paper_id(scope) if subagent_type == "paper-reader" else scope
+            )
+        return thread_id, subagent_type, normalized_scope
+
+    def mark_consumed(
+        self, thread_id: str, subagent_type: str, scope: str | None = None
+    ) -> None:
         with self._lock:
             record = self._results.get((thread_id, subagent_type))
             if record is not None:
                 record.consumed = True
-            self._rejections.pop((thread_id, subagent_type), None)
+            self._rejections.pop(
+                self._rejection_key(thread_id, subagent_type, scope), None
+            )
 
-    def reject_result(self, thread_id: str, subagent_type: str) -> int:
+    def reject_result(
+        self, thread_id: str, subagent_type: str, scope: str | None = None
+    ) -> int:
         """Consume an invalid result so a corrected subagent run can replace it."""
         with self._lock:
             record = self._results.get((thread_id, subagent_type))
             if record is not None:
                 record.consumed = True
-            key = (thread_id, subagent_type)
+            key = self._rejection_key(thread_id, subagent_type, scope)
             count = self._rejections.get(key, 0) + 1
             self._rejections[key] = count
             return count
 
-    def rejection_count(self, thread_id: str, subagent_type: str) -> int:
+    def rejection_count(
+        self, thread_id: str, subagent_type: str, scope: str | None = None
+    ) -> int:
         with self._lock:
-            return self._rejections.get((thread_id, subagent_type), 0)
+            return self._rejections.get(
+                self._rejection_key(thread_id, subagent_type, scope), 0
+            )
 
     def reserve_paper_fetch(
         self,
@@ -578,6 +675,28 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
                 name=name,
                 status="error",
             )
+        if (
+            name == "search_library"
+            and self.state.has_search_source(thread_id, "search_library")
+            and self.state.search_result_count(thread_id, "search_library") == 0
+            and not self.state.has_search_source(thread_id, "search_openalex")
+        ):
+            return ToolMessage(
+                content=json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "local_library_empty_use_external",
+                        "instruction": (
+                            "本地文献库检索已执行且结果为空；下一次必须调用"
+                            "search_openalex检索外部学术来源，禁止继续调用search_library。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_call_id=str(request.tool_call.get("id", "external-search-required")),
+                name=name,
+                status="error",
+            )
         args = request.tool_call.get("args", {})
         if name in {
             "search_openalex",
@@ -632,7 +751,7 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
             thread_id = thread_id_from_config(request.runtime.config)
             self.state.mark_search_source(thread_id, name)
             self.state.store_search_results(
-                thread_id, content
+                thread_id, content, source=name
             )
 
     def wrap_tool_call(

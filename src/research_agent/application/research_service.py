@@ -10,7 +10,6 @@ from research_agent.application.paper_ids import normalize_paper_id, same_paper_
 from research_agent.application.ports import ArtifactExporterPort, ResearchRepositoryPort
 from research_agent.domain.models import (
     CandidateSetSnapshot,
-    FactCheckReport,
     InsufficientEvidence,
     NarrativeReview,
     PaperCard,
@@ -47,7 +46,6 @@ ARTIFACT_SCHEMAS = {
     "ReviewOutline": ReviewOutline,
     "SectionDraft": SectionDraft,
     "NarrativeReview": NarrativeReview,
-    "FactCheckReport": FactCheckReport,
 }
 
 SYSTEM_ARTIFACTS = {"RuntimeFallback", "RuntimeIssue", "ScreeningLog"}
@@ -61,12 +59,12 @@ REQUIRED_ARTIFACTS = {
     ResearchStage.REVIEWED: "ReviewResult",
     ResearchStage.OUTLINED: "ReviewOutline",
     ResearchStage.NARRATED: "NarrativeReview",
+    ResearchStage.COMPLETED: "NarrativeReview",
     ResearchStage.INCONCLUSIVE: "InsufficientEvidence",
 }
 
 RECOVERABLE_OPERATIONAL_MARKERS = (
     "chief-editor",
-    "fact-checker",
     "narrative-writer",
     "research-outliner",
     "structured_response",
@@ -80,6 +78,35 @@ RECOVERABLE_OPERATIONAL_MARKERS = (
     "缺少字段",
     "模型超时",
 )
+
+
+_NUMERIC_CLAIM_PATTERN = re.compile(
+    r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?:%|x|×|倍)?(?![\w])",
+    flags=re.IGNORECASE,
+)
+
+
+def _numeric_claims(text: str) -> list[str]:
+    """Extract normalized quantitative claims while ignoring model/term identifiers."""
+    claims: list[str] = []
+    for match in _NUMERIC_CLAIM_PATTERN.finditer(text):
+        start, end = match.span()
+        before = text[start - 1] if start else ""
+        before_before = text[start - 2] if start > 1 else ""
+        after = text[end] if end < len(text) else ""
+        after_after = text[end + 1] if end + 1 < len(text) else ""
+        # ResNet-50, GPT-4, FFL-3 and similar identifiers are names, not
+        # quantitative claims. 2D/3DVG are already excluded by the regex's
+        # word-boundary guards.
+        if (before == "-" and before_before.isalpha()) or (
+            after == "-" and after_after.isalpha()
+        ):
+            continue
+        token = re.sub(r"\s+", "", match.group(0)).replace(",", "")
+        token = token.replace("×", "x").replace("倍", "x").casefold()
+        if token not in claims:
+            claims.append(token)
+    return claims
 
 
 class ResearchService:
@@ -207,20 +234,18 @@ class ResearchService:
             ResearchStage.REVIEW_PENDING: {"PaperCard", "SynthesisReport"},
             ResearchStage.REVIEWED: {"PaperCard", "SynthesisReport", "ReviewResult"},
             ResearchStage.OUTLINED: {"PaperCard", "ReviewOutline", "SectionDraft"},
-            ResearchStage.NARRATED: {"PaperCard", "NarrativeReview", "FactCheckReport"},
+            ResearchStage.NARRATED: {"PaperCard", "NarrativeReview"},
         }
         allowed_kinds = kinds_by_stage.get(project.stage, set())
         selected = []
 
         latest_outline = self._latest_artifact(artifacts, "ReviewOutline")
-        latest_narrative = self._latest_artifact(artifacts, "NarrativeReview")
         latest_singletons = {
             kind: self._latest_artifact(artifacts, kind)
             for kind in {"SynthesisReport", "ReviewResult", "ReviewOutline", "NarrativeReview"}
         }
         latest_cards: dict[str, Any] = {}
         latest_drafts: dict[str, Any] = {}
-        latest_fact_checks: dict[str, Any] = {}
         for artifact in artifacts:
             if artifact.kind == "PaperCard":
                 paper_id = normalize_paper_id(str(artifact.payload.get("paper_id", "")))
@@ -231,19 +256,11 @@ class ResearchService:
                 and artifact.artifact_id > latest_outline.artifact_id
             ):
                 latest_drafts[str(artifact.payload.get("section_id", ""))] = artifact
-            elif (
-                artifact.kind == "FactCheckReport"
-                and latest_narrative is not None
-                and artifact.artifact_id > latest_narrative.artifact_id
-            ):
-                latest_fact_checks[str(artifact.payload.get("section_id", ""))] = artifact
 
         if "PaperCard" in allowed_kinds:
             selected.extend(latest_cards.values())
         if "SectionDraft" in allowed_kinds:
             selected.extend(latest_drafts.values())
-        if "FactCheckReport" in allowed_kinds:
-            selected.extend(latest_fact_checks.values())
         for kind, artifact in latest_singletons.items():
             if kind in allowed_kinds and artifact is not None:
                 selected.append(artifact)
@@ -848,6 +865,42 @@ class ResearchService:
         return repaired_ids
 
     @classmethod
+    def _operational_recovery_target(cls, project, artifacts) -> ResearchStage:
+        review_artifact = cls._latest_artifact(artifacts, "ReviewResult")
+        review = (
+            ReviewResult.model_validate(review_artifact.payload)
+            if review_artifact is not None
+            else project.current_review
+        )
+        if review is not None and review.verdict is ReviewVerdict.PASS:
+            if cls._latest_artifact(artifacts, "NarrativeReview") is not None:
+                return ResearchStage.NARRATED
+            if cls._latest_artifact(artifacts, "ReviewOutline") is not None:
+                return ResearchStage.OUTLINED
+            return ResearchStage.REVIEWED
+        if review is not None and review.verdict is ReviewVerdict.REVISE:
+            return ResearchStage.EXTRACTED
+        if cls._latest_artifact(artifacts, "SynthesisReport") is not None:
+            return ResearchStage.REVIEW_PENDING
+        screening = cls._latest_artifact(artifacts, "ScreeningDecision")
+        if screening is not None:
+            included_ids = {
+                normalize_paper_id(str(item))
+                for item in screening.payload.get("included_paper_ids", [])
+            }
+            cards = cls._latest_paper_cards(artifacts)
+            if (
+                included_ids
+                and included_ids.issubset(cards)
+                and any(cards[paper_id].get("findings") for paper_id in included_ids)
+            ):
+                return ResearchStage.EXTRACTED
+            return ResearchStage.SCREENED
+        raise WorkflowPrerequisiteError(
+            "Operational failure has no safe persisted stage to resume"
+        )
+
+    @classmethod
     def _validate_outline(cls, payload: dict[str, Any]) -> None:
         section_ids = [str(item.get("section_id", "")).strip() for item in payload["sections"]]
         if not section_ids or any(not section_id for section_id in section_ids):
@@ -858,7 +911,11 @@ class ResearchService:
             raise WorkflowPrerequisiteError("ReviewOutline section_id values must be unique")
 
     @classmethod
-    def _validate_section_draft(cls, artifacts, payload: dict[str, Any]) -> None:
+    def _validate_section_draft(
+        cls,
+        artifacts,
+        payload: dict[str, Any],
+    ) -> None:
         outline = cls._latest_artifact(artifacts, "ReviewOutline")
         if outline is None:
             raise WorkflowPrerequisiteError("SectionDraft requires a saved ReviewOutline")
@@ -879,7 +936,11 @@ class ResearchService:
             )
 
     @classmethod
-    def _validate_narrative_review(cls, artifacts, payload: dict[str, Any]) -> None:
+    def _validate_narrative_review(
+        cls,
+        artifacts,
+        payload: dict[str, Any],
+    ) -> None:
         section_ids = [str(item.get("section_id", "")).strip() for item in payload["sections"]]
         if not section_ids or any(not section_id for section_id in section_ids):
             raise WorkflowPrerequisiteError(
@@ -910,29 +971,6 @@ class ResearchService:
             )
 
     @classmethod
-    def _validate_fact_check(cls, artifacts, payload: dict[str, Any]) -> None:
-        narrative = cls._latest_artifact(artifacts, "NarrativeReview")
-        if narrative is None:
-            raise WorkflowPrerequisiteError(
-                "FactCheckReport requires a saved NarrativeReview"
-            )
-        section_id = payload["section_id"]
-        narrative_ids = {item["section_id"] for item in narrative.payload["sections"]}
-        if section_id not in narrative_ids:
-            raise WorkflowPrerequisiteError(
-                f"FactCheckReport section_id {section_id!r} is not in the latest NarrativeReview"
-            )
-        checked_ids = {
-            item.payload.get("section_id")
-            for item in artifacts
-            if item.kind == "FactCheckReport" and item.artifact_id > narrative.artifact_id
-        }
-        if section_id in checked_ids:
-            raise WorkflowPrerequisiteError(
-                f"FactCheckReport for {section_id!r} is already saved"
-            )
-
-    @classmethod
     def _validate_completion(cls, artifacts) -> None:
         narrative = cls._latest_artifact(artifacts, "NarrativeReview")
         if narrative is None:
@@ -947,17 +985,6 @@ class ResearchService:
         if not section_ids:
             raise WorkflowPrerequisiteError(
                 "COMPLETED requires a NarrativeReview with at least one section"
-            )
-        checked_ids = {
-            str(item.payload.get("section_id", "")).strip()
-            for item in artifacts
-            if item.kind == "FactCheckReport" and item.artifact_id > narrative.artifact_id
-        }
-        missing = sorted(section_ids - checked_ids)
-        if missing:
-            raise WorkflowPrerequisiteError(
-                "COMPLETED requires a FactCheckReport for every NarrativeReview section; missing: "
-                + ", ".join(missing)
             )
 
     def prepare_continuation(self, project_id: str) -> dict[str, Any]:
@@ -1028,21 +1055,20 @@ class ResearchService:
                     pass
                 else:
                     raise WorkflowPrerequisiteError(
-                        "Project is already complete and has a fact-checked NarrativeReview"
+                        "Project is already complete and has a NarrativeReview"
                     )
             elif not self._is_recoverable_operational_failure(artifacts):
                 raise WorkflowPrerequisiteError(
-                    "INCONCLUSIVE can only be resumed when a saved PASS review is followed "
-                    "by a recoverable writing-system failure"
+                    "INCONCLUSIVE can only be resumed after a recoverable operational failure"
                 )
 
-            review = self._pass_review(project, artifacts)
-            if self._latest_artifact(artifacts, "NarrativeReview") is not None:
-                recovery_stage = ResearchStage.NARRATED
-            elif self._latest_artifact(artifacts, "ReviewOutline") is not None:
-                recovery_stage = ResearchStage.OUTLINED
-            else:
-                recovery_stage = ResearchStage.REVIEWED
+            recovery_stage = self._operational_recovery_target(project, artifacts)
+            review_artifact = self._latest_artifact(artifacts, "ReviewResult")
+            review = (
+                ReviewResult.model_validate(review_artifact.payload)
+                if review_artifact is not None
+                else project.current_review
+            )
             project = self.repository.reopen_interrupted_workflow(
                 project_id,
                 recovery_stage,
@@ -1051,6 +1077,31 @@ class ResearchService:
             )
             self._export_snapshot(project_id)
 
+        if project.stage is ResearchStage.SCREENED:
+            return {
+                "mode": "screening",
+                "project": project,
+                "context": self.screening_context(project_id),
+            }
+
+        pipeline_stages = {
+            ResearchStage.EXTRACTED,
+            ResearchStage.SYNTHESIZED,
+            ResearchStage.REVIEW_PENDING,
+        }
+        if project.stage in pipeline_stages:
+            return {
+                "mode": "pipeline",
+                "project": project,
+                "context": {
+                    "current_stage": project.stage.value,
+                    "saved_context": self.get_agent_context(project_id),
+                    "recovered_from": (
+                        recovered_from.value if recovered_from is not None else None
+                    ),
+                },
+            }
+
         resumable = {
             ResearchStage.REVIEWED,
             ResearchStage.OUTLINED,
@@ -1058,7 +1109,8 @@ class ResearchService:
         }
         if project.stage not in resumable:
             raise WorkflowPrerequisiteError(
-                "Project continuation requires SCREENED, REVIEWED, OUTLINED, or NARRATED; "
+                "Project continuation requires SCREENED, EXTRACTED, SYNTHESIZED, "
+                "REVIEW_PENDING, REVIEWED, OUTLINED, or NARRATED; "
                 f"current stage is {project.stage.value}"
             )
 
@@ -1067,7 +1119,6 @@ class ResearchService:
         outline = self._latest_artifact(artifacts, "ReviewOutline")
         narrative = self._latest_artifact(artifacts, "NarrativeReview")
         outline_id = outline.artifact_id if outline is not None else 0
-        narrative_id = narrative.artifact_id if narrative is not None else 0
         context = {
             "current_stage": project.stage.value,
             "review_verdict": review.verdict.value,
@@ -1083,11 +1134,6 @@ class ResearchService:
                     "heading": item.get("heading"),
                 }
                 for item in (narrative.payload.get("sections", []) if narrative else [])
-            ],
-            "fact_checked_section_ids": [
-                item.payload.get("section_id")
-                for item in artifacts
-                if item.kind == "FactCheckReport" and item.artifact_id > narrative_id
             ],
             "recovered_from": recovered_from.value if recovered_from is not None else None,
         }
@@ -1107,11 +1153,11 @@ class ResearchService:
             raise WorkflowPrerequisiteError("Narrative assembly requires a saved ReviewOutline")
         outline = ReviewOutline.model_validate(outline_artifact.payload)
 
-        draft_artifacts = {
-            str(item.payload.get("section_id", "")): item
-            for item in artifacts
-            if item.kind == "SectionDraft" and item.artifact_id > outline_artifact.artifact_id
-        }
+        draft_artifacts = {}
+        for item in artifacts:
+            if item.kind != "SectionDraft" or item.artifact_id <= outline_artifact.artifact_id:
+                continue
+            draft_artifacts[str(item.payload.get("section_id", ""))] = item
         missing = [
             section.section_id
             for section in outline.sections
@@ -1126,23 +1172,24 @@ class ResearchService:
         sections = []
         evidence_chain: dict[str, list[str]] = {}
         for section in outline.sections:
-            draft = SectionDraft.model_validate(draft_artifacts[section.section_id].payload)
+            draft = SectionDraft.model_validate(
+                draft_artifacts[section.section_id].payload
+            )
             if not draft.content.strip():
                 raise WorkflowPrerequisiteError(
                     f"SectionDraft {section.section_id!r} has no content"
                 )
             cited_evidence = list(dict.fromkeys(draft.cited_evidence))
-            sections.append(
-                {
-                    "section_id": draft.section_id,
-                    "heading": draft.heading or section.heading,
-                    "content": draft.content,
-                    "subsections": [],
-                    "cited_evidence": cited_evidence,
-                }
-            )
+            narrative_section = {
+                "section_id": draft.section_id,
+                "heading": draft.heading or section.heading,
+                "content": draft.content,
+                "subsections": [],
+                "cited_evidence": cited_evidence,
+            }
+            sections.append(narrative_section)
             for evidence_id in cited_evidence:
-                evidence_chain.setdefault(evidence_id, []).append(draft.section_id)
+                evidence_chain.setdefault(evidence_id, []).append(section.section_id)
 
         candidate_metadata: dict[str, dict[str, Any]] = {}
         for artifact in artifacts:
@@ -1193,7 +1240,7 @@ class ResearchService:
         abstract = (
             f"本综述围绕“{project.research_question}”展开，基于 {len(cards)} 篇入选文献的 "
             f"{evidence_count} 条可追踪证据，按照“{outline.narrative_arc}”组织为 "
-            f"{len(sections)} 个章节。正文保留 evidence_id 引用，以便逐项核查论述与原始证据。"
+            f"{len(sections)} 个章节。正文保留 evidence_id 引用，便于追踪论述与原始证据。"
         )
         body = "\n".join(section["content"] for section in sections)
         word_count = len(re.findall(r"[\u4e00-\u9fff]|[A-Za-z0-9]+", body))
@@ -1210,7 +1257,7 @@ class ResearchService:
             project_id,
             "NarrativeReview",
             payload,
-            ResearchStage.NARRATED,
+            ResearchStage.COMPLETED,
             actor="chief-editor-fallback",
         )
 
@@ -1285,6 +1332,7 @@ class ResearchService:
             "screening_artifact_id": screening.artifact_id,
             "included_paper_ids": included_ids,
             "included_papers": included_papers,
+            "saved_paper_card_ids": sorted(self._latest_paper_cards(artifacts)),
             "screening_reasons": screening.payload.get("reasons", []),
         }
 
@@ -1382,9 +1430,12 @@ class ResearchService:
                 raise WorkflowPrerequisiteError(
                     "Gap supporting_paper_ids do not match referenced Evidence papers"
                 )
-            quote_text = " ".join(str(evidence[item].get("quote", "")) for item in gap_ids if item in evidence)
-            numeric_tokens = re.findall(r"\d+(?:\.\d+)?%?", gap.get("proposed_hypothesis", ""))
-            unsupported = [token for token in numeric_tokens if token not in quote_text]
+            quote_text = " ".join(
+                str(evidence[item].get("quote", "")) for item in gap_ids if item in evidence
+            )
+            numeric_tokens = _numeric_claims(str(gap.get("proposed_hypothesis", "")))
+            supported_tokens = set(_numeric_claims(quote_text))
+            unsupported = [token for token in numeric_tokens if token not in supported_tokens]
             if unsupported:
                 raise WorkflowPrerequisiteError(
                     "Synthesis hypothesis contains unsupported numeric claims: "
@@ -1424,23 +1475,21 @@ class ResearchService:
 
     def save_artifact(self, project_id: str, kind: str, payload: dict[str, Any]):
         stage_by_kind = {
-            "PaperCard": ResearchStage.SCREENED,
-            "SectionDraft": ResearchStage.OUTLINED,
-            "FactCheckReport": ResearchStage.NARRATED,
+            "PaperCard": {ResearchStage.SCREENED},
+            "SectionDraft": {ResearchStage.OUTLINED},
         }
+        project = self.repository.get_project(project_id)
         if kind in stage_by_kind:
-            project = self.repository.get_project(project_id)
-            expected_stage = stage_by_kind[kind]
-            if project.stage is not expected_stage:
+            expected_stages = stage_by_kind[kind]
+            if project.stage not in expected_stages:
+                expected_text = ", ".join(sorted(stage.value for stage in expected_stages))
                 raise WorkflowPrerequisiteError(
-                    f"{kind} can only be saved while the project is at {expected_stage.value}"
+                    f"{kind} can only be saved while the project is at {expected_text}"
                 )
         payload = self._validate_artifact(kind, payload)
         artifacts = self.repository.list_artifacts(project_id)
         if kind == "SectionDraft":
             self._validate_section_draft(artifacts, payload)
-        elif kind == "FactCheckReport":
-            self._validate_fact_check(artifacts, payload)
         elif kind == "PaperCard":
             evidence_ids = [str(item["evidence_id"]) for item in payload["findings"]]
             if len(evidence_ids) != len(set(evidence_ids)):
@@ -1484,6 +1533,7 @@ class ResearchService:
     ):
         payload = self._validate_artifact(kind, payload)
         artifacts = self.repository.list_artifacts(project_id)
+        project = self.repository.get_project(project_id)
         if kind == "SynthesisReport":
             self._validate_synthesis_evidence(artifacts, payload)
         elif kind == "ReviewResult":
@@ -1494,7 +1544,7 @@ class ResearchService:
             self._validate_outline(payload)
         elif kind == "NarrativeReview":
             self._validate_narrative_review(artifacts, payload)
-        if target is ResearchStage.COMPLETED:
+        if target is ResearchStage.COMPLETED and kind != "NarrativeReview":
             self._validate_completion(artifacts)
         required_kind = REQUIRED_ARTIFACTS.get(target)
         existing_kinds = {item.kind for item in artifacts}

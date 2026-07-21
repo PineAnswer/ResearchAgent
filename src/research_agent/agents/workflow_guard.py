@@ -26,7 +26,6 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "research-outliner",
         "narrative-writer",
         "chief-editor",
-        "fact-checker",
     }
     project_scoped_tools = {
         "get_research_project",
@@ -40,14 +39,13 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
     }
 
     required_stage = {
-        "literature-scout": ResearchStage.CREATED,
-        "paper-reader": ResearchStage.SCREENED,
-        "research-synthesizer": ResearchStage.EXTRACTED,
-        "evidence-reviewer": ResearchStage.REVIEW_PENDING,
-        "research-outliner": ResearchStage.REVIEWED,
-        "narrative-writer": ResearchStage.OUTLINED,
-        "chief-editor": ResearchStage.OUTLINED,
-        "fact-checker": ResearchStage.NARRATED,
+        "literature-scout": {ResearchStage.CREATED},
+        "paper-reader": {ResearchStage.SCREENED},
+        "research-synthesizer": {ResearchStage.EXTRACTED},
+        "evidence-reviewer": {ResearchStage.REVIEW_PENDING},
+        "research-outliner": {ResearchStage.REVIEWED},
+        "narrative-writer": {ResearchStage.OUTLINED},
+        "chief-editor": {ResearchStage.OUTLINED},
     }
 
     def __init__(
@@ -124,7 +122,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 return self._error(
                     request,
                     "subagent_not_allowed",
-                    "只能委派已注册的检索、精读、综合、审查、提纲、写作、编辑或事实核查Agent。",
+                    "只能委派已注册的检索、精读、综合、审查、提纲、写作或编辑Agent。",
                 )
         if self.service is not None and self.runtime_state is not None:
             project_id = self.runtime_state.project_id(thread_id)
@@ -136,11 +134,12 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 )
             project = self.service.get_project(project_id)
             expected = self.required_stage[subagent_type]
-            if project.stage is not expected:
+            if project.stage not in expected:
+                expected_text = "/".join(sorted(stage.value for stage in expected))
                 return self._error(
                     request,
                     "subagent_stage_not_ready",
-                    f"{subagent_type}只能在{expected.value}阶段委派；"
+                    f"{subagent_type}只能在{expected_text}阶段委派；"
                     f"当前阶段为{project.stage.value}。",
                 )
             if self.runtime_state.pending_result(thread_id, subagent_type) is not None:
@@ -149,12 +148,30 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                     "subagent_result_must_be_committed",
                     f"先调用commit_subagent_result保存上一份{subagent_type}结果。",
                 )
-            if self.runtime_state.rejection_count(thread_id, subagent_type) >= 2:
+            rejection_scope = None
+            if subagent_type == "paper-reader":
+                description = str(args.get("description", ""))
+                rejection_scope = self._extract_reader_paper_id(description)
+            if (
+                self.runtime_state.rejection_count(
+                    thread_id, subagent_type, rejection_scope
+                )
+                >= 2
+            ):
+                subject = (
+                    f"paper-reader处理论文{rejection_scope}"
+                    if rejection_scope
+                    else subagent_type
+                )
+                next_step = (
+                    "停止重试该论文并继续处理下一篇入选论文。"
+                    if subagent_type == "paper-reader"
+                    else "停止重试并调用record_research_issue保存可恢复问题。"
+                )
                 return self._error(
                     request,
                     "subagent_retry_limit_reached",
-                    f"{subagent_type}已连续生成两份无效结果；停止本轮重试并调用"
-                    "record_research_issue保存可恢复问题，项目保持当前阶段。",
+                    f"{subject}已连续生成两份无效结果；{next_step}",
                 )
         if (
             subagent_type == "paper-reader"
