@@ -23,6 +23,7 @@ from research_agent.domain.models import (
     LibraryNote,
     LibraryPaper,
     PaperAnnotation,
+    PaperReadingProgress,
     ProjectPaper,
     ResearchConversation,
     ResearchProject,
@@ -217,6 +218,23 @@ class SqliteResearchRepository:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS paper_reading_progress (
+                    user_id TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    attachment_id TEXT,
+                    project_id TEXT,
+                    page INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, library_id),
+                    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY(library_id) REFERENCES library_papers(library_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(attachment_id) REFERENCES library_attachments(attachment_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                        ON DELETE SET NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS library_attachments (
                     attachment_id TEXT PRIMARY KEY,
                     library_id TEXT NOT NULL,
@@ -344,6 +362,8 @@ class SqliteResearchRepository:
                     ON library_notes(library_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_paper_annotations_paper
                     ON paper_annotations(user_id, library_id, page, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_paper_reading_progress_user
+                    ON paper_reading_progress(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_library_attachments_paper
                     ON library_attachments(library_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_library_chunks_paper
@@ -378,6 +398,12 @@ class SqliteResearchRepository:
             self._ensure_column(
                 connection,
                 "conversations",
+                "pinned_at",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "library_collection_papers",
                 "pinned_at",
                 "TEXT",
             )
@@ -1562,13 +1588,62 @@ class SqliteResearchRepository:
         return [str(row["collection_id"]) for row in rows]
 
     def list_collection_paper_ids(self, collection_id: str) -> list[str]:
+        return [
+            str(item["library_id"])
+            for item in self.list_collection_paper_memberships(collection_id)
+        ]
+
+    def list_collection_paper_memberships(
+        self, collection_id: str
+    ) -> list[dict[str, Any]]:
         self._get_library_collection(collection_id)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT library_id FROM library_collection_papers WHERE collection_id = ?",
+                """
+                SELECT library_id, created_at, pinned_at
+                FROM library_collection_papers
+                WHERE collection_id = ?
+                ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, created_at DESC
+                """,
                 (collection_id,),
             ).fetchall()
-        return [str(row["library_id"]) for row in rows]
+        return [
+            {
+                "library_id": str(row["library_id"]),
+                "created_at": row["created_at"],
+                "pinned_at": row["pinned_at"],
+                "pinned": row["pinned_at"] is not None,
+            }
+            for row in rows
+        ]
+
+    def set_collection_paper_pinned(
+        self,
+        collection_id: str,
+        library_id: str,
+        *,
+        pinned: bool,
+    ) -> dict[str, Any]:
+        self._get_library_collection(collection_id)
+        self.get_library_paper(library_id)
+        pinned_at = datetime.now(UTC).isoformat() if pinned else None
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE library_collection_papers
+                SET pinned_at = ?
+                WHERE collection_id = ? AND library_id = ?
+                """,
+                (pinned_at, collection_id, library_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError((collection_id, library_id))
+        return {
+            "collection_id": collection_id,
+            "library_id": library_id,
+            "pinned": pinned,
+            "pinned_at": pinned_at,
+        }
 
     def save_library_note(self, note: LibraryNote) -> LibraryNote:
         self.get_library_paper(note.library_id)
@@ -1690,6 +1765,72 @@ class SqliteResearchRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(annotation_id)
+
+    def save_paper_reading_progress(
+        self, progress: PaperReadingProgress
+    ) -> PaperReadingProgress:
+        self.get_library_paper(progress.library_id)
+        if progress.attachment_id:
+            attachment = self.get_library_attachment(progress.attachment_id)
+            if attachment.library_id != progress.library_id:
+                raise ValueError("Reading attachment belongs to another paper")
+        if progress.project_id:
+            self.get_project(progress.project_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_reading_progress(
+                    user_id, library_id, attachment_id, project_id, page, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, library_id) DO UPDATE SET
+                    attachment_id = COALESCE(excluded.attachment_id, paper_reading_progress.attachment_id),
+                    project_id = COALESCE(excluded.project_id, paper_reading_progress.project_id),
+                    page = excluded.page,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    self.current_user_id,
+                    progress.library_id,
+                    progress.attachment_id,
+                    progress.project_id,
+                    progress.page,
+                    progress.updated_at.isoformat(),
+                ),
+            )
+        return self.get_paper_reading_progress(progress.library_id) or progress
+
+    def get_paper_reading_progress(
+        self, library_id: str
+    ) -> PaperReadingProgress | None:
+        self.get_library_paper(library_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT library_id, attachment_id, project_id, page, updated_at
+                FROM paper_reading_progress
+                WHERE user_id = ? AND library_id = ?
+                """,
+                (self.current_user_id, library_id),
+            ).fetchone()
+        return PaperReadingProgress.model_validate(dict(row)) if row is not None else None
+
+    def list_paper_reading_progress(
+        self, limit: int = 100
+    ) -> list[PaperReadingProgress]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT pr.library_id, pr.attachment_id, pr.project_id, pr.page, pr.updated_at
+                FROM paper_reading_progress AS pr
+                JOIN user_library_papers AS ulp
+                    ON ulp.user_id = pr.user_id AND ulp.library_id = pr.library_id
+                WHERE pr.user_id = ? AND ulp.saved = 1 AND ulp.archived_at IS NULL
+                ORDER BY pr.updated_at DESC
+                LIMIT ?
+                """,
+                (self.current_user_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [PaperReadingProgress.model_validate(dict(row)) for row in rows]
 
     def save_library_attachment(
         self, attachment: LibraryAttachment
@@ -1903,8 +2044,10 @@ class SqliteResearchRepository:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                INSERT OR IGNORE INTO library_collection_papers(collection_id, library_id, created_at)
-                SELECT lcp.collection_id, ?, lcp.created_at
+                INSERT OR IGNORE INTO library_collection_papers(
+                    collection_id, library_id, created_at, pinned_at
+                )
+                SELECT lcp.collection_id, ?, lcp.created_at, lcp.pinned_at
                 FROM library_collection_papers AS lcp
                 JOIN library_collections AS lc ON lc.collection_id = lcp.collection_id
                 WHERE lcp.library_id = ? AND lc.user_id = ?

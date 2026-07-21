@@ -106,10 +106,18 @@
         </div>
 
         <div class="sidebar-heading">
-          <div class="sidebar-heading-label">
-            <i data-lucide="library-big" aria-hidden="true"></i>
+          <button
+            id="recentHistoryToggle"
+            class="sidebar-heading-label"
+            type="button"
+            aria-label="打开最近研究"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            title="最近研究"
+          >
+            <i data-lucide="message-circle" aria-hidden="true"></i>
             <h2 class="sidebar-label">历史研究</h2>
-          </div>
+          </button>
           <div class="sidebar-heading-actions sidebar-label">
             <button
               id="toggleProjectSelection"
@@ -336,8 +344,8 @@
               </div>
               <nav id="librarySmartViews" class="library-smart-views"></nav>
               <div class="library-nav-heading library-collection-heading">
-                <span>文件夹</span>
-                <button id="newCollection" class="icon-button" type="button" aria-label="新建文件夹" title="新建文件夹">
+                <span>研究文件夹</span>
+                <button id="newCollection" class="icon-button" type="button" aria-label="新建研究文件夹" title="新建研究文件夹">
                   <i data-lucide="folder-plus" aria-hidden="true"></i>
                 </button>
               </div>
@@ -471,6 +479,14 @@
                   <i data-lucide="loader-circle" aria-hidden="true"></i>
                   <p>正在准备论文全文…</p>
                 </div>
+              </div>
+              <div
+                id="paperHorizontalScroller"
+                class="paper-horizontal-scroller"
+                aria-label="横向滚动论文"
+                hidden
+              >
+                <div id="paperHorizontalScrollContent" class="paper-horizontal-scroll-content"></div>
               </div>
             </section>
 

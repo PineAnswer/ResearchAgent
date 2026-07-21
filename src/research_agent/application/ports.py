@@ -13,6 +13,7 @@ from research_agent.domain.models import (
     LibraryNote,
     LibraryPaper,
     PaperAnnotation,
+    PaperReadingProgress,
     ProjectPaper,
     ResearchConversation,
     ResearchProject,
@@ -135,6 +136,14 @@ class ResearchRepositoryPort(Protocol):
 
     def list_collection_paper_ids(self, collection_id: str) -> list[str]: ...
 
+    def list_collection_paper_memberships(
+        self, collection_id: str
+    ) -> list[dict[str, Any]]: ...
+
+    def set_collection_paper_pinned(
+        self, collection_id: str, library_id: str, *, pinned: bool
+    ) -> dict[str, Any]: ...
+
     def save_library_note(self, note: LibraryNote) -> LibraryNote: ...
 
     def list_library_notes(self, library_id: str) -> list[LibraryNote]: ...
@@ -148,6 +157,18 @@ class ResearchRepositoryPort(Protocol):
     def get_paper_annotation(self, annotation_id: str) -> PaperAnnotation: ...
 
     def delete_paper_annotation(self, annotation_id: str) -> None: ...
+
+    def save_paper_reading_progress(
+        self, progress: PaperReadingProgress
+    ) -> PaperReadingProgress: ...
+
+    def get_paper_reading_progress(
+        self, library_id: str
+    ) -> PaperReadingProgress | None: ...
+
+    def list_paper_reading_progress(
+        self, limit: int = 100
+    ) -> list[PaperReadingProgress]: ...
 
     def save_library_attachment(
         self, attachment: LibraryAttachment

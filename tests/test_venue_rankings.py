@@ -203,23 +203,43 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
     assert 'id="initialYearTo"' in html
     assert 'id="initialQualityVenuesOnly"' in html
     assert 'id="initialPreferLibrarySearch"' in html
-    assert 'id="supplementalQueries"' in html
+    assert 'id="recentHistoryToggle"' in html
+    assert 'id="paperHorizontalScroller"' in html
+    assert "研究文件夹" in html
     assert "prefer_library_search: elements.initialPreferLibrarySearch.checked" in script
     assert "suggested_queries: action === \"refine\"" in script
     assert 'method: "PATCH"' in script
     assert "project-list-menu-toggle" in script
-    assert 'const latestCandidateSet = latestArtifact(snapshot, "CandidateSetSnapshot")' in script
-    assert (
-        'metricCard("候选论文", latestCandidateSet?.candidates?.length '
-        "?? latestSearch?.candidates?.length ?? 0"
-    ) in script
-    assert "const revisionCount = (snapshot?.artifacts || []).filter(" in script
-    assert "const showContinuePanel = Boolean(mode);" in script
-    assert 'const activePhase = activeRun.kind === "continue"' in script
-    assert "elements.continuePanel.hidden = true;" in script
-    assert 'if (error.message === "conversation_already_running")' in script
+    assert 'latestSearch?.candidates?.length ?? 0, "首次检索去重结果"' in script
+    assert "latestCandidateSet" not in script
+    assert "...metrics.map(([label, value, hint]) => metricCard(label, value, hint))" in script
+    assert "project-hover-preview" in script
+    assert "projectListRenderSignature" in script
+    assert "function preserveExistingProjectOrder" in script
+    assert "loadProjects({ preserveOrder: true })" in script
+    assert "const previousScrollTop = elements.projectList.scrollTop" in script
+    assert "function artifactDisplayLabel" in script
+    assert "function captureSelectedTextRects" in script
+    assert "function focusPaperAnnotation" in script
+    assert "function updatePaperHorizontalScroller" in script
+    assert '["recent", "history", "最近研究"]' in script
+    assert "function libraryVenueBadges" in script
+    assert "function queuePaperReadingProgress" in script
+    assert "collection_membership" in script
+    assert 'grid-template-columns: 1fr' in styles
     assert '.app-shell[data-sidebar="collapsed"] .project-list-menu-toggle' in styles
     assert "const runFinished = syncRunningSnapshot(payload.data)" in script
     assert "仅 CCF-A、一区和 Nature 子刊" in html
     assert "candidate.venue_rating_explanation" in script
     assert "candidate.impact_factor" in script
+    assert "function renderEvidenceCitation" in script
+    assert "function decorateMarkdownCitations" in script
+    assert "await openPaperWorkspace(meta.libraryId, null, true)" in script
+    assert ".citation-hover-preview" in styles
+    assert ".recent-history-popover" in styles
+    assert ".paper-horizontal-scroller" in styles
+    assert ".paper-annotation-marker" in styles
+    assert ".library-recent-reading" in styles
+    assert ".library-folder-pin" in styles
+    assert ".sidebar-search input:focus" in styles
+    assert "box-shadow: none" in styles
