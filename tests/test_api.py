@@ -119,11 +119,15 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "continueButtonLabel" in index.text
     assert 'id="runVisualizer"' in index.text
     assert 'id="runPhaseTitle"' in index.text
+    assert 'id="usageGuide"' in index.text
+    assert 'id="usageGuideOpen"' in index.text
+    assert "欢迎使用文献研究工作台" in index.text
     assert "vendor/marked.umd.js" in index.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
     assert "@keyframes run-orbit" in styles.text
     assert ".stage-stepper.is-running" in styles.text
+    assert ".usage-guide-backdrop" in styles.text
     assert script.status_code == 200
     assert "submitFeedback" in script.text
     assert "deriveStepperState" in script.text
@@ -134,6 +138,8 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "写作待恢复" in script.text
     assert "本次停止来自主编输出格式故障" in script.text
     assert "renderMarkdown" in script.text
+    assert "maybeOpenUsageGuide" in script.text
+    assert "research-agent.usage-guide-dismissed.v1" in script.text
     assert lucide.status_code == 200
     assert "createIcons" in lucide.text
     assert marked.status_code == 200

@@ -4,12 +4,12 @@ PI_PROMPT = """
 ## 必须遵守的规则
 
 1. 同一条 AI 消息最多调用一个工具。必须等待该工具返回结果，再决定下一次调用。
-2. 正常状态逐步推进：CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → OUTLINED → NARRATED → COMPLETED；证据不足时按结构化错误指令从状态机允许的当前阶段进入INCONCLUSIVE并结束。
+2. 正常状态逐步推进：CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → OUTLINED → NARRATED；事实核查全为PASS后进入COMPLETED，存在REVISE时进入REVISION_PENDING修订并重新核查；证据不足时按结构化错误指令进入INCONCLUSIVE。
 3. 子Agent完成后只调用 commit_subagent_result；该工具从线程级结果仓库原样提交结构化输出，禁止手工复制JSON。
 4. 工具返回可恢复错误时，根据结构化错误继续流程；禁止围绕同一错误反复尝试。
 5. ScreeningDecision 只使用 save_screening_decision 保存；不得使用通用JSON保存工具。
 6. 禁止在同一条 AI 消息中分别调用保存工具和阶段推进工具。
-7. advance_project_stage 只用于 EXTRACTED、REVIEW_PENDING，以及在NarrativeReview和逐节FactCheckReport均已保存后的COMPLETED。
+7. advance_project_stage 只用于 EXTRACTED、REVIEW_PENDING、存在REVISE事实核查时的REVISION_PENDING，以及最新一轮事实核查全部PASS后的COMPLETED。
 8. SearchReport 的 search_terms 由系统替换为实际执行过的查询，禁止补写未执行查询。
 9. 每次只委派一篇论文给 paper-reader，收到结果后立即调用 commit_subagent_result，再委派下一篇。
 10. 委派 paper-reader 时传入 SearchReport 已有的完整元数据，包括真实paper_id、library_id、abstract、doi和url。
@@ -36,8 +36,8 @@ PI_PROMPT = """
 31. narrative-writer 的任务描述必须包含：section_id、heading、assigned_paper_ids、assigned_evidence_ids、key_claims、target_words。前一节的 transition_to 也应作为上下文传入。
 32. 全部 SectionDraft 保存后，委派 chief-editor 整合为 NarrativeReview。commit后进入NARRATED。
 33. NARRATED阶段，对每节委派 fact-checker 核查。fact-checker 的任务描述中指定 section_id。
-34. 全部 fact-checker 完成（无论 PASS 或 REVISE）后，advance_project_stage 到 COMPLETED。
-35. 不要跳过 narration 阶段直接 COMPLETED——PASS 审查后必须先生成文献综述。
+34. 全部 fact-checker 完成后检查 verdict：全部PASS才 advance_project_stage 到COMPLETED；存在REVISE必须进入REVISION_PENDING，按问题只重写被标记章节，再由chief-editor整合新版本并重新逐节核查。
+35. REVISION_PENDING中的narrative-writer只处理FactCheckReport标记REVISE的section_id；未标记章节必须原样保留。禁止跳过修订直接COMPLETED。
 """.strip()
 
 

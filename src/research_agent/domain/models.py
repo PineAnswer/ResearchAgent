@@ -25,6 +25,7 @@ class ResearchStage(StrEnum):
     REVIEWED = "REVIEWED"
     OUTLINED = "OUTLINED"
     NARRATED = "NARRATED"
+    REVISION_PENDING = "REVISION_PENDING"
     COMPLETED = "COMPLETED"
     INCONCLUSIVE = "INCONCLUSIVE"
 
@@ -109,7 +110,7 @@ class ManualPaperInput(BaseModel):
 
 
 class SearchFeedback(BaseModel):
-    action: Literal["refine", "accept", "stop"]
+    action: Literal["refine", "accept", "stop", "undo"]
     suggested_queries: list[str] = Field(default_factory=list)
     added_papers: list[ManualPaperInput] = Field(default_factory=list)
     excluded_paper_ids: list[str] = Field(default_factory=list)

@@ -74,10 +74,10 @@ research-agent serve --host 127.0.0.1 --port 8000
 1. 填写研究主题、研究问题、系统检索-筛选迭代轮数，以及精读篇数下限/上限后发起研究。
 2. 系统在单次 `literature-scout` 子任务内自动执行多轮“检索 → 标题摘要级筛选 → 生成覆盖盲区/筛选意见 → 根据意见改写下一轮检索词”。达到迭代轮数、工具预算或候选规模条件后，项目进入 `SEARCH_REVIEW_PENDING`。
 3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
-4. 确认候选集后，前端会直接进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作、总编整合和事实核查。
+4. 确认候选集后，可以先撤销确认或点击“继续研究”进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作、总编整合和事实核查。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
 
-前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和 `stop` 会修改项目状态，其中论文排除、候选集确认和终止当前没有撤销接口。
+前端只会锁定当前对话的重复提交按钮；你仍可新建或切换到其他对话。`refine`、`accept` 和人工 `stop` 会保存新候选快照，在后续运行开始前可通过补偿事件撤销到上一版，不改写历史记录。
 
 Swagger API 页面：<http://127.0.0.1:8000/docs>
 
@@ -222,7 +222,7 @@ GET /api/projects/RP-.../search-review
 }
 ```
 
-确认后，前端会自动调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
+确认后，前端会显示撤销与继续入口；点击继续后调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
 
 ```text
 POST /api/projects/RP-.../continue
@@ -302,11 +302,15 @@ CREATED
       ├─ PASS   → OUTLINED → NARRATED → COMPLETED
       └─ REVISE → EXTRACTED → 重新综合与审查
 
+NARRATED
+  ├─ 全部 FactCheck PASS → COMPLETED
+  └─ 存在 REVISE → REVISION_PENDING → NARRATED → 重新事实核查
+
 CREATED / SEARCHED / SEARCH_REVIEW_PENDING / SCREENED / EXTRACTED / SYNTHESIZED / REVIEW_PENDING / REVIEWED / OUTLINED / NARRATED
   └─ 证据不足或无法继续 → INCONCLUSIVE
 ```
 
-`ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`，`NarrativeReview` 提交后进入 `NARRATED`；各节 `FactCheckReport` 保存完成后，主 Agent 才推进到 `COMPLETED`。所有状态变化都经过 `ResearchService → Repository → validate_transition`。等待用户审核时运行结果为 `awaiting_input`，其他未闭环结果会标记为 `incomplete`、`needs_revision` 或 `inconclusive`。
+`ReviewResult.PASS` 是进入综述写作阶段的门禁。`ReviewOutline` 提交后进入 `OUTLINED`，`NarrativeReview` 提交后进入 `NARRATED`；各节最新 `FactCheckReport` 必须全部为 `PASS` 才能推进到 `COMPLETED`。存在 `REVISE` 时进入 `REVISION_PENDING`，只重写被标记章节并生成新版本后重新核查。所有状态变化都经过 `ResearchService → Repository → validate_transition`。
 
 ## 分层架构
 
@@ -413,7 +417,7 @@ SQLite 保存权威业务事实；`outputs/` 是便于人工检查的镜像；`r
 
 Pydantic 校验失败、非法状态迁移和缺少前置产物会返回给 Agent 或调用方处理，不会生成伪科研结果。
 
-连续两份无效子 Agent 结果也会受控进入 `INCONCLUSIVE`。该状态既可能表示证据不足，也可能表示结构化输出或业务校验连续失败；诊断时应读取 `InsufficientEvidence.reason`、`events.jsonl` 中的首个 `artifact.commit_failed` 以及项目快照。当前数值校验会把 `2D`、`3DVG`、`FFL-3DOG` 等术语中的数字识别为数值 token，属于已知限制，详见[《故障诊断与当前限制》](docs/troubleshooting.md)。
+连续两份无效子 Agent 结果也会受控进入 `INCONCLUSIVE`。该状态既可能表示证据不足，也可能表示结构化输出或业务校验连续失败；诊断时应读取 `InsufficientEvidence.reason`、`events.jsonl` 中的首个 `artifact.commit_failed` 以及项目快照。可恢复的执行故障会从最近的安全持久化阶段继续；数值校验会忽略 `2D`、`3DVG`、`ResNet-50` 等技术标识并对规范化数值做精确匹配。
 
 ## 测试范围
 

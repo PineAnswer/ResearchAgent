@@ -2025,17 +2025,18 @@ class SqliteResearchRepository:
         project_id: str,
         target: ResearchStage,
         actor: str,
-        review: ReviewResult,
+        review: ReviewResult | None = None,
     ) -> ResearchProject:
         """Reopen a false completion or recoverable operational interruption."""
         allowed_targets = {
+            ResearchStage.SEARCH_REVIEW_PENDING,
+            ResearchStage.SCREENED,
+            ResearchStage.EXTRACTED,
+            ResearchStage.SYNTHESIZED,
+            ResearchStage.REVIEW_PENDING,
             ResearchStage.REVIEWED,
             ResearchStage.OUTLINED,
             ResearchStage.NARRATED,
-        }
-        allowed_sources = {
-            ResearchStage.COMPLETED,
-            ResearchStage.INCONCLUSIVE,
         }
         if target not in allowed_targets:
             raise InvalidTransition(
@@ -2056,15 +2057,21 @@ class SqliteResearchRepository:
                 raise ProjectNotFound(project_id)
 
             project = ResearchProject.model_validate_json(row["payload_json"])
+            allowed_sources = (
+                {ResearchStage.SCREENED, ResearchStage.INCONCLUSIVE}
+                if target is ResearchStage.SEARCH_REVIEW_PENDING
+                else {ResearchStage.COMPLETED, ResearchStage.INCONCLUSIVE}
+            )
             if project.stage not in allowed_sources:
                 raise InvalidTransition(
-                    "Workflow recovery requires COMPLETED or INCONCLUSIVE; current stage is "
+                    "Workflow recovery is not allowed from the current stage: "
                     + project.stage.value
                 )
 
             from_stage = project.stage
             project.stage = target
-            project.current_review = review
+            if review is not None:
+                project.current_review = review
             project.updated_at = datetime.now(UTC)
             payload = project.model_dump_json()
             payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -2103,7 +2110,7 @@ class SqliteResearchRepository:
                     actor,
                     project.updated_at.isoformat(),
                     payload_hash,
-                    review.verdict.value,
+                    review.verdict.value if review else None,
                 ),
             )
         return project

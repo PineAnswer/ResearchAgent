@@ -45,7 +45,7 @@ def test_supervisor_has_atomic_commit_tool_and_explicit_ordering_policy(tmp_path
     assert "每次只委派一篇论文给 paper-reader" in PI_PROMPT
     assert "fetch_paper_text" in PI_PROMPT
     assert "必须复制 create_research_project 返回的原始 project_id" in PI_PROMPT
-    assert "REVIEWED → OUTLINED → NARRATED → COMPLETED" in PI_PROMPT
+    assert "REVISION_PENDING" in PI_PROMPT
     assert "research-outliner、narrative-writer、chief-editor、fact-checker" in PI_PROMPT
 
 

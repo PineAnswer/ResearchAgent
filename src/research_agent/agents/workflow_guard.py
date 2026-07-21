@@ -39,14 +39,14 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
     }
 
     required_stage = {
-        "literature-scout": ResearchStage.CREATED,
-        "paper-reader": ResearchStage.SCREENED,
-        "research-synthesizer": ResearchStage.EXTRACTED,
-        "evidence-reviewer": ResearchStage.REVIEW_PENDING,
-        "research-outliner": ResearchStage.REVIEWED,
-        "narrative-writer": ResearchStage.OUTLINED,
-        "chief-editor": ResearchStage.OUTLINED,
-        "fact-checker": ResearchStage.NARRATED,
+        "literature-scout": {ResearchStage.CREATED},
+        "paper-reader": {ResearchStage.SCREENED},
+        "research-synthesizer": {ResearchStage.EXTRACTED},
+        "evidence-reviewer": {ResearchStage.REVIEW_PENDING},
+        "research-outliner": {ResearchStage.REVIEWED},
+        "narrative-writer": {ResearchStage.OUTLINED, ResearchStage.REVISION_PENDING},
+        "chief-editor": {ResearchStage.OUTLINED, ResearchStage.REVISION_PENDING},
+        "fact-checker": {ResearchStage.NARRATED},
     }
 
     def __init__(
@@ -135,11 +135,12 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 )
             project = self.service.get_project(project_id)
             expected = self.required_stage[subagent_type]
-            if project.stage is not expected:
+            if project.stage not in expected:
+                expected_text = "/".join(sorted(stage.value for stage in expected))
                 return self._error(
                     request,
                     "subagent_stage_not_ready",
-                    f"{subagent_type}只能在{expected.value}阶段委派；"
+                    f"{subagent_type}只能在{expected_text}阶段委派；"
                     f"当前阶段为{project.stage.value}。",
                 )
             if self.runtime_state.pending_result(thread_id, subagent_type) is not None:

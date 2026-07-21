@@ -158,6 +158,12 @@ def test_verified_doi_can_be_added_and_user_can_accept(tmp_path) -> None:
     ]
     assert service.get_project(project_id).stage is ResearchStage.SCREENED
 
+    undone = review.undo_last_feedback(project_id)
+    assert undone["undone_action"] == "accept"
+    assert undone["project"]["stage"] == "SEARCH_REVIEW_PENDING"
+    assert [item["paper_id"] for item in undone["candidate_set"]["candidates"]] == ["P1"]
+    assert review.get_review(project_id)["can_undo"] is False
+
 
 def test_openalex_url_candidates_are_screened_as_bare_ids(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
@@ -230,6 +236,10 @@ def test_search_round_limit_and_stop_are_enforced(tmp_path) -> None:
     )
     assert stopped["project"]["stage"] == "INCONCLUSIVE"
     assert service.get_project(project_id).stage is ResearchStage.INCONCLUSIVE
+
+    restored = review.undo_last_feedback(project_id)
+    assert restored["undone_action"] == "stop"
+    assert service.get_project(project_id).stage is ResearchStage.SEARCH_REVIEW_PENDING
 
 
 def test_scout_commit_callback_opens_review_and_consumes_result(tmp_path) -> None:

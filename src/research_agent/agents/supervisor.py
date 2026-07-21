@@ -399,6 +399,7 @@ class ResearchSupervisor:
             "禁止创建新项目或重新检索；直接从逐篇paper-reader开始继续。"
             "Continue from the latest ScreeningDecision only. "
             "Dispatch paper-reader only for included_paper_ids from screened_context. "
+            "Skip IDs already listed in screened_context.saved_paper_card_ids. "
             "Ignore SearchReport/CandidateSetSnapshot candidates that are not included. "
             "If no included papers are available, finish with InsufficientEvidence."
             f"{context_text}"
@@ -446,12 +447,28 @@ class ResearchSupervisor:
             "禁止创建新项目、重新检索、重新筛选、重新精读、重新综合或重新审查。\n"
             "从 narrative_context.current_stage 继续综述写作："
             "REVIEWED先生成提纲；OUTLINED只补写尚未保存的SectionDraft再交给chief-editor；"
-            "NARRATED只核查尚未保存FactCheckReport的章节。"
+            "NARRATED只核查尚未保存FactCheckReport的章节；"
+            "REVISION_PENDING只重写revision_section_ids列出的章节，再交给chief-editor整合。"
             "必须复用已保存产物并跳过context中列出的已完成章节。"
-            "仅当NarrativeReview的每一节都有FactCheckReport后，才调用"
-            "advance_project_stage推进到COMPLETED。\n\n"
+            "事实核查全部PASS才推进到COMPLETED；存在REVISE时推进到REVISION_PENDING，"
+            "修订并生成新NarrativeReview后重新核查。\n\n"
             "narrative_context:\n"
             f"{json.dumps(narrative_context, ensure_ascii=False, indent=2)}"
+        )
+
+    @staticmethod
+    def build_pipeline_continue_prompt(
+        project_id: str,
+        pipeline_context: dict[str, Any],
+    ) -> str:
+        return (
+            f"继续已有科研项目：{project_id}\n"
+            "禁止创建新项目、重新检索或重读已经保存的论文。"
+            "从pipeline_context.current_stage继续：EXTRACTED委派research-synthesizer；"
+            "SYNTHESIZED先推进REVIEW_PENDING；REVIEW_PENDING委派evidence-reviewer。"
+            "必须复用saved_context中的PaperCard、Evidence和SynthesisReport。\n\n"
+            "pipeline_context:\n"
+            f"{json.dumps(pipeline_context, ensure_ascii=False, indent=2)}"
         )
 
     @staticmethod
@@ -646,6 +663,11 @@ class ResearchSupervisor:
         project = continuation["project"]
         if continuation["mode"] == "screening":
             continue_prompt = self.build_continue_prompt(
+                project_id,
+                continuation["context"],
+            )
+        elif continuation["mode"] == "pipeline":
+            continue_prompt = self.build_pipeline_continue_prompt(
                 project_id,
                 continuation["context"],
             )

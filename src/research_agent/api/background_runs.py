@@ -23,6 +23,7 @@ STAGE_PHASES = {
     ResearchStage.REVIEWED: "outlining",
     ResearchStage.OUTLINED: "writing",
     ResearchStage.NARRATED: "verifying",
+    ResearchStage.REVISION_PENDING: "writing",
     ResearchStage.COMPLETED: "done",
     ResearchStage.INCONCLUSIVE: "stopped",
 }

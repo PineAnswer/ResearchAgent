@@ -452,14 +452,16 @@ def build_project_tools(
     ) -> str:
         """Advance a stage that does not require a newly submitted artifact.
 
-        Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING, and
-        COMPLETED after NarrativeReview plus one FactCheckReport per section.
+        Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING,
+        REVISION_PENDING after failed fact checks, and COMPLETED after every
+        latest FactCheckReport passes.
         """
         try:
             target = ResearchStage(target_stage)
             allowed_targets = {
                 ResearchStage.EXTRACTED,
                 ResearchStage.REVIEW_PENDING,
+                ResearchStage.REVISION_PENDING,
                 ResearchStage.COMPLETED,
             }
             if target not in allowed_targets:

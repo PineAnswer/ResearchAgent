@@ -370,8 +370,35 @@ def test_missing_structured_response_preserves_invalid_tool_call_details() -> No
     diagnostics = pending["_diagnostics"]
     assert diagnostics["expected_schema_tool"] == "SynthesisReport"
     assert diagnostics["finish_reason"] == "tool_calls"
+    assert diagnostics["parse_status"] == "invalid_tool_calls"
     assert diagnostics["invalid_tool_calls"][0]["args"] == '{"topic": "broken"'
     assert diagnostics["invalid_tool_calls"][0]["error"] == "invalid JSON"
+
+
+def test_missing_structured_response_redacts_sensitive_diagnostics() -> None:
+    state = ResearchRuntimeState()
+    message = AIMessage(
+        content="Bearer private-token",
+        response_metadata={
+            "finish_reason": "stop",
+            "api_key": "sk-private",
+        },
+    )
+    runnable = recording_runnable(
+        FakeStructuredAgent(None, messages=[message]),
+        "research-synthesizer",
+        state,
+    )
+
+    runnable.invoke(
+        {"messages": [HumanMessage(content="synthesize")]},
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    diagnostics = state.pending_result("thread-a", "research-synthesizer")["_diagnostics"]
+    assert diagnostics["parse_status"] == "unparsed_content"
+    assert diagnostics["content"] == "Bearer [REDACTED]"
+    assert diagnostics["response_metadata"]["api_key"] == "[REDACTED]"
 
 
 def test_missing_structured_response_recovers_schema_tool_call_payload() -> None:

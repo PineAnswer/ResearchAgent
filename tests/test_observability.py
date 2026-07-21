@@ -204,6 +204,7 @@ def test_observable_chat_model_preserves_raw_provider_tool_arguments(tmp_path) -
     )
     response = {
         "id": "response-1",
+        "api_key": "sk-provider-secret",
         "model": "deepseek-chat",
         "object": "chat.completion",
         "created": 1,
@@ -257,6 +258,7 @@ def test_observable_chat_model_preserves_raw_provider_tool_arguments(tmp_path) -
         "function"
     ]["arguments"]
     assert logged_arguments == '{"topic": "broken"'
+    assert logged_raw["api_key"] == "[REDACTED]"
 
 
 def test_run_logger_marks_nonterminal_return_incomplete_and_updates_run_file(

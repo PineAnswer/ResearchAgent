@@ -265,10 +265,83 @@ class SearchReviewService:
     def get_review(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         snapshot = self._latest_snapshot(project_id)
+        artifacts = self.service.repository.list_artifacts(project_id)
+        feedbacks = [item for item in artifacts if item.kind == "SearchFeedback"]
+        latest_action = feedbacks[-1].payload.get("action") if feedbacks else None
+        reversible_stage = {
+            "refine": ResearchStage.SEARCH_REVIEW_PENDING,
+            "accept": ResearchStage.SCREENED,
+            "stop": ResearchStage.INCONCLUSIVE,
+        }.get(str(latest_action))
+        can_undo = (
+            len([item for item in artifacts if item.kind == "CandidateSetSnapshot"]) >= 2
+            and reversible_stage is project.stage
+        )
         return {
             "project": project.model_dump(mode="json"),
             "candidate_set": snapshot.model_dump(mode="json"),
             "awaiting_input": project.stage is ResearchStage.SEARCH_REVIEW_PENDING,
+            "can_undo": can_undo,
+            "last_feedback_action": latest_action,
+        }
+
+    def undo_last_feedback(self, project_id: str) -> dict[str, Any]:
+        """Append a compensating review snapshot and reopen reversible decisions."""
+        project = self.service.get_project(project_id)
+        artifacts = self.service.repository.list_artifacts(project_id)
+        feedbacks = [item for item in artifacts if item.kind == "SearchFeedback"]
+        snapshots = [item for item in artifacts if item.kind == "CandidateSetSnapshot"]
+        if not feedbacks or len(snapshots) < 2:
+            raise WorkflowPrerequisiteError("No search-review change is available to undo")
+        latest_action = str(feedbacks[-1].payload.get("action", ""))
+        expected_stage = {
+            "refine": ResearchStage.SEARCH_REVIEW_PENDING,
+            "accept": ResearchStage.SCREENED,
+            "stop": ResearchStage.INCONCLUSIVE,
+        }.get(latest_action)
+        if expected_stage is None:
+            raise WorkflowPrerequisiteError("The latest search-review change is not reversible")
+        if project.stage is not expected_stage:
+            raise WorkflowPrerequisiteError(
+                f"Cannot undo {latest_action} from {project.stage.value}; expected {expected_stage.value}"
+            )
+        try:
+            conversation = self.service.repository.get_project_conversation(project_id)
+            active_run = self.service.repository.get_active_conversation_run(
+                conversation.conversation_id
+            )
+        except KeyError:
+            active_run = None
+        if active_run is not None:
+            raise WorkflowPrerequisiteError("Cannot undo while a continuation run is active")
+
+        restored = CandidateSetSnapshot.model_validate(snapshots[-2].payload)
+        self.service.save_artifact(
+            project_id,
+            "SearchFeedback",
+            SearchFeedback(
+                action="undo",
+                comment=f"撤销上一项人工检索审核操作：{latest_action}",
+            ).model_dump(mode="json"),
+        )
+        restored_artifact = self.service.save_artifact(
+            project_id,
+            "CandidateSetSnapshot",
+            restored.model_dump(mode="json"),
+        )
+        if project.stage is not ResearchStage.SEARCH_REVIEW_PENDING:
+            project = self.service.repository.reopen_interrupted_workflow(
+                project_id,
+                ResearchStage.SEARCH_REVIEW_PENDING,
+                actor="human-search-review-undo",
+            )
+            self.service._export_snapshot(project_id)
+        return {
+            "project": project.model_dump(mode="json"),
+            "candidate_set": restored_artifact.payload,
+            "awaiting_input": True,
+            "can_undo": False,
+            "undone_action": latest_action,
         }
 
     def _search_queries(
@@ -358,6 +431,8 @@ class SearchReviewService:
         return list(merged.values())
 
     def apply_feedback(self, project_id: str, feedback: SearchFeedback) -> dict[str, Any]:
+        if feedback.action == "undo":
+            return self.undo_last_feedback(project_id)
         project = self.service.get_project(project_id)
         if project.stage is not ResearchStage.SEARCH_REVIEW_PENDING:
             raise WorkflowPrerequisiteError(
