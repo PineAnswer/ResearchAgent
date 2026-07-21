@@ -23,6 +23,7 @@ from research_agent.domain.models import (
     LibraryPaper,
     LibraryPaperAnalysis,
     PaperAnnotation,
+    PaperReadingProgress,
     ProjectPaper,
 )
 
@@ -636,6 +637,11 @@ class LibraryService:
         return {
             "paper": paper.model_dump(mode="json"),
             "projects": projects,
+            "reading_progress": (
+                progress.model_dump(mode="json")
+                if (progress := self.repository.get_paper_reading_progress(library_id))
+                else None
+            ),
             "collection_ids": self.repository.list_paper_collection_ids(library_id),
             "notes": [
                 note.model_dump(mode="json")
@@ -654,6 +660,58 @@ class LibraryService:
             "evidence": self._paper_evidence(paper),
         }
 
+    def _paper_research_sources(self, library_id: str) -> list[dict[str, Any]]:
+        sources = []
+        for relation in self.repository.list_library_paper_projects(library_id):
+            project = self.repository.get_project(relation.project_id)
+            sources.append(
+                {
+                    "project_id": project.project_id,
+                    "topic": project.topic,
+                    "research_question": project.research_question,
+                    "stage": project.stage.value,
+                    "status": relation.status,
+                    "linked_at": relation.created_at.isoformat(),
+                }
+            )
+        return sources
+
+    def _recent_reading_summary(
+        self,
+        paper: LibraryPaper,
+        progress: PaperReadingProgress | None,
+    ) -> dict[str, Any] | None:
+        annotations = sorted(
+            self.repository.list_paper_annotations(paper.library_id),
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
+        if progress is None and not annotations:
+            return None
+        action_time = annotations[0].updated_at if annotations else None
+        updated_at = max(
+            [value for value in (progress.updated_at if progress else None, action_time) if value],
+        )
+        last_page = progress.page if progress else (annotations[0].page or 1)
+        return {
+            "last_page": last_page,
+            "attachment_id": progress.attachment_id if progress else None,
+            "project_id": progress.project_id if progress else None,
+            "updated_at": updated_at.isoformat(),
+            "actions": [
+                {
+                    "annotation_id": annotation.annotation_id,
+                    "kind": annotation.kind,
+                    "page": annotation.page,
+                    "selected_text": annotation.selected_text,
+                    "content": annotation.content,
+                    "question": annotation.question,
+                    "updated_at": annotation.updated_at.isoformat(),
+                }
+                for annotation in annotations[:5]
+            ],
+        }
+
     def list_papers(
         self,
         query: str = "",
@@ -668,6 +726,20 @@ class LibraryService:
             include_archived=include_archived,
             limit=500,
         )
+        progresses = {
+            item.library_id: item
+            for item in self.repository.list_paper_reading_progress(limit=500)
+        }
+        recent_by_id = {
+            paper.library_id: summary
+            for paper in papers
+            if (
+                summary := self._recent_reading_summary(
+                    paper,
+                    progresses.get(paper.library_id),
+                )
+            ) is not None
+        }
         if view == "trash":
             papers = [paper for paper in papers if paper.archived_at is not None]
         elif view == "starred":
@@ -678,21 +750,43 @@ class LibraryService:
                 for paper in papers
                 if not self.repository.list_paper_collection_ids(paper.library_id)
             ]
+        elif view == "recent":
+            papers = [paper for paper in papers if paper.library_id in recent_by_id]
+            papers.sort(
+                key=lambda paper: recent_by_id[paper.library_id]["updated_at"],
+                reverse=True,
+            )
+        membership_by_id: dict[str, dict[str, Any]] = {}
         if collection_id:
-            member_ids = set(self.repository.list_collection_paper_ids(collection_id))
-            papers = [paper for paper in papers if paper.library_id in member_ids]
+            memberships = self.repository.list_collection_paper_memberships(collection_id)
+            membership_by_id = {item["library_id"]: item for item in memberships}
+            paper_by_id = {paper.library_id: paper for paper in papers}
+            papers = [
+                paper_by_id[item["library_id"]]
+                for item in memberships
+                if item["library_id"] in paper_by_id
+            ]
         papers = papers[: max(1, min(int(limit), 500))]
         result = []
         for paper in papers:
-            relations = self.repository.list_library_paper_projects(paper.library_id)
+            research_sources = self._paper_research_sources(paper.library_id)
+            membership = membership_by_id.get(paper.library_id)
             result.append(
                 {
                     **paper.model_dump(mode="json"),
-                    "project_count": len(relations),
-                    "project_statuses": sorted({relation.status for relation in relations}),
+                    "project_count": len(research_sources),
+                    "project_statuses": sorted({item["status"] for item in research_sources}),
+                    "research_sources": research_sources,
+                    "origin_label": (
+                        f"来自调研：{research_sources[0]['topic']}"
+                        if research_sources
+                        else "手动添加"
+                    ),
                     "collection_ids": self.repository.list_paper_collection_ids(
                         paper.library_id
                     ),
+                    "collection_membership": membership,
+                    "recent_reading": recent_by_id.get(paper.library_id),
                     "note_count": len(self.repository.list_library_notes(paper.library_id)),
                     "attachment_count": len(
                         self.repository.list_library_attachments(paper.library_id)
@@ -709,9 +803,20 @@ class LibraryService:
             limit=500,
         )
         collections = self.repository.list_library_collections()
+        progress_ids = {
+            item.library_id
+            for item in self.repository.list_paper_reading_progress(limit=500)
+        }
+        recent_ids = {
+            paper.library_id
+            for paper in active
+            if paper.library_id in progress_ids
+            or self.repository.list_paper_annotations(paper.library_id)
+        }
         return {
             "counts": {
                 "all": len(active),
+                "recent": len(recent_ids),
                 "starred": sum(paper.starred for paper in active),
                 "unfiled": sum(
                     not self.repository.list_paper_collection_ids(paper.library_id)
@@ -729,6 +834,19 @@ class LibraryService:
                 for collection in collections
             ],
         }
+
+    def set_collection_paper_pinned(
+        self,
+        collection_id: str,
+        library_id: str,
+        *,
+        pinned: bool,
+    ) -> dict[str, Any]:
+        return self.repository.set_collection_paper_pinned(
+            collection_id,
+            library_id,
+            pinned=pinned,
+        )
 
     def create_collection(
         self, name: str, parent_id: str | None = None
@@ -904,7 +1022,33 @@ class LibraryService:
             created_at=created_at,
             updated_at=datetime.now(UTC),
         )
-        return self.repository.save_paper_annotation(annotation)
+        saved = self.repository.save_paper_annotation(annotation)
+        if saved.page:
+            self.save_reading_progress(
+                library_id,
+                page=saved.page,
+                attachment_id=saved.attachment_id,
+            )
+        return saved
+
+    def save_reading_progress(
+        self,
+        library_id: str,
+        *,
+        page: int,
+        attachment_id: str | None = None,
+        project_id: str | None = None,
+    ) -> PaperReadingProgress:
+        if int(page) < 1:
+            raise ValueError("Reading page must be at least 1")
+        progress = PaperReadingProgress(
+            library_id=library_id,
+            attachment_id=attachment_id,
+            project_id=project_id,
+            page=int(page),
+            updated_at=datetime.now(UTC),
+        )
+        return self.repository.save_paper_reading_progress(progress)
 
     def paper_workspace(self, library_id: str) -> dict[str, Any]:
         detail = self.get_paper(library_id)

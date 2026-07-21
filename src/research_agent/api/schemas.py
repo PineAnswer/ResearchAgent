@@ -114,6 +114,16 @@ class LibraryCollectionRequest(BaseModel):
     parent_id: str | None = None
 
 
+class LibraryCollectionPaperRequest(BaseModel):
+    pinned: bool
+
+
+class PaperReadingProgressRequest(BaseModel):
+    page: int = Field(ge=1)
+    attachment_id: str | None = None
+    project_id: str | None = None
+
+
 class LibraryBulkRequest(BaseModel):
     library_ids: list[str] = Field(min_length=1)
     action: Literal[

@@ -160,6 +160,71 @@ def test_library_collections_smart_views_and_bulk_actions(tmp_path) -> None:
     assert service.library_overview()["counts"]["all"] == 2
 
 
+def test_collection_members_are_time_sorted_and_pinned_only_inside_folder(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    first = service.upsert_paper({"title": "First saved paper", "year": 2024})
+    second = service.upsert_paper({"title": "Second saved paper", "year": 2025})
+    folder = service.create_collection("Geo research")
+
+    service.bulk_update([first.library_id], "add_collection", folder.collection_id)
+    service.bulk_update([second.library_id], "add_collection", folder.collection_id)
+
+    assert [item["library_id"] for item in service.list_papers(collection_id=folder.collection_id)] == [
+        second.library_id,
+        first.library_id,
+    ]
+    service.set_collection_paper_pinned(folder.collection_id, first.library_id, pinned=True)
+    folder_items = service.list_papers(collection_id=folder.collection_id)
+    assert [item["library_id"] for item in folder_items] == [first.library_id, second.library_id]
+    assert folder_items[0]["collection_membership"]["pinned"] is True
+    assert {item["library_id"] for item in service.list_papers(view="all")} == {
+        first.library_id,
+        second.library_id,
+    }
+    assert service.list_papers(view="unfiled") == []
+
+
+def test_recent_research_view_keeps_resume_actions_origin_and_venue(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    project = repository.create_project("Visual geolocation", "Which methods work?")
+    linked = service.add_project_paper(
+        project.project_id,
+        {
+            "title": "A rated geolocation paper",
+            "year": 2025,
+            "venue": "CVPR",
+            "venue_type": "conference",
+            "venue_acronym": "CVPR",
+            "ccf_rank": "A",
+        },
+        status="included",
+    )
+    library_id = linked["paper"]["library_id"]
+    service.save_annotation(
+        library_id,
+        {
+            "kind": "note",
+            "page": 6,
+            "selected_text": "The original evidence sentence.",
+            "content": "Compare this result later.",
+        },
+    )
+    service.save_reading_progress(library_id, page=9, project_id=project.project_id)
+
+    recent = service.list_papers(view="recent")
+    assert len(recent) == 1
+    assert recent[0]["recent_reading"]["last_page"] == 9
+    assert recent[0]["recent_reading"]["actions"][0]["selected_text"] == (
+        "The original evidence sentence."
+    )
+    assert recent[0]["research_sources"][0]["topic"] == "Visual geolocation"
+    assert recent[0]["origin_label"] == "来自调研：Visual geolocation"
+    assert recent[0]["ccf_rank"] == "A"
+    assert service.library_overview()["counts"]["recent"] == 1
+
+
 def test_library_collections_form_a_three_level_acyclic_tree(tmp_path) -> None:
     repository = SqliteResearchRepository(tmp_path / "test.db")
     service = LibraryService(repository)

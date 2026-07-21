@@ -314,6 +314,19 @@ def test_library_management_api_supports_organizing_notes_and_compare(
                 f"/api/library/papers/{first_id}/attachments",
                 json={"name": "PDF", "url": "https://example.test/paper.pdf"},
             )
+            attachment_id = attachment.json()["data"]["attachment_id"]
+            progress = await client.put(
+                f"/api/library/papers/{first_id}/reading-progress",
+                json={"page": 4, "attachment_id": attachment_id},
+            )
+            pinned = await client.patch(
+                f"/api/library/collections/{collection_id}/papers/{first_id}",
+                json={"pinned": True},
+            )
+            recent = await client.get("/api/library", params={"view": "recent"})
+            folder = await client.get(
+                "/api/library", params={"collection_id": collection_id}
+            )
             uploaded = await client.post(
                 f"/api/library/papers/{first_id}/attachments/upload",
                 params={"filename": "local.pdf", "media_type": "application/pdf"},
@@ -347,6 +360,11 @@ def test_library_management_api_supports_organizing_notes_and_compare(
                 comparison,
                 answer,
                 overview,
+                progress,
+                pinned,
+                recent,
+                folder,
+                first_id,
             )
 
     (
@@ -359,6 +377,11 @@ def test_library_management_api_supports_organizing_notes_and_compare(
         comparison,
         answer,
         overview,
+        progress,
+        pinned,
+        recent,
+        folder,
+        first_id,
     ) = asyncio.run(exercise_api())
 
     assert bulk.status_code == 200
@@ -374,6 +397,11 @@ def test_library_management_api_supports_organizing_notes_and_compare(
     assert len(comparison.json()["data"]["rows"]) == 2
     assert "Traceability improved" in answer.json()["data"]["answer"]
     assert overview.json()["data"]["collections"][0]["paper_count"] == 2
+    assert progress.status_code == 200
+    assert progress.json()["data"]["page"] == 4
+    assert pinned.json()["data"]["pinned"] is True
+    assert recent.json()["data"][0]["library_id"] == first_id
+    assert folder.json()["data"][0]["collection_membership"]["pinned"] is True
 
 
 def test_search_review_api_can_show_accept_and_continue_project(

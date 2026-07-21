@@ -990,6 +990,38 @@ def build_literature_tools(
             values.append(url)
         return values
 
+    def semantic_scholar_pdf_urls(doi: str) -> list[str]:
+        """Resolve DOI-to-preprint links that OpenAlex does not always expose."""
+        normalized_doi = doi.removeprefix("https://doi.org/").strip()
+        if not normalized_doi:
+            return []
+        identifier = quote(f"DOI:{normalized_doi}", safe=":")
+        lookup = (
+            "https://api.semanticscholar.org/graph/v1/paper/"
+            f"{identifier}?fields=openAccessPdf,externalIds"
+        )
+        try:
+            data = _get_json(
+                lookup,
+                source="Semantic Scholar",
+                policy=retry_policy,
+            )
+        except AcademicApiError:
+            return []
+        urls: list[str] = []
+        open_access_url = str((data.get("openAccessPdf") or {}).get("url") or "")
+        if open_access_url:
+            urls.append(open_access_url)
+        arxiv_id = _arxiv_id(str((data.get("externalIds") or {}).get("ArXiv") or ""))
+        if arxiv_id:
+            urls.extend(
+                [
+                    f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+                    f"https://export.arxiv.org/pdf/{arxiv_id}",
+                ]
+            )
+        return list(dict.fromkeys(urls))
+
     @tool
     def fetch_paper_text(
         paper_id: str,
@@ -999,8 +1031,9 @@ def build_literature_tools(
     ) -> str:
         """Fetch an openly available paper PDF and return page-numbered text.
 
-        The tool checks arXiv and OpenAlex open-access locations, saves a bounded
-        PDF under /papers, and never treats a DOI landing page as a PDF.
+        The tool checks direct arXiv links, OpenAlex locations, and DOI-linked
+        Semantic Scholar preprints, saves a bounded PDF under /papers, and never
+        treats a DOI landing page as a PDF.
         """
         if allowed_root is None:
             return json.dumps(
@@ -1040,18 +1073,27 @@ def build_literature_tools(
         errors = []
         candidate_index = 0
         openalex_loaded = False
+        semantic_scholar_loaded = False
         while True:
             if candidate_index >= len(candidates):
-                if openalex_loaded:
+                if not openalex_loaded:
+                    openalex_loaded = True
+                    candidates.extend(
+                        item
+                        for item in openalex_pdf_urls(paper_id, doi)
+                        if _safe_public_url(item) and item not in candidates
+                    )
+                elif not semantic_scholar_loaded:
+                    semantic_scholar_loaded = True
+                    candidates.extend(
+                        item
+                        for item in semantic_scholar_pdf_urls(doi)
+                        if _safe_public_url(item) and item not in candidates
+                    )
+                else:
                     break
-                openalex_loaded = True
-                candidates.extend(
-                    item
-                    for item in openalex_pdf_urls(paper_id, doi)
-                    if _safe_public_url(item) and item not in candidates
-                )
                 if candidate_index >= len(candidates):
-                    break
+                    continue
             candidate = candidates[candidate_index]
             candidate_index += 1
             try:

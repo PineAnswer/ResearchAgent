@@ -259,6 +259,49 @@ def test_fetch_paper_text_accepts_trusted_arxiv_pdf_path_without_doi(
     assert requested_urls == ["https://arxiv.org/pdf/2603.21522.pdf"]
 
 
+def test_fetch_paper_text_resolves_doi_linked_arxiv_preprint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        if request.full_url.startswith("https://api.openalex.org/"):
+            return FakeJsonResponse({"best_oa_location": None, "locations": []})
+        if request.full_url.startswith("https://api.semanticscholar.org/"):
+            return FakeJsonResponse(
+                {
+                    "openAccessPdf": {"url": "https://arxiv.org/pdf/2502.16601"},
+                    "externalIds": {"ArXiv": "2502.16601"},
+                }
+            )
+        if request.full_url == "https://arxiv.org/pdf/2502.16601":
+            return FakeBinaryResponse(buffer.getvalue())
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["fetch_paper_text"].invoke(
+            {
+                "paper_id": "10.1109/TPAMI.2025.3629287",
+                "doi": "10.1109/TPAMI.2025.3629287",
+                "url": "https://doi.org/10.1109/TPAMI.2025.3629287",
+                "max_pages": 1,
+            }
+        )
+    )
+
+    assert result["available"] is True
+    assert result["source_url"] == "https://arxiv.org/pdf/2502.16601"
+    assert any("api.semanticscholar.org" in item for item in requested_urls)
+
+
 def test_fetch_paper_text_uses_mdpi_resource_fallback_after_403(
     tmp_path: Path, monkeypatch
 ) -> None:

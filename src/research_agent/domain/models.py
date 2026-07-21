@@ -385,6 +385,16 @@ class PaperAnnotation(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class PaperReadingProgress(BaseModel):
+    """Per-user resume point for continuing a paper reading session."""
+
+    library_id: str
+    attachment_id: str | None = None
+    project_id: str | None = None
+    page: int = 1
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class LibraryAttachment(BaseModel):
     """File or URL reference associated with a canonical paper."""
 

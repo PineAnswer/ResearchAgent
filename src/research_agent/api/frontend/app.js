@@ -133,6 +133,24 @@ function artifactLabel(kind) {
   return ARTIFACT_LABELS[kind] || kind;
 }
 
+function compactArtifactText(value, maxLength = 18) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}…` : text;
+}
+
+function artifactDisplayLabel(artifact) {
+  if (artifact?.kind !== "SectionDraft") return artifactLabel(artifact?.kind || "");
+  const payload = artifact.payload || {};
+  const sectionId = compactArtifactText(payload.section_id || "", 5);
+  const heading = String(
+    payload.heading || payload.section_title || payload.title || "章节",
+  )
+    .replace(/^\s*(?:第\s*)?\d+\s*[.、:：-]?\s*/, "")
+    .trim();
+  const conciseHeading = compactArtifactText(heading.split(/[:：]/, 1)[0], 20);
+  return [sectionId, conciseHeading].filter(Boolean).join(" · ") || "章节草稿";
+}
+
 const state = {
   projects: [],
   projectsLoading: false,
@@ -161,6 +179,8 @@ const state = {
   libraryPapers: [],
   libraryOverview: { counts: {}, collections: [] },
   projectLibrary: new Map(),
+  citationIndex: new Map(),
+  citationEvidenceIds: [],
   selectedLibraryId: null,
   selectedLibraryIds: new Set(),
   libraryView: "all",
@@ -172,6 +192,10 @@ const state = {
   paperPdfJs: null,
   paperZoom: 1,
   paperSelection: null,
+  activePaperAnnotationId: null,
+  paperScrollSyncing: false,
+  paperCurrentPage: null,
+  paperProgressTimer: null,
   paperLastAnswer: null,
   paperRenderSession: 0,
   runStartedAt: null,
@@ -186,6 +210,7 @@ const state = {
   runSessionId: 0,
   projectLoadSession: 0,
   openConversationMenuId: null,
+  projectListRenderSignature: "",
 };
 
 const byId = (id) => document.getElementById(id);
@@ -201,6 +226,7 @@ const elements = {
   usageGuideOpen: byId("usageGuideOpen"),
   newProjectToggle: byId("newProjectToggle"),
   libraryToggle: byId("libraryToggle"),
+  recentHistoryToggle: byId("recentHistoryToggle"),
   newProjectForm: byId("newProjectForm"),
   createView: byId("createView"),
   libraryView: byId("libraryView"),
@@ -214,6 +240,8 @@ const elements = {
   paperZoomOut: byId("paperZoomOut"),
   paperZoomIn: byId("paperZoomIn"),
   paperZoomLabel: byId("paperZoomLabel"),
+  paperHorizontalScroller: byId("paperHorizontalScroller"),
+  paperHorizontalScrollContent: byId("paperHorizontalScrollContent"),
   paperSelectionBar: byId("paperSelectionBar"),
   paperSelectionPage: byId("paperSelectionPage"),
   paperSelectionPreview: byId("paperSelectionPreview"),
@@ -359,6 +387,7 @@ const elements = {
 
 const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
 const USAGE_GUIDE_STORAGE_KEY = "research-agent.usage-guide-dismissed.v1";
+let projectPreviewAnchor = null;
 
 function iconNode(name) {
   const icon = document.createElement("i");
@@ -398,6 +427,7 @@ function closeMenus() {
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
   setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   closeConversationMenus();
+  closeRecentHistoryPopover();
 }
 
 function closeConversationMenus(except = null) {
@@ -412,6 +442,131 @@ function closeConversationMenus(except = null) {
   state.openConversationMenuId = except
     ? except.closest(".project-list-entry")?.dataset.conversationId || null
     : null;
+}
+
+function ensureProjectPreview() {
+  let preview = document.getElementById("projectHoverPreview");
+  if (preview) return preview;
+  preview = document.createElement("div");
+  preview.id = "projectHoverPreview";
+  preview.className = "project-hover-preview";
+  preview.setAttribute("role", "tooltip");
+  preview.hidden = true;
+  document.body.append(preview);
+  return preview;
+}
+
+function hideProjectPreview() {
+  const preview = document.getElementById("projectHoverPreview");
+  if (preview) preview.hidden = true;
+  projectPreviewAnchor?.removeAttribute("aria-describedby");
+  projectPreviewAnchor = null;
+}
+
+function showProjectPreview(project, anchor) {
+  if (elements.appShell.dataset.sidebar !== "collapsed") return;
+  const preview = ensureProjectPreview();
+  const title = document.createElement("strong");
+  title.className = "project-hover-preview-title";
+  title.textContent = projectDisplayTitle(project);
+  const question = document.createElement("span");
+  question.className = "project-hover-preview-question";
+  question.textContent = project.research_question || "未填写研究问题";
+  preview.replaceChildren(title, question);
+
+  projectPreviewAnchor?.removeAttribute("aria-describedby");
+  projectPreviewAnchor = anchor;
+  anchor.setAttribute("aria-describedby", preview.id);
+  preview.hidden = false;
+  preview.style.visibility = "hidden";
+  const anchorRect = anchor.getBoundingClientRect();
+  preview.style.left = `${Math.round(anchorRect.right + 10)}px`;
+  preview.style.top = "8px";
+  const previewRect = preview.getBoundingClientRect();
+  const desiredTop = anchorRect.top + (anchorRect.height - previewRect.height) / 2;
+  const top = Math.max(8, Math.min(desiredTop, window.innerHeight - previewRect.height - 8));
+  preview.style.top = `${Math.round(top)}px`;
+  preview.style.visibility = "visible";
+}
+
+function ensureRecentHistoryPopover() {
+  let popover = document.getElementById("recentHistoryPopover");
+  if (popover) return popover;
+  popover = document.createElement("aside");
+  popover.id = "recentHistoryPopover";
+  popover.className = "recent-history-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "最近研究");
+  popover.hidden = true;
+  document.body.append(popover);
+  return popover;
+}
+
+function closeRecentHistoryPopover({ restoreFocus = false } = {}) {
+  const popover = document.getElementById("recentHistoryPopover");
+  if (!popover || popover.hidden) return;
+  popover.hidden = true;
+  elements.recentHistoryToggle.setAttribute("aria-expanded", "false");
+  if (restoreFocus) elements.recentHistoryToggle.focus();
+}
+
+function renderRecentHistoryPopover() {
+  const popover = ensureRecentHistoryPopover();
+  const header = h("div", { cls: "recent-history-head" }, [
+    h("strong", {}, "最近研究"),
+    h(
+      "button",
+      {
+        type: "button",
+        cls: "icon-button recent-history-close",
+        "aria-label": "关闭最近研究",
+        onClick: () => closeRecentHistoryPopover({ restoreFocus: true }),
+      },
+      iconNode("x"),
+    ),
+  ]);
+  const list = h("div", { cls: "recent-history-list" });
+  state.projects.slice(0, 12).forEach((project) => {
+    const button = h(
+      "button",
+      {
+        type: "button",
+        cls: `recent-history-item${project.project_id === state.projectId ? " is-active" : ""}`,
+        "aria-label": `打开研究：${projectDisplayTitle(project)}`,
+        onClick: async () => {
+          closeRecentHistoryPopover();
+          await loadProject(project.project_id);
+        },
+      },
+      [
+        h("span", { cls: "recent-history-title" }, projectDisplayTitle(project)),
+        h("span", { cls: "recent-history-meta" }, projectListDisplayStage(project)),
+      ],
+    );
+    list.append(button);
+  });
+  if (!state.projects.length) {
+    list.append(h("p", { cls: "muted small recent-history-empty" }, "还没有研究记录"));
+  }
+  popover.replaceChildren(header, list);
+  refreshIcons();
+  return popover;
+}
+
+function openRecentHistoryPopover() {
+  if (elements.appShell.dataset.sidebar !== "collapsed") return;
+  const popover = renderRecentHistoryPopover();
+  const anchorRect = elements.recentHistoryToggle.getBoundingClientRect();
+  popover.hidden = false;
+  popover.style.visibility = "hidden";
+  popover.style.left = `${Math.round(anchorRect.right + 10)}px`;
+  popover.style.top = "8px";
+  const popoverRect = popover.getBoundingClientRect();
+  const desiredTop = anchorRect.top - 8;
+  const top = Math.max(8, Math.min(desiredTop, window.innerHeight - popoverRect.height - 8));
+  popover.style.top = `${Math.round(top)}px`;
+  popover.style.visibility = "visible";
+  elements.recentHistoryToggle.setAttribute("aria-expanded", "true");
 }
 
 function openUsageGuide() {
@@ -474,6 +629,9 @@ function applySidebarState(value, persist = false) {
   elements.sidebarToggle.setAttribute("aria-label", label);
   elements.sidebarToggle.title = label;
   elements.sidebarToggle.replaceChildren(iconNode(expanded ? "panel-left-close" : "panel-left-open"));
+  hideProjectPreview();
+  closeRecentHistoryPopover();
+  if (!expanded) closeConversationMenus();
   if (persist) {
     state.sidebarPreference = next;
     try {
@@ -697,6 +855,251 @@ function indexProjectLibrary(items) {
   });
 }
 
+function citationIdentity(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^[[（(]|[\]）)]$/g, "")
+    .toLocaleLowerCase();
+}
+
+function citationValue(target, key, value) {
+  if (value == null || value === "") return;
+  if (Array.isArray(value)) {
+    if (value.length && !(target[key] || []).length) target[key] = value;
+    return;
+  }
+  if (!target[key]) target[key] = value;
+}
+
+function mergeCitationMeta(target, source = {}) {
+  [
+    "paperId",
+    "doi",
+    "title",
+    "abstract",
+    "year",
+    "venue",
+    "venueAcronym",
+    "libraryId",
+  ].forEach((key) => citationValue(target, key, source[key]));
+  citationValue(target, "methods", source.methods || []);
+  return target;
+}
+
+function citationMetaFromLibraryItem(item) {
+  const relation = item?.relation || {};
+  const paper = item?.paper || {};
+  return {
+    paperId: paper.paper_id || relation.source_paper_id || "",
+    doi: paper.doi || "",
+    title: paper.title || "",
+    abstract: paper.abstract || "",
+    year: paper.year || null,
+    venue: paper.venue || "",
+    venueAcronym: paper.venue_acronym || "",
+    libraryId: paper.library_id || relation.library_id || "",
+    methods: [],
+  };
+}
+
+function citationMetaFromCandidate(candidate = {}) {
+  return {
+    paperId: candidate.paper_id || candidate.doi || "",
+    doi: candidate.doi || "",
+    title: candidate.title || "",
+    abstract: candidate.abstract || "",
+    year: candidate.year || null,
+    venue: candidate.venue || "",
+    venueAcronym: candidate.venue_acronym || "",
+    methods: [],
+  };
+}
+
+function registerCitationMeta(index, aliases, source) {
+  const keys = [...new Set((aliases || []).filter(Boolean).map(citationIdentity).filter(Boolean))];
+  let target = keys.map((key) => index.get(key)).find(Boolean) || {};
+  mergeCitationMeta(target, source);
+  keys.forEach((key) => index.set(key, target));
+  [target.paperId, target.doi, target.libraryId]
+    .filter(Boolean)
+    .forEach((value) => index.set(citationIdentity(value), target));
+  return target;
+}
+
+function rebuildCitationIndex(snapshot = state.snapshot) {
+  const index = new Map();
+  const uniqueLibraryItems = new Map();
+  state.projectLibrary.forEach((item) => {
+    const libraryId = item?.paper?.library_id || item?.relation?.library_id;
+    if (libraryId) uniqueLibraryItems.set(libraryId, item);
+  });
+  uniqueLibraryItems.forEach((item) => {
+    const relation = item.relation || {};
+    const paper = item.paper || {};
+    registerCitationMeta(
+      index,
+      [relation.source_paper_id, paper.paper_id, paper.doi, paper.library_id],
+      citationMetaFromLibraryItem(item),
+    );
+  });
+
+  (snapshot?.artifacts || [])
+    .filter((artifact) => ["SearchReport", "SupplementalSearchReport", "CandidateSetSnapshot"].includes(artifact.kind))
+    .flatMap((artifact) => artifact.payload?.candidates || [])
+    .forEach((candidate) => {
+      const item = [candidate.paper_id, candidate.doi]
+        .filter(Boolean)
+        .map((value) => state.projectLibrary.get(libraryIdentity(value)))
+        .find(Boolean);
+      const meta = citationMetaFromCandidate(candidate);
+      if (item) mergeCitationMeta(meta, citationMetaFromLibraryItem(item));
+      registerCitationMeta(index, [candidate.paper_id, candidate.doi], meta);
+    });
+
+  (snapshot?.artifacts || [])
+    .filter((artifact) => artifact.kind === "PaperCard")
+    .forEach((artifact) => {
+      const card = artifact.payload || {};
+      const item = [card.paper_id]
+        .filter(Boolean)
+        .map((value) => state.projectLibrary.get(libraryIdentity(value)))
+        .find(Boolean);
+      const meta = {
+        paperId: card.paper_id || "",
+        title: card.title || "",
+        methods: card.methods || [],
+      };
+      if (item) mergeCitationMeta(meta, citationMetaFromLibraryItem(item));
+      const target = registerCitationMeta(index, [card.paper_id], meta);
+      (card.findings || []).forEach((finding) => {
+        if (finding.evidence_id) index.set(citationIdentity(finding.evidence_id), target);
+      });
+    });
+
+  state.citationIndex = index;
+  state.citationEvidenceIds = [...index.keys()].filter((key) => /:e\d+$/i.test(key));
+}
+
+function resolveCitationMeta(reference) {
+  const identity = citationIdentity(reference);
+  if (!identity) return null;
+  const exact = state.citationIndex.get(identity);
+  if (exact) return exact;
+  const paperReference = identity.replace(/:e\d+$/i, "");
+  return state.citationIndex.get(paperReference) || null;
+}
+
+function citationModelName(meta) {
+  const title = String(meta?.title || "").trim();
+  const firstClause = title.split(/[:：]/, 1)[0].trim();
+  if (firstClause.length >= 3 && firstClause.length <= 28 && /[A-Z]{2}|\+|\d/.test(firstClause)) {
+    return firstClause;
+  }
+  const tokens = title.match(/[A-Za-z][A-Za-z0-9+.-]{2,24}/g) || [];
+  const titleToken = tokens.find((token) => (
+    (token.match(/[A-Z]/g) || []).length >= 2
+    && /(VPR|Geo[A-Z0-9]|[a-z][A-Z]{2}|\+\+)/.test(token)
+    && !["IEEE", "CVPR", "TPAMI"].includes(token.toUpperCase())
+  ));
+  if (titleToken) return titleToken.replace(/[.,;:]$/, "");
+
+  const methodText = (meta?.methods || []).join(" ");
+  const methodTokens = methodText.match(/[A-Za-z][A-Za-z0-9+.-]{2,24}/g) || [];
+  const methodToken = methodTokens.find((token) => (
+    /(Geo|VPR)/.test(token)
+    && !["GEO", "VPR", "CVGL", "GEOGRAPHY", "GEO-LOCALIZATION"].includes(token.toUpperCase())
+  ));
+  if (methodToken) return methodToken.replace(/[.,;:]$/, "");
+
+  if (!title) return "论文";
+  return title.length > 24 ? `${title.slice(0, 23).trim()}…` : title;
+}
+
+function citationVenueLabel(meta) {
+  const venue = meta?.venueAcronym || meta?.venue || "";
+  const conciseVenue = venue.length > 18 ? `${venue.slice(0, 17).trim()}…` : venue;
+  return [conciseVenue, meta?.year].filter(Boolean).join(" ");
+}
+
+let citationPreviewElement = null;
+
+function hideCitationPreview() {
+  if (citationPreviewElement) citationPreviewElement.hidden = true;
+}
+
+function showCitationPreview(meta, anchor) {
+  if (!meta || !anchor) return;
+  if (!citationPreviewElement) {
+    citationPreviewElement = h("aside", {
+      cls: "citation-hover-preview",
+      role: "tooltip",
+    });
+    citationPreviewElement.hidden = true;
+    document.body.append(citationPreviewElement);
+  }
+  const venue = citationVenueLabel(meta);
+  citationPreviewElement.replaceChildren(
+    h("strong", { cls: "citation-preview-title" }, meta.title || "论文信息待补充"),
+    venue ? h("span", { cls: "citation-preview-meta" }, venue) : null,
+    h(
+      "p",
+      { cls: `citation-preview-abstract${meta.abstract ? "" : " is-empty"}` },
+      meta.abstract || "暂无摘要；点击后可进入文献研读工作台查看已有全文与精读信息。",
+    ),
+  );
+  citationPreviewElement.hidden = false;
+  citationPreviewElement.style.left = "0px";
+  citationPreviewElement.style.top = "0px";
+  const anchorRect = anchor.getBoundingClientRect();
+  const previewRect = citationPreviewElement.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(12, anchorRect.left),
+    Math.max(12, window.innerWidth - previewRect.width - 12),
+  );
+  const below = anchorRect.bottom + 8;
+  const top = below + previewRect.height <= window.innerHeight - 12
+    ? below
+    : Math.max(12, anchorRect.top - previewRect.height - 8);
+  citationPreviewElement.style.left = `${left}px`;
+  citationPreviewElement.style.top = `${top}px`;
+}
+
+async function openCitationPaper(meta) {
+  if (!meta?.libraryId) {
+    notify("这篇论文尚未关联到文献库，暂时无法打开研读工作台", true);
+    return;
+  }
+  hideCitationPreview();
+  closeInspector({ restoreFocus: false });
+  state.selectedLibraryId = meta.libraryId;
+  await openPaperWorkspace(meta.libraryId, null, true);
+}
+
+function renderEvidenceCitation(reference, extraClass = "") {
+  const meta = resolveCitationMeta(reference);
+  if (!meta) return h("code", { cls: `aw-ev-ref ${extraClass}`.trim() }, reference);
+  const evidenceMatch = String(reference || "").match(/:E(\d+)$/i);
+  const venue = citationVenueLabel(meta);
+  const label = [citationModelName(meta), venue, evidenceMatch ? `E${evidenceMatch[1]}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const button = h(
+    "button",
+    {
+      type: "button",
+      cls: `evidence-citation ${extraClass}`.trim(),
+      "aria-label": `打开论文：${meta.title || label}`,
+      onMouseenter: () => showCitationPreview(meta, button),
+      onMouseleave: hideCitationPreview,
+      onFocus: () => showCitationPreview(meta, button),
+      onBlur: hideCitationPreview,
+      onClick: () => openCitationPaper(meta),
+    },
+    [h("span", { cls: "evidence-citation-label" }, label), iconNode("arrow-up-right")],
+  );
+  return button;
+}
+
 function libraryEntryForCandidate(candidate) {
   return [candidate.paper_id, candidate.doi]
     .filter(Boolean)
@@ -723,8 +1126,50 @@ function libraryPaperMeta(paper) {
   return parts.join(" · ") || "元数据待补充";
 }
 
+function libraryVenueBadges(paper) {
+  const badges = [];
+  const venueName = paper.venue_acronym || paper.venue;
+  if (venueName) {
+    badges.push(`${paper.venue_type === "conference" ? "会议" : "期刊"} · ${venueName}`);
+  }
+  if (paper.ccf_rank) badges.push(`CCF-${paper.ccf_rank}`);
+  if (paper.sci_quartile) badges.push(`SCI ${paper.sci_quartile}`);
+  if (paper.nature_portfolio) badges.push("Nature 子刊");
+  if (paper.impact_factor != null) {
+    badges.push(`IF ${Number(paper.impact_factor).toFixed(2).replace(/\.00$/, "")}`);
+  }
+  return badges;
+}
+
+function libraryResearchOrigin(paper) {
+  const source = paper.research_sources?.[0];
+  return source ? `来自调研：${source.topic}` : (paper.origin_label || "手动添加");
+}
+
+function collectionDisplayPath(collectionId) {
+  const collections = state.libraryOverview.collections || [];
+  const byId = new Map(collections.map((item) => [item.collection_id, item]));
+  const parts = [];
+  const visited = new Set();
+  let current = byId.get(collectionId);
+  while (current && !visited.has(current.collection_id)) {
+    visited.add(current.collection_id);
+    parts.unshift(current.name);
+    current = current.parent_id ? byId.get(current.parent_id) : null;
+  }
+  return parts.join(" / ");
+}
+
+function recentReadingActionLabel(action) {
+  const kind = { highlight: "高亮", note: "批注", qa: "问答" }[action.kind] || "阅读";
+  const page = action.page ? `第 ${action.page} 页` : "论文原文";
+  const text = action.selected_text || action.content || action.question || "已保存阅读位置";
+  return `${kind} · ${page} · ${text}`;
+}
+
 const LIBRARY_SMART_VIEWS = [
   ["all", "library", "全部文献"],
+  ["recent", "history", "最近研究"],
   ["starred", "star", "重点文献"],
   ["unfiled", "inbox", "未加入文件夹"],
   ["trash", "trash-2", "回收站"],
@@ -869,6 +1314,7 @@ function renderLibraryList() {
     const row = document.createElement("div");
     row.className = "library-paper-row";
     row.classList.toggle("is-active", paper.library_id === state.selectedLibraryId);
+    row.classList.toggle("has-folder-action", Boolean(state.libraryCollectionId));
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -896,9 +1342,17 @@ function renderLibraryList() {
       starred.textContent = "已收藏";
       badges.append(starred);
     }
-    const projects = document.createElement("span");
-    projects.textContent = `${paper.project_count || 0} 个项目`;
-    badges.append(projects);
+    libraryVenueBadges(paper).forEach((label) => {
+      const venue = document.createElement("span");
+      venue.className = "library-venue-badge";
+      venue.textContent = label;
+      badges.append(venue);
+    });
+    const origin = document.createElement("span");
+    origin.className = "library-origin-badge";
+    origin.textContent = libraryResearchOrigin(paper);
+    origin.title = paper.research_sources?.[0]?.research_question || origin.textContent;
+    badges.append(origin);
     (paper.tags || []).slice(0, 3).forEach((tag) => {
       const badge = document.createElement("span");
       badge.textContent = tag;
@@ -910,8 +1364,55 @@ function renderLibraryList() {
       badges.append(notes);
     }
     button.append(title, meta, badges);
-    button.addEventListener("click", () => selectLibraryPaper(paper.library_id));
+    if (paper.recent_reading) {
+      const recent = document.createElement("span");
+      recent.className = "library-recent-reading";
+      const recentMeta = document.createElement("span");
+      recentMeta.className = "library-recent-meta";
+      recentMeta.textContent = `${formatDate(paper.recent_reading.updated_at)} · 继续第 ${paper.recent_reading.last_page || 1} 页`;
+      recent.append(recentMeta);
+      (paper.recent_reading.actions || []).slice(0, 3).forEach((action) => {
+        const actionRow = document.createElement("span");
+        actionRow.className = "library-recent-action";
+        actionRow.textContent = recentReadingActionLabel(action);
+        actionRow.title = actionRow.textContent;
+        recent.append(actionRow);
+      });
+      button.append(recent);
+    }
+    button.addEventListener("click", () => {
+      if (state.libraryView === "recent" && paper.recent_reading) {
+        openPaperWorkspace(
+          paper.library_id,
+          paper.recent_reading.attachment_id || null,
+          false,
+          paper.recent_reading.last_page || 1,
+        );
+        return;
+      }
+      selectLibraryPaper(paper.library_id);
+    });
     row.append(checkbox, button);
+    if (state.libraryCollectionId) {
+      const membership = paper.collection_membership || {};
+      const pin = document.createElement("button");
+      pin.type = "button";
+      pin.className = `icon-button library-folder-pin${membership.pinned ? " is-active" : ""}`;
+      pin.setAttribute("aria-label", membership.pinned ? "取消文件夹内置顶" : "在文件夹内置顶");
+      pin.title = membership.pinned ? "取消文件夹内置顶" : "在当前文件夹置顶";
+      pin.append(iconNode(membership.pinned ? "pin-off" : "pin"));
+      pin.addEventListener("click", async () => {
+        await api(
+          `/api/library/collections/${encodeURIComponent(state.libraryCollectionId)}/papers/${encodeURIComponent(paper.library_id)}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ pinned: !membership.pinned }),
+          },
+        );
+        await loadLibrary();
+      });
+      row.append(pin);
+    }
     elements.libraryList.append(row);
   });
 }
@@ -961,6 +1462,42 @@ function renderLibraryDetail(detail) {
       !indexedPdf,
     ));
     controls.append(onlineWorkspace);
+  }
+
+  const provenance = document.createElement("section");
+  provenance.className = "library-detail-section library-provenance";
+  const provenanceTitle = document.createElement("h4");
+  provenanceTitle.textContent = "来源与评级";
+  const venueLine = document.createElement("p");
+  const venueBadges = libraryVenueBadges(paper);
+  venueLine.textContent = venueBadges.length
+    ? venueBadges.join(" · ")
+    : "期刊或会议信息未返回";
+  provenance.append(provenanceTitle, venueLine);
+  const projectSources = detail.projects || [];
+  if (projectSources.length) {
+    projectSources.forEach(({ project, relation }) => {
+      const sourceButton = document.createElement("button");
+      sourceButton.type = "button";
+      sourceButton.className = "library-source-project";
+      sourceButton.append(iconNode("flask-conical"));
+      const sourceCopy = document.createElement("span");
+      const sourceTitle = document.createElement("strong");
+      sourceTitle.textContent = `来自调研：${project.topic}`;
+      const sourceQuestion = document.createElement("small");
+      sourceQuestion.textContent = project.research_question;
+      sourceCopy.append(sourceTitle, sourceQuestion);
+      const sourceStatus = document.createElement("small");
+      sourceStatus.textContent = relation.status;
+      sourceButton.append(sourceCopy, sourceStatus);
+      sourceButton.addEventListener("click", () => loadProject(project.project_id));
+      provenance.append(sourceButton);
+    });
+  } else {
+    const manual = document.createElement("p");
+    manual.className = "library-manual-source";
+    manual.textContent = "来源：手动添加或导入文献库";
+    provenance.append(manual);
   }
 
   const metadata = document.createElement("details");
@@ -1055,7 +1592,7 @@ function renderLibraryDetail(detail) {
       });
       await loadLibrary();
     });
-    label.append(input, document.createTextNode(collection.name));
+    label.append(input, document.createTextNode(collectionDisplayPath(collection.collection_id)));
     collections.append(label);
   });
 
@@ -1421,6 +1958,7 @@ function renderLibraryDetail(detail) {
   elements.libraryDetail.append(
     header,
     controls,
+    provenance,
     metadata,
     abstract,
     collections,
@@ -1459,6 +1997,49 @@ function setPaperSelection(selection) {
   elements.paperSelectionBar.hidden = false;
 }
 
+function captureSelectedTextRects(range, page) {
+  const pageRect = page.getBoundingClientRect();
+  const textLayer = page.querySelector(".pdf-text-layer");
+  if (!textLayer || !pageRect.width || !pageRect.height) return [];
+  const seen = new Set();
+  const rects = [];
+  textLayer.querySelectorAll("span").forEach((span) => {
+    if (!range.intersectsNode(span)) return;
+    const textNode = span.firstChild;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE || !textNode.textContent) return;
+    let startOffset = 0;
+    let endOffset = textNode.textContent.length;
+    if (range.startContainer === textNode) startOffset = range.startOffset;
+    if (range.endContainer === textNode) endOffset = range.endOffset;
+    if (endOffset <= startOffset) return;
+    const textRange = document.createRange();
+    textRange.setStart(textNode, Math.max(0, Math.min(startOffset, textNode.textContent.length)));
+    textRange.setEnd(textNode, Math.max(0, Math.min(endOffset, textNode.textContent.length)));
+    [...textRange.getClientRects()].forEach((rect) => {
+      const left = Math.max(pageRect.left, rect.left);
+      const top = Math.max(pageRect.top, rect.top);
+      const right = Math.min(pageRect.right, rect.right);
+      const bottom = Math.min(pageRect.bottom, rect.bottom);
+      if (right - left <= 1 || bottom - top <= 1) return;
+      const normalized = {
+        x: (left - pageRect.left) / pageRect.width,
+        y: (top - pageRect.top) / pageRect.height,
+        width: (right - left) / pageRect.width,
+        height: (bottom - top) / pageRect.height,
+      };
+      if (normalized.height > 0.06) return;
+      const key = [normalized.x, normalized.y, normalized.width, normalized.height]
+        .map((value) => value.toFixed(4))
+        .join(":");
+      if (!seen.has(key)) {
+        seen.add(key);
+        rects.push(normalized);
+      }
+    });
+  });
+  return rects;
+}
+
 function capturePaperSelection() {
   const selection = window.getSelection();
   const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
@@ -1470,15 +2051,7 @@ function capturePaperSelection() {
     if (start || end) notify("第一版暂支持在同一页内选择文本", true);
     return;
   }
-  const pageRect = start.getBoundingClientRect();
-  const rects = [...range.getClientRects()]
-    .filter((rect) => rect.width > 1 && rect.height > 1)
-    .map((rect) => ({
-      x: Math.max(0, (rect.left - pageRect.left) / pageRect.width),
-      y: Math.max(0, (rect.top - pageRect.top) / pageRect.height),
-      width: Math.min(1, rect.width / pageRect.width),
-      height: Math.min(1, rect.height / pageRect.height),
-    }));
+  const rects = captureSelectedTextRects(range, start);
   if (!rects.length) return;
   const pageText = start.querySelector(".pdf-text-layer")?.textContent || "";
   const textIndex = pageText.indexOf(text);
@@ -1559,6 +2132,10 @@ function renderPaperReadingCard() {
 
 function renderPaperAnnotations() {
   const annotations = state.paperWorkspace?.annotations || [];
+  const numberedAnnotations = annotations.filter((annotation) => ["note", "qa"].includes(annotation.kind));
+  const annotationNumbers = new Map(
+    numberedAnnotations.map((annotation, index) => [annotation.annotation_id, index + 1]),
+  );
   elements.paperAnnotationsList.replaceChildren();
   if (!annotations.length) {
     const empty = document.createElement("p");
@@ -1569,16 +2146,23 @@ function renderPaperAnnotations() {
   annotations.forEach((annotation) => {
     const item = document.createElement("article");
     item.className = `paper-annotation paper-annotation-${annotation.kind}`;
+    item.dataset.annotationId = String(annotation.annotation_id);
     const header = document.createElement("header");
     const kind = document.createElement("strong");
-    kind.textContent = { highlight: "高亮", note: "批注", qa: "问答" }[annotation.kind] || "批注";
+    const annotationNumber = annotationNumbers.get(annotation.annotation_id);
+    kind.textContent = annotationNumber
+      ? `${annotation.kind === "qa" ? "问答批注" : "批注"} ${annotationNumber}`
+      : ({ highlight: "高亮", note: "批注", qa: "问答" }[annotation.kind] || "批注");
     const actions = document.createElement("div");
     if (annotation.page) {
       const page = document.createElement("button");
       page.type = "button";
       page.className = "paper-page-link";
       page.textContent = `第 ${annotation.page} 页`;
-      page.addEventListener("click", () => scrollToPaperPage(annotation.page));
+      page.addEventListener("click", (event) => {
+        event.stopPropagation();
+        focusPaperAnnotation(annotation, { scrollPage: true, focusCard: false });
+      });
       actions.append(page);
     }
     const remove = document.createElement("button");
@@ -1586,7 +2170,10 @@ function renderPaperAnnotations() {
     remove.className = "icon-button";
     remove.setAttribute("aria-label", "删除批注");
     remove.append(iconNode("trash-2"));
-    remove.addEventListener("click", () => deletePaperAnnotation(annotation.annotation_id));
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deletePaperAnnotation(annotation.annotation_id);
+    });
     actions.append(remove);
     header.append(kind, actions);
     item.append(header);
@@ -1612,19 +2199,86 @@ function renderPaperAnnotations() {
       answer.textContent = annotation.answer;
       item.append(answer);
     }
+    if (["note", "qa"].includes(annotation.kind)) {
+      item.tabIndex = 0;
+      item.setAttribute("role", "button");
+      item.setAttribute("aria-label", `定位批注 ${annotationNumber}`);
+      item.addEventListener("click", () => {
+        focusPaperAnnotation(annotation, { scrollPage: true, focusCard: false });
+      });
+      item.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        focusPaperAnnotation(annotation, { scrollPage: true, focusCard: false });
+      });
+    }
     elements.paperAnnotationsList.append(item);
   });
   drawPaperHighlights();
   refreshIcons();
 }
 
+function usableAnnotationRects(annotation) {
+  return (annotation.rects || [])
+    .map((rect) => ({
+      x: Number(rect.x),
+      y: Number(rect.y),
+      width: Number(rect.width),
+      height: Number(rect.height),
+    }))
+    .filter((rect) => (
+      Number.isFinite(rect.x)
+      && Number.isFinite(rect.y)
+      && Number.isFinite(rect.width)
+      && Number.isFinite(rect.height)
+      && rect.width > 0
+      && rect.height > 0
+      && rect.height <= 0.06
+      && rect.x < 1
+      && rect.y < 1
+      && rect.x + rect.width > 0
+      && rect.y + rect.height > 0
+    ))
+    .map((rect) => ({
+      x: Math.max(0, rect.x),
+      y: Math.max(0, rect.y),
+      width: Math.min(1 - Math.max(0, rect.x), rect.width),
+      height: Math.min(1 - Math.max(0, rect.y), rect.height),
+    }));
+}
+
+function focusPaperAnnotation(annotation, options = {}) {
+  const { scrollPage = false, focusCard = true } = options;
+  state.activePaperAnnotationId = String(annotation.annotation_id);
+  setPaperTab("annotations");
+  drawPaperHighlights();
+  elements.paperAnnotationsList.querySelectorAll(".paper-annotation").forEach((item) => {
+    item.classList.toggle("is-target", item.dataset.annotationId === String(annotation.annotation_id));
+  });
+  const target = [...elements.paperAnnotationsList.querySelectorAll(".paper-annotation")]
+    .find((item) => item.dataset.annotationId === String(annotation.annotation_id));
+  if (scrollPage && annotation.page) scrollToPaperPage(annotation.page);
+  if (focusCard) target?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 function drawPaperHighlights() {
-  elements.paperPdfPages.querySelectorAll(".paper-highlight-overlay").forEach((node) => node.remove());
-  (state.paperWorkspace?.annotations || []).forEach((annotation) => {
-    if (!annotation.page || !(annotation.rects || []).length) return;
+  elements.paperPdfPages
+    .querySelectorAll(".paper-highlight-overlay, .paper-annotation-marker")
+    .forEach((node) => node.remove());
+  const annotations = state.paperWorkspace?.annotations || [];
+  const numberedAnnotations = annotations.filter((annotation) => ["note", "qa"].includes(annotation.kind));
+  const annotationNumbers = new Map(
+    numberedAnnotations.map((annotation, index) => [annotation.annotation_id, index + 1]),
+  );
+  annotations.forEach((annotation) => {
+    if (!annotation.page) return;
     const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${annotation.page}"]`);
     if (!page) return;
-    annotation.rects.forEach((rect) => {
+    const rects = usableAnnotationRects(annotation);
+    if (!rects.length) return;
+    const isComment = ["note", "qa"].includes(annotation.kind);
+    const isActive = state.activePaperAnnotationId === String(annotation.annotation_id);
+    if (annotation.kind === "highlight" || isActive) rects.forEach((rect) => {
       const mark = document.createElement("button");
       mark.type = "button";
       mark.className = `paper-highlight-overlay paper-highlight-${annotation.kind}`;
@@ -1633,17 +2287,28 @@ function drawPaperHighlights() {
       mark.style.width = `${rect.width * 100}%`;
       mark.style.height = `${rect.height * 100}%`;
       mark.title = annotation.content || annotation.question || annotation.selected_text || "论文批注";
-      mark.addEventListener("click", () => {
-        setPaperTab("annotations");
-        elements.paperAnnotationsList.querySelectorAll(".paper-annotation").forEach((item) => item.classList.remove("is-target"));
-        const index = (state.paperWorkspace.annotations || []).findIndex((item) => item.annotation_id === annotation.annotation_id);
-        const target = elements.paperAnnotationsList.children[index];
-        target?.classList.add("is-target");
-        target?.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
       page.append(mark);
     });
+    if (!isComment) return;
+    const anchor = rects[0];
+    const marker = document.createElement("button");
+    const number = annotationNumbers.get(annotation.annotation_id);
+    const afterText = anchor.x + anchor.width + 0.008;
+    const markerX = afterText < 0.965 ? afterText : Math.max(0.006, anchor.x - 0.038);
+    marker.type = "button";
+    marker.className = `paper-annotation-marker${isActive ? " is-active" : ""}`;
+    marker.style.left = `${markerX * 100}%`;
+    marker.style.top = `${Math.max(0.002, anchor.y) * 100}%`;
+    marker.setAttribute("aria-label", `打开批注 ${number}`);
+    marker.title = `批注 ${number}：${annotation.content || annotation.question || annotation.selected_text || "查看批注"}`;
+    marker.append(iconNode("message-circle"));
+    const badge = document.createElement("span");
+    badge.textContent = String(number);
+    marker.append(badge);
+    marker.addEventListener("click", () => focusPaperAnnotation(annotation));
+    page.append(marker);
   });
+  refreshIcons();
 }
 
 async function savePaperAnnotation(kind, extra = {}) {
@@ -1678,14 +2343,89 @@ async function deletePaperAnnotation(annotationId) {
   await api(`/api/library/annotations/${encodeURIComponent(annotationId)}`, { method: "DELETE" });
   state.paperWorkspace.annotations = (state.paperWorkspace.annotations || [])
     .filter((item) => item.annotation_id !== annotationId);
+  if (state.activePaperAnnotationId === String(annotationId)) state.activePaperAnnotationId = null;
   renderPaperAnnotations();
   notify("批注已删除");
+}
+
+function updatePaperHorizontalScroller() {
+  const scrollWidth = elements.paperPdfPages.scrollWidth;
+  const clientWidth = elements.paperPdfPages.clientWidth;
+  const needsHorizontalScroll = scrollWidth - clientWidth > 2;
+  elements.paperHorizontalScroller.hidden = !needsHorizontalScroll;
+  elements.paperHorizontalScrollContent.style.width = `${Math.max(scrollWidth, clientWidth)}px`;
+  if (needsHorizontalScroll) {
+    elements.paperHorizontalScroller.scrollLeft = elements.paperPdfPages.scrollLeft;
+  }
+}
+
+function syncPaperHorizontalScroll(source, target) {
+  if (state.paperScrollSyncing || source.scrollLeft === target.scrollLeft) return;
+  state.paperScrollSyncing = true;
+  target.scrollLeft = source.scrollLeft;
+  window.requestAnimationFrame(() => {
+    state.paperScrollSyncing = false;
+  });
+}
+
+function nearestVisiblePaperPage() {
+  const pages = [...elements.paperPdfPages.querySelectorAll(".pdf-page")];
+  if (!pages.length) return null;
+  const targetY = Math.max(110, window.innerHeight * 0.22);
+  let nearest = null;
+  let distance = Number.POSITIVE_INFINITY;
+  pages.forEach((page) => {
+    const rect = page.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+    const currentDistance = Math.abs(rect.top - targetY);
+    if (currentDistance < distance) {
+      distance = currentDistance;
+      nearest = Number(page.dataset.page);
+    }
+  });
+  return nearest;
+}
+
+function queuePaperReadingProgress(pageNumber, immediate = false) {
+  const workspace = state.paperWorkspace;
+  const page = Number(pageNumber);
+  if (!workspace?.paper?.library_id || !Number.isInteger(page) || page < 1) return;
+  if (!immediate && state.paperCurrentPage === page) return;
+  state.paperCurrentPage = page;
+  window.clearTimeout(state.paperProgressTimer);
+  const save = async () => {
+    const relatedProjects = workspace.projects || [];
+    const activeProject = relatedProjects.find(({ project }) => project.project_id === state.projectId);
+    const projectId = activeProject?.project?.project_id
+      || workspace.reading_progress?.project_id
+      || relatedProjects[0]?.project?.project_id
+      || null;
+    try {
+      const payload = await api(
+        `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/reading-progress`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            page,
+            attachment_id: workspace.workspace_attachment?.attachment_id || null,
+            project_id: projectId,
+          }),
+        },
+      );
+      workspace.reading_progress = payload.data;
+    } catch (_error) {
+      // Reading must remain uninterrupted if a progress heartbeat cannot be saved.
+    }
+  };
+  if (immediate) void save();
+  else state.paperProgressTimer = window.setTimeout(save, 700);
 }
 
 function scrollToPaperPage(pageNumber) {
   const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${pageNumber}"]`);
   if (!page) return;
   page.scrollIntoView({ behavior: "smooth", block: "start" });
+  queuePaperReadingProgress(Number(pageNumber), true);
   page.classList.add("is-cited");
   window.setTimeout(() => page.classList.remove("is-cited"), 1600);
 }
@@ -1777,6 +2517,7 @@ async function renderPdfPage(pageNumber, sessionId) {
   pageLabel.textContent = String(pageNumber);
   wrapper.append(canvas, textLayer, pageLabel);
   elements.paperPdfPages.append(wrapper);
+  updatePaperHorizontalScroller();
   await page.render({
     canvasContext: context,
     viewport,
@@ -1822,10 +2563,12 @@ async function renderPaperPdf() {
   if (sessionId !== state.paperRenderSession) return;
   elements.paperPageStatus.textContent = `全文共 ${pageCount} 页 · 可选择文本提问或批注`;
   drawPaperHighlights();
+  updatePaperHorizontalScroller();
 }
 
 async function loadPaperPdf(attachment) {
   elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在通过 PDF.js 加载全文…</p></div>';
+  elements.paperHorizontalScroller.hidden = true;
   try {
     if (!state.paperPdfJs) {
       state.paperPdfJs = await import("/ui-assets/vendor/pdfjs/pdf.mjs?v=6.1.200");
@@ -1860,13 +2603,22 @@ async function loadPaperPdf(attachment) {
     message.className = "paper-pdf-placeholder is-error";
     message.textContent = `无法加载 PDF：${error.message}`;
     elements.paperPdfPages.append(message);
+    elements.paperHorizontalScroller.hidden = true;
   }
 }
 
-async function openPaperWorkspace(libraryId, attachmentId = null, forceAcquire = false) {
+async function openPaperWorkspace(
+  libraryId,
+  attachmentId = null,
+  forceAcquire = false,
+  resumePage = null,
+) {
   showWorkspace("paper");
   elements.paperWorkspaceTitle.textContent = "正在加载论文…";
   elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在准备论文全文…</p></div>';
+  elements.paperHorizontalScroller.hidden = true;
+  state.activePaperAnnotationId = null;
+  state.paperCurrentPage = null;
   clearPaperSelection();
   elements.paperAnswer.hidden = true;
   try {
@@ -1928,10 +2680,15 @@ async function openPaperWorkspace(libraryId, attachmentId = null, forceAcquire =
     if (!attachment || !String(attachment.url || "").startsWith("/api/library/attachments/")) {
       elements.paperPageStatus.textContent = "当前未加载 PDF";
       elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>可直接生成摘要级精读卡，或手动上传 PDF 后升级为全文级精读卡。</p></div>';
+      elements.paperHorizontalScroller.hidden = true;
       refreshIcons();
       return;
     }
     await loadPaperPdf(attachment);
+    const targetPage = Number(resumePage || workspace.reading_progress?.page || 1);
+    window.requestAnimationFrame(() => {
+      scrollToPaperPage(Math.max(1, targetPage));
+    });
     refreshIcons();
   } catch (error) {
     elements.paperWorkspaceTitle.textContent = "论文研读工作台";
@@ -2007,8 +2764,8 @@ async function updateLibraryPaper(libraryId, changes) {
 
 async function createLibraryCollection(parentId = null, parentName = "") {
   const promptText = parentId
-    ? `在“${parentName}”中新建子文件夹`
-    : "新建根文件夹名称";
+    ? `在“${parentName}”中新建二级文件夹，请输入名称`
+    : "请输入研究名称，创建研究文件夹";
   const name = window.prompt(promptText);
   if (!name?.trim()) return;
   try {
@@ -2017,7 +2774,7 @@ async function createLibraryCollection(parentId = null, parentName = "") {
       body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
     });
     await loadLibrary();
-    notify("文件夹已创建");
+    notify(parentId ? "二级文件夹已创建" : "研究文件夹已创建");
   } catch (error) {
     notify(`创建失败：${error.message}`, true);
   }
@@ -2082,8 +2839,14 @@ async function applyLibraryBulkAction() {
     value = parseList(input, true);
   } else if (action === "add_collection") {
     const choices = state.libraryOverview.collections || [];
-    const menu = choices.map((item, index) => `${index + 1}. ${item.name}`).join("\n");
-    const choice = Number(window.prompt(`输入文件夹序号：\n${menu}`, "1"));
+    if (!choices.length) {
+      notify("请先创建研究文件夹", true);
+      return;
+    }
+    const menu = choices
+      .map((item, index) => `${index + 1}. ${collectionDisplayPath(item.collection_id)}`)
+      .join("\n");
+    const choice = Number(window.prompt(`选择要加入的研究文件夹：\n${menu}`, "1"));
     if (!choices[choice - 1]) return;
     value = choices[choice - 1].collection_id;
   } else if (action === "add_project") {
@@ -2319,6 +3082,46 @@ function projectDisplayTitle(project) {
   return projectConversation(project)?.title || project?.topic || "未命名研究";
 }
 
+function projectListDisplayStage(project) {
+  const isRunning = ["queued", "running"].includes(project.active_run?.status);
+  const isReviewRevision =
+    project.stage === "REVIEWED"
+    && project.current_review?.verdict === "REVISE";
+  if (isRunning) return "调研中";
+  if (isReviewRevision) return "审查待修订";
+  if (project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery") {
+    return recoverableOperationalFailure(state.snapshot) ? "写作待恢复" : "成果待补全";
+  }
+  return STAGE_LABELS[project.stage] || project.stage;
+}
+
+function projectListSignature(projects) {
+  return JSON.stringify({
+    current: state.projectId,
+    query: elements.projectSearch.value.trim().toLocaleLowerCase(),
+    selecting: state.projectSelectionMode,
+    selected: [...state.selectedProjectIds].sort(),
+    projects: projects.map((project) => ({
+      id: project.project_id,
+      title: projectDisplayTitle(project),
+      stage: projectListDisplayStage(project),
+      date: formatDate(project.updated_at),
+      pinned: Boolean(projectConversation(project)?.pinned),
+    })),
+  });
+}
+
+function preserveExistingProjectOrder(incoming) {
+  if (!state.projects.length) return incoming;
+  const incomingById = new Map(incoming.map((project) => [project.project_id, project]));
+  const existingIds = new Set(state.projects.map((project) => project.project_id));
+  const newlyAdded = incoming.filter((project) => !existingIds.has(project.project_id));
+  const existing = state.projects
+    .map((project) => incomingById.get(project.project_id))
+    .filter(Boolean);
+  return [...newlyAdded, ...existing];
+}
+
 async function renameConversation(project) {
   const conversation = projectConversation(project);
   if (!conversation?.conversation_id) {
@@ -2502,14 +3305,28 @@ async function deleteSelectedProjectRecords() {
 }
 
 function renderProjectList() {
-  elements.projectList.replaceChildren();
   const projects = filteredProjects();
   updateProjectBulkControls(projects);
+  const signature = projectListSignature(projects);
+  const recentPopover = document.getElementById("recentHistoryPopover");
+  if (signature === state.projectListRenderSignature && elements.projectList.childElementCount) {
+    if (recentPopover && !recentPopover.hidden) renderRecentHistoryPopover();
+    return;
+  }
+  state.projectListRenderSignature = signature;
+  const previousScrollTop = elements.projectList.scrollTop;
+  hideProjectPreview();
+  elements.projectList.replaceChildren();
+  const finishRender = () => {
+    elements.projectList.scrollTop = previousScrollTop;
+    if (recentPopover && !recentPopover.hidden) renderRecentHistoryPopover();
+  };
   if (!state.projects.length) {
     const empty = document.createElement("p");
     empty.className = "muted small sidebar-label";
     empty.textContent = "还没有项目记录";
     elements.projectList.append(empty);
+    finishRender();
     return;
   }
 
@@ -2518,24 +3335,13 @@ function renderProjectList() {
     empty.className = "muted small sidebar-label";
     empty.textContent = "没有找到匹配的研究";
     elements.projectList.append(empty);
+    finishRender();
     return;
   }
 
   projects.forEach((project) => {
     const isRunning = ["queued", "running"].includes(project.active_run?.status);
-    const isReviewRevision =
-      project.stage === "REVIEWED"
-      && project.current_review?.verdict === "REVISE";
-    const displayStage =
-      isRunning
-        ? "调研中"
-        : isReviewRevision
-        ? "审查待修订"
-        : project.project_id === state.projectId && continuationMode(state.snapshot) === "recovery"
-        ? recoverableOperationalFailure(state.snapshot)
-          ? "写作待恢复"
-          : "成果待补全"
-        : STAGE_LABELS[project.stage] || project.stage;
+    const displayStage = projectListDisplayStage(project);
     const conversation = projectConversation(project);
     const displayTitle = projectDisplayTitle(project);
     const entry = document.createElement("div");
@@ -2556,7 +3362,6 @@ function renderProjectList() {
     }
     button.setAttribute("aria-current", project.project_id === state.projectId ? "page" : "false");
     button.setAttribute("aria-label", `${displayTitle}，${displayStage}`);
-    button.title = displayTitle;
 
     const icon = document.createElement("span");
     icon.className = "project-list-icon";
@@ -2604,6 +3409,7 @@ function renderProjectList() {
     content.append(titleRow, meta);
     button.append(icon, content);
     button.addEventListener("click", () => {
+      hideProjectPreview();
       closeConversationMenus();
       if (state.projectSelectionMode) {
         if (state.selectedProjectIds.has(project.project_id)) {
@@ -2616,6 +3422,10 @@ function renderProjectList() {
       }
       loadProject(project.project_id);
     });
+    button.addEventListener("mouseenter", () => showProjectPreview(project, button));
+    button.addEventListener("mouseleave", hideProjectPreview);
+    button.addEventListener("focus", () => showProjectPreview(project, button));
+    button.addEventListener("blur", hideProjectPreview);
 
     const menuToggle = document.createElement("button");
     menuToggle.type = "button";
@@ -2656,15 +3466,19 @@ function renderProjectList() {
     entry.append(button, menuToggle, menu);
     elements.projectList.append(entry);
   });
+  finishRender();
   refreshIcons();
 }
 
-async function loadProjects() {
+async function loadProjects(options = {}) {
   if (state.projectsLoading) return;
   state.projectsLoading = true;
   try {
     const payload = await api("/api/projects?limit=30");
-    state.projects = payload.data || [];
+    const incoming = payload.data || [];
+    state.projects = options?.preserveOrder
+      ? preserveExistingProjectOrder(incoming)
+      : incoming;
     renderProjectList();
   } catch (error) {
     const message = document.createElement("p");
@@ -2961,7 +3775,7 @@ function renderPaperCardHTML(payload) {
   const findings = payload.findings || [];
   if (findings.length) {
     const rows = findings.map(f => h('tr',{}, [
-      h('td',{cls:'aw-ev-id'},h('code',{},f.evidence_id||'')),
+      h('td',{cls:'aw-ev-id'},renderEvidenceCitation(f.evidence_id||'')),
       h('td',{},f.claim||''),
       h('td',{cls:'aw-ev-quote'},h('q',{},(f.quote||'').slice(0,200) + ((f.quote||'').length>200?'…':''))),
       h('td',{cls:'aw-ev-src'},[f.section||'', f.page ? ` p.${f.page}` : ''].filter(Boolean).join(' ')),
@@ -3001,7 +3815,7 @@ function renderSynthesisReportHTML(payload) {
       h('span',{cls:'aw-label'},`${label}（${items.length}）`),
       h('ol',{cls:'aw-claims'}, items.map(c => h('li',{}, [
         h('p',{},c.statement||''),
-        h('div',{cls:'aw-ev-refs'}, (c.evidence_ids||[]).map(eid => h('code',{cls:'aw-ev-ref'},eid))),
+        h('div',{cls:'aw-ev-refs'}, (c.evidence_ids||[]).map(eid => renderEvidenceCitation(eid))),
       ])))
     ]));
   });
@@ -3017,8 +3831,8 @@ function renderSynthesisReportHTML(payload) {
         h('p',{cls:'aw-gap-hypo'},h('em',{},`假设: ${g.proposed_hypothesis||''}`)),
         h('div',{cls:'aw-ev-refs'}, [
           h('span',{cls:'muted'},'支持: '),
-          ...(g.supporting_paper_ids||[]).map(pid => h('code',{cls:'aw-ev-ref'},pid)),
-          ...(g.conflicting_paper_ids||[]).length ? [h('span',{cls:'muted'},' 冲突: '), ...(g.conflicting_paper_ids||[]).map(pid => h('code',{cls:'aw-ev-ref warn'},pid))] : [],
+          ...(g.supporting_paper_ids||[]).map(pid => renderEvidenceCitation(pid)),
+          ...(g.conflicting_paper_ids||[]).length ? [h('span',{cls:'muted'},' 冲突: '), ...(g.conflicting_paper_ids||[]).map(pid => renderEvidenceCitation(pid, 'warn'))] : [],
         ]),
       ])))
     ]));
@@ -3050,7 +3864,7 @@ function renderReviewResultHTML(payload) {
   const verified = payload.verified_evidence_ids || [];
   parts.push(h('div',{cls:'aw-row'}, [
     h('span',{cls:'aw-label'},`已验证证据（${verified.length}）`),
-    verified.length ? h('div',{cls:'aw-inline'}, verified.map(eid => h('code',{cls:'aw-ev-ref ok'},eid))) : h('span',{cls:'muted'},'无'),
+    verified.length ? h('div',{cls:'aw-inline'}, verified.map(eid => renderEvidenceCitation(eid, 'ok'))) : h('span',{cls:'muted'},'无'),
   ]));
   return h('div',{cls:'artifact-html'}, parts);
 }
@@ -3069,7 +3883,7 @@ function renderScreeningDecisionHTML(payload) {
   if (included.length) {
     parts.push(h('div',{cls:'aw-row'}, [
       h('span',{cls:'aw-label'},'纳入论文'),
-      h('div',{cls:'aw-inline'}, included.map(id => h('code',{cls:'aw-ev-ref'},id)))
+      h('div',{cls:'aw-inline'}, included.map(id => renderEvidenceCitation(id)))
     ]));
   }
   const reasons = payload.reasons || [];
@@ -3319,6 +4133,32 @@ function sanitizedMarkdownFragment(html) {
   return cloneMarkdownChildren(template.content);
 }
 
+function decorateMarkdownCitations(container) {
+  if (!state.citationIndex.size) return;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  textNodes.forEach((textNode) => {
+    const parent = textNode.parentElement;
+    if (!parent || parent.closest("code, pre, a, button")) return;
+    const text = textNode.textContent || "";
+    const pattern = /\[([^\]\n]{1,180})\]|\(([^)\n]{1,180})\)/g;
+    const matches = [...text.matchAll(pattern)]
+      .map((match) => ({ match, reference: match[1] || match[2] }))
+      .filter(({ reference }) => resolveCitationMeta(reference));
+    if (!matches.length) return;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    matches.forEach(({ match, reference }) => {
+      if (match.index > cursor) fragment.append(document.createTextNode(text.slice(cursor, match.index)));
+      fragment.append(renderEvidenceCitation(reference));
+      cursor = match.index + match[0].length;
+    });
+    if (cursor < text.length) fragment.append(document.createTextNode(text.slice(cursor)));
+    textNode.replaceWith(fragment);
+  });
+}
+
 function renderMarkdown(markdown, className = "aw-markdown") {
   const container = h("div", { cls: className });
   const source = String(markdown || "").trim();
@@ -3337,6 +4177,7 @@ function renderMarkdown(markdown, className = "aw-markdown") {
       container.append(h("p", { cls: "aw-para" }, paragraph));
     });
   }
+  decorateMarkdownCitations(container);
   return container;
 }
 
@@ -3383,7 +4224,7 @@ function renderSectionDraftHTML(payload) {
   if (cited.length) {
     parts.push(h('div',{cls:'aw-row'}, [
       h('span',{cls:'aw-label'},'引用证据'),
-      h('div',{cls:'aw-inline'}, cited.map(eid => h('code',{cls:'aw-ev-ref'},eid)))
+      h('div',{cls:'aw-inline'}, cited.map(eid => renderEvidenceCitation(eid)))
     ]));
   }
   return h('div',{cls:'artifact-html'}, parts);
@@ -3430,7 +4271,7 @@ function renderNarrativeReviewHTML(payload) {
       ),
       cited.length ? h('div',{cls:'aw-cited'}, [
         h('span',{cls:'muted'},'引用: '),
-        ...cited.map(eid => h('code',{cls:'aw-ev-ref'},eid)),
+        ...cited.map(eid => renderEvidenceCitation(eid)),
       ]) : null,
       // Subsections
       ...(s.subsections||[]).map(sub => h('div',{cls:'aw-subsection'}, [
@@ -3448,6 +4289,7 @@ function renderNarrativeReviewHTML(payload) {
     parts.push(h('div',{cls:'aw-refs'}, [
       h('h4',{cls:'aw-section-heading'},'参考文献'),
       h('ol',{cls:'aw-ref-list'}, refs.map((r,i) => h('li',{id:`${anchorPrefix}-ref-${i+1}`}, [
+        r.paper_id ? renderEvidenceCitation(r.paper_id) : null,
         h('span',{cls:'aw-ref-text'},r.text||r.paper_id||''),
         r.bibtex ? h('details',{cls:'aw-bibtex'}, [
           h('summary',{},'BibTeX'),
@@ -3793,16 +4635,13 @@ function renderProjectSummary(snapshot) {
     "COMPLETED",
   ].includes(project.stage);
   const metrics = [
-    ["候选论文", latestCandidateSet?.candidates?.length || latestSearch?.candidates?.length || 0, "当前可审核范围"],
+    ["候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"],
     ["入选精读", latestScreening?.included_paper_ids?.length || 0, "已确认的论文"],
     ["证据摘录", countFindings(snapshot), "可追踪的研究证据"],
     ["综述章节", narrative?.sections?.length || 0, "最终正文"],
   ].filter(([, value]) => metricsAvailable && value > 0);
   elements.resultHighlights.replaceChildren(
-    metricCard("候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"),
-    metricCard("入选精读", latestScreening?.included_paper_ids?.length || 0, "你确认的论文"),
-    metricCard("证据摘录", countFindings(snapshot), "可追踪 evidence"),
-    metricCard("综述章节", narrative?.sections?.length || 0, facts.revise ? `${facts.revise} 章需修订` : "最终正文"),
+    ...metrics.map(([label, value, hint]) => metricCard(label, value, hint)),
   );
   elements.resultHighlights.hidden = metrics.length === 0;
 
@@ -3886,7 +4725,7 @@ function renderDetails(snapshot) {
       details.className = "artifact-item";
       const summary = document.createElement("summary");
       const kind = document.createElement("span");
-      kind.textContent = artifactLabel(artifact.kind);
+      kind.textContent = artifactDisplayLabel(artifact);
       const time = document.createElement("span");
       time.className = "muted";
       time.textContent = formatDate(artifact.created_at);
@@ -4023,6 +4862,7 @@ function conversationIdForSnapshot(snapshot = state.snapshot) {
 
 function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector = true } = {}) {
   state.snapshot = snapshot;
+  rebuildCitationIndex(snapshot);
   state.conversation = snapshot.conversation || null;
   const projectIndex = state.projects.findIndex(
     (project) => project.project_id === snapshot.project?.project_id,
@@ -4844,14 +5684,20 @@ function transitionActivity(event) {
     SEARCH_REVIEW_PENDING: "候选论文已提交人工审核",
     SCREENED: "候选论文已确认",
     EXTRACTED: "论文精读已完成",
-    SYNTHESIZED: "研究结果整理已完成",
+    SYNTHESIZED: "研究结果初稿已整理",
     REVIEW_PENDING: "研究结果正在进行完整性检查",
-    REVIEWED: "研究结果整理已完成",
     OUTLINED: "综述提纲已生成",
     NARRATED: "综述正文已生成",
     COMPLETED: "最终综述已生成，研究已结束",
     INCONCLUSIVE: "研究因证据不足停止",
   };
+  if (event?.to_stage === "REVIEWED") {
+    return event.review_verdict === "REVISE"
+      ? "证据审查完成：需要修订"
+      : event.review_verdict === "PASS"
+        ? "证据审查完成：已通过"
+        : "证据审查已完成";
+  }
   return labels[event?.to_stage]
     || `${STAGE_LABELS[event?.from_stage] || event?.from_stage}进入${STAGE_LABELS[event?.to_stage] || event?.to_stage}`;
 }
@@ -4862,7 +5708,7 @@ function artifactActivity(artifact) {
     return payload.title ? `论文精读完成：${payload.title}` : "一篇论文已完成精读";
   }
   if (artifact?.kind === "SectionDraft") {
-    const title = payload.title || payload.section_title || payload.section_id;
+    const title = artifactDisplayLabel(artifact);
     return title ? `章节草稿已生成：${title}` : "一个章节草稿已生成";
   }
   return "";
@@ -5335,6 +6181,18 @@ document.querySelectorAll("[data-paper-tab]").forEach((button) => {
 });
 elements.paperPdfPages.addEventListener("mouseup", () => window.setTimeout(capturePaperSelection, 0));
 elements.paperPdfPages.addEventListener("pointerup", () => window.setTimeout(capturePaperSelection, 0));
+elements.paperPdfPages.addEventListener("scroll", () => {
+  syncPaperHorizontalScroll(elements.paperPdfPages, elements.paperHorizontalScroller);
+});
+elements.paperHorizontalScroller.addEventListener("scroll", () => {
+  syncPaperHorizontalScroll(elements.paperHorizontalScroller, elements.paperPdfPages);
+});
+window.addEventListener("resize", () => window.requestAnimationFrame(updatePaperHorizontalScroller));
+window.addEventListener("scroll", () => {
+  if (elements.paperWorkspaceView.hidden) return;
+  const page = nearestVisiblePaperPage();
+  if (page) queuePaperReadingProgress(page);
+}, { passive: true });
 let paperSelectionFrame = null;
 document.addEventListener("selectionchange", () => {
   if (elements.paperWorkspaceView.hidden || paperSelectionFrame !== null) return;
@@ -5347,6 +6205,7 @@ elements.highlightSelection.addEventListener("click", async () => {
   if (!state.paperSelection) return;
   try {
     await savePaperAnnotation("highlight");
+    clearPaperSelection();
     notify("高亮已保存");
   } catch (error) {
     notify(`高亮保存失败：${error.message}`, true);
@@ -5370,6 +6229,7 @@ elements.paperNoteForm.addEventListener("submit", async (event) => {
     await savePaperAnnotation("note", { content });
     elements.paperNoteInput.value = "";
     elements.paperNoteForm.hidden = true;
+    clearPaperSelection();
     notify("批注已保存");
   } catch (error) {
     notify(`批注保存失败：${error.message}`, true);
@@ -5547,6 +6407,14 @@ elements.sidebarToggle.addEventListener("click", () => {
   const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";
   applySidebarState(next, true);
 });
+elements.recentHistoryToggle.addEventListener("click", (event) => {
+  event.stopPropagation();
+  if (elements.appShell.dataset.sidebar !== "collapsed") return;
+  const popover = document.getElementById("recentHistoryPopover");
+  const shouldOpen = !popover || popover.hidden;
+  closeMenus();
+  if (shouldOpen) openRecentHistoryPopover();
+});
 elements.brandHome.addEventListener("click", clearProjectView);
 elements.homeToggle.addEventListener("click", clearProjectView);
 elements.toolsMenuToggle.addEventListener("click", () => {
@@ -5582,6 +6450,15 @@ document.addEventListener("click", (event) => {
     setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   }
   if (!event.target.closest(".project-list-entry")) closeConversationMenus();
+  const recentPopover = document.getElementById("recentHistoryPopover");
+  if (
+    recentPopover
+    && !recentPopover.hidden
+    && !recentPopover.contains(event.target)
+    && !elements.recentHistoryToggle.contains(event.target)
+  ) {
+    closeRecentHistoryPopover();
+  }
 });
 
 document.addEventListener("keydown", (event) => {
@@ -5630,6 +6507,12 @@ document.addEventListener("keydown", (event) => {
     closeInspector();
     return;
   }
+  const recentPopover = document.getElementById("recentHistoryPopover");
+  if (recentPopover && !recentPopover.hidden) {
+    event.preventDefault();
+    closeRecentHistoryPopover({ restoreFocus: true });
+    return;
+  }
   const toolsWereOpen = !elements.toolsMenu.hidden;
   const projectMenuWasOpen = !elements.projectMenu.hidden;
   closeMenus();
@@ -5654,5 +6537,5 @@ async function initialize() {
 
 initialize();
 window.setInterval(() => {
-  if (document.visibilityState === "visible") void loadProjects();
+  if (document.visibilityState === "visible") void loadProjects({ preserveOrder: true });
 }, 4000);

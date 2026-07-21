@@ -24,11 +24,13 @@ from research_agent.api.schemas import (
     LibraryAssistantRequest,
     LibraryAttachmentRequest,
     LibraryBulkRequest,
+    LibraryCollectionPaperRequest,
     LibraryCollectionRequest,
     LibraryImportRequest,
     LibraryMergeRequest,
     LibraryNoteRequest,
     PaperAnnotationRequest,
+    PaperReadingProgressRequest,
     PaperQuestionRequest,
     LibraryPaperRequest,
     LibraryPaperUpdateRequest,
@@ -479,6 +481,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="library_paper_not_found") from exc
         return ApiEnvelope(data=data)
 
+    @app.put(
+        "/api/library/papers/{library_id}/reading-progress",
+        response_model=ApiEnvelope,
+    )
+    async def save_paper_reading_progress(
+        library_id: str,
+        request: PaperReadingProgressRequest,
+    ) -> ApiEnvelope:
+        try:
+            progress = await asyncio.to_thread(
+                supervisor.service.library.save_reading_progress,
+                library_id,
+                page=request.page,
+                attachment_id=request.attachment_id,
+                project_id=request.project_id,
+            )
+        except (ValueError, KeyError, LibraryPaperNotFound, ProjectNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=progress.model_dump(mode="json"))
+
     @app.post(
         "/api/library/papers/{library_id}/workspace/acquire-full-text",
         response_model=ApiEnvelope,
@@ -662,6 +684,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except LibraryCollectionNotFound as exc:
             raise HTTPException(status_code=404, detail="library_collection_not_found") from exc
         return ApiEnvelope(message="library_collection_deleted", data={"collection_id": collection_id})
+
+    @app.patch(
+        "/api/library/collections/{collection_id}/papers/{library_id}",
+        response_model=ApiEnvelope,
+    )
+    async def update_library_collection_paper(
+        collection_id: str,
+        library_id: str,
+        request: LibraryCollectionPaperRequest,
+    ) -> ApiEnvelope:
+        try:
+            relation = await asyncio.to_thread(
+                supervisor.service.library.set_collection_paper_pinned,
+                collection_id,
+                library_id,
+                pinned=request.pinned,
+            )
+        except (KeyError, LibraryCollectionNotFound, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=404, detail="library_collection_paper_not_found") from exc
+        return ApiEnvelope(data=relation)
 
     @app.post("/api/library/papers", response_model=ApiEnvelope)
     async def add_library_paper(request: LibraryPaperRequest) -> ApiEnvelope:
