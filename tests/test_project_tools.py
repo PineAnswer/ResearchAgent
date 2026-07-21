@@ -587,7 +587,40 @@ def test_structured_results_remain_exact_through_review(tmp_path) -> None:
 
     assert result["artifact"]["payload"] == review_payload
     assert result["project"]["current_review"] == review_payload
-    assert result["project"]["stage"] == "REVIEWED"
+    assert result["project"]["stage"] == "EXTRACTED"
+    assert service.get_snapshot(project_id)["events"][-1]["actor"] == "review-revision"
+
+    state.record_result(
+        "thread-a",
+        "research-synthesizer",
+        {
+            "topic": "topic",
+            "consensus": [{"statement": "finding", "evidence_ids": ["P1:E1"]}],
+            "conflicts": [],
+            "method_comparison": [],
+            "gaps": [],
+        },
+    )
+    tools["commit_subagent_result"].func(
+        project_id, "research-synthesizer", runtime=runtime
+    )
+    tools["advance_project_stage"].func(
+        project_id, "REVIEW_PENDING", "research-supervisor"
+    )
+    state.record_result("thread-a", "evidence-reviewer", review_payload)
+    second = json.loads(
+        tools["commit_subagent_result"].func(
+            project_id, "evidence-reviewer", runtime=runtime
+        )
+    )
+
+    assert second["project"]["stage"] == "REVIEWED"
+    issues = [
+        item
+        for item in service.get_snapshot(project_id)["artifacts"]
+        if item["kind"] == "RuntimeIssue"
+    ]
+    assert issues[-1]["payload"]["reason"] == "review_revision_limit_reached"
 
 
 def test_invalid_synthesis_is_discarded_and_can_be_regenerated(tmp_path) -> None:

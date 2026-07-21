@@ -16,9 +16,15 @@ from research_agent.tools.project_tools import build_project_tools
 
 
 @tool
-def fake_search_openalex(query: str, limit: int = 5) -> str:
+def fake_search_openalex(
+    query: str,
+    limit: int = 5,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    quality_venues_only: bool = False,
+) -> str:
     """Return deterministic candidates for human-review tests."""
-    del limit
+    del limit, year_from, year_to, quality_venues_only
     return json.dumps(
         [
             {
@@ -292,13 +298,35 @@ def test_feedback_can_refine_add_remove_without_supplemental_search(tmp_path) ->
     assert "SupplementalSearchReport" not in kinds
 
 
-def test_feedback_rejects_user_triggered_supplemental_queries(tmp_path) -> None:
+def test_feedback_refine_can_trigger_bounded_supplemental_search(tmp_path) -> None:
+    service, review, project_id = _review_service(tmp_path)
+
+    result = review.apply_feedback(
+        project_id,
+        SearchFeedback(action="refine", suggested_queries=["supplemental query"]),
+    )
+
+    assert result["new_queries"] == ["supplemental query"]
+    assert result["candidate_set"]["search_round"] == 2
+    assert result["candidate_set"]["query_rounds"] == [
+        ["initial query"],
+        ["supplemental query"],
+    ]
+    assert {item["paper_id"] for item in result["candidate_set"]["candidates"]} == {
+        "P1",
+        "P2",
+    }
+    kinds = [item["kind"] for item in service.get_snapshot(project_id)["artifacts"]]
+    assert "SupplementalSearchReport" in kinds
+
+
+def test_feedback_only_refine_accepts_supplemental_queries(tmp_path) -> None:
     _service, review, project_id = _review_service(tmp_path)
 
-    with pytest.raises(WorkflowPrerequisiteError, match="不再触发新的检索"):
+    with pytest.raises(WorkflowPrerequisiteError, match="only accepted with the refine"):
         review.apply_feedback(
             project_id,
-            SearchFeedback(action="refine", suggested_queries=["supplemental query"]),
+            SearchFeedback(action="accept", suggested_queries=["supplemental query"]),
         )
 
 

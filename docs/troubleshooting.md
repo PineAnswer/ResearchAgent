@@ -12,15 +12,13 @@
 
 ## 2. `INCONCLUSIVE` 的含义
 
-当前状态机使用 `INCONCLUSIVE` 表示流程受控结束。触发原因包括：
+当前状态机使用 `INCONCLUSIVE` 表示流程受控结束，主要用于记录用户在人工定稿阶段主动停止，或确实无法形成可靠科研结论的证据不足场景。常见触发原因包括：
 
-- 检索后没有候选论文；
-- 入选论文无法提供可追踪 Evidence；
 - 用户在人工检索审核阶段主动停止；
-- 同一子 Agent 连续两次生成无法提交的结构化结果；
-- 其他无法安全继续、同时又不应生成科研结论的情况。
+- 已有候选和补充检索均不足以支持继续研究，且用户选择停止；
+- 其他由业务规则明确认定为证据不足、同时不应生成科研结论的情况。
 
-因此，`INCONCLUSIVE` 不能直接解释为“论文数量不足”或“证据全部无效”。必须读取最新 `InsufficientEvidence.reason` 和前序 `artifact.commit_failed` 事件。该状态在当前版本中是终态，`POST /api/projects/{project_id}/continue` 只接受 `SCREENED` 项目。
+空候选、空 findings、模型超时和结构化输出失败不会自动把项目改成 `INCONCLUSIVE`；执行类问题会保存为 `RuntimeIssue` 并保持在最近的安全阶段，便于后续恢复。判断根因时应读取最新 `InsufficientEvidence.reason`、`RuntimeIssue.reason` 和前序 `artifact.commit_failed` 事件。`INCONCLUSIVE` 仍是终态。
 
 最终报告偶尔会使用“项目已完成”描述本轮程序调用已经结束。正式科研完成仍要求 `status=completed`、`project_stage=COMPLETED` 且 `review_verdict=PASS`；`error=null` 也只表示没有未处理的顶层异常。
 
@@ -55,7 +53,7 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 这通常位于模型兼容接口、工具调用格式或 LangChain 结构化响应解析边界。当前日志记录解析后的 LangChain 对象，没有保存供应商的原始 HTTP 响应，因此仅凭现有日志不一定能把责任进一步定位到模型服务或适配层。
 
-第一次无效结果会被释放并允许重新委派一次。第二次仍无效时，WorkflowGuard 要求调用 `finish_inconclusive`，项目进入终态。
+第一次无效结果会被释放并允许重新委派一次。第二次仍无效时，WorkflowGuard 要求调用 `record_research_issue`，项目保持当前阶段，以免把执行故障当作证据不足。
 
 ## 5. PDF 获取失败
 
@@ -78,14 +76,16 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 - `SEARCH_REVIEW_PENDING`：继续提交人工反馈。
 - `SCREENED`：可以调用 `/continue`，从逐篇精读开始。
-- `REVIEWED + REVISE`：状态机允许返回 `EXTRACTED` 修订。
+- `EXTRACTED`、`SYNTHESIZED`、`REVIEW_PENDING`：可以调用 `/continue`，从已保存产物后的下一个安全步骤恢复。
+- `REVIEWED + PASS`：可以调用 `/continue`，进入提纲和正文写作。
+- `REVIEWED + REVISE`：首次修订会返回 `EXTRACTED` 并复审一次；连续两次 `REVISE` 会保存 `RuntimeIssue` 并等待人工处理。
 - `OUTLINED`：提纲已保存，可能正在逐节生成 `SectionDraft` 或等待 `chief-editor`。
 - `NARRATED`：旧版本遗留状态；完整 `NarrativeReview` 已保存，可以直接完成。
 - `COMPLETED`：完整 NarrativeReview 已生成时为终态；旧版缺产物的错误完成可恢复。
 - `INCONCLUSIVE`：真实证据不足仍为终态；结构化输出、模型超时等执行故障可从最近安全阶段恢复。
 当前主流程在 `chief-editor` 成功提交完整 `NarrativeReview` 后直接进入 `COMPLETED`。
 
-如果项目在综合阶段因格式或校验故障进入 `INCONCLUSIVE`，已保存的 `PaperCard` 和 Evidence 仍保留在 SQLite，从数据和设计上可以复用。当前 `/continue` 只接受 `SCREENED`，系统也没有从 `EXTRACTED` 重新执行综合或重新打开 `INCONCLUSIVE` 的恢复用例，因此现有产品路径无法自动复用这些产物；直接调用 `/continue` 会返回阶段冲突。
+如果项目在综合、审查或写作阶段因格式、校验或进程中断故障停住，已保存的 `PaperCard`、Evidence 和后续产物仍保留在 SQLite。当前 `/continue` 会从 `EXTRACTED`、`SYNTHESIZED`、`REVIEW_PENDING`、`REVIEWED`、`OUTLINED`、旧版 `NARRATED` 或缺少完整综述的错误 `COMPLETED` 项目中受控恢复，并跳过已经保存的工作。
 
 ## 8. 2026-07-15 综合阶段故障样例
 
@@ -93,6 +93,6 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 1. 第一份 `SynthesisReport` 结构完整，但假设中的 `3D/3DVG/FFL-3DOG` 被数值校验器识别为无证据数字 `3`，提交被拒绝。
 2. 第二次 Synthesizer 响应显示 `finish_reason=tool_calls`，却没有形成可解析结构化对象，记录为 `structured_response_missing`。
-3. 连续两次无效结果触发受控终止，项目执行 `EXTRACTED → INCONCLUSIVE`。
+3. 连续两次无效结果会保存 `RuntimeIssue` 并保持在当前安全阶段，等待后续恢复或人工处理。
 
-该案例说明：最终 `INCONCLUSIVE` 是状态机的安全收口结果，首要故障来自数值校验误判，PDF 403 和 Evidence 数量均未阻断 `EXTRACTED`。
+该案例说明：首要故障来自数值校验误判，PDF 403 和 Evidence 数量均未阻断 `EXTRACTED`；执行故障应按 `RuntimeIssue` 排查，避免误判为证据不足。

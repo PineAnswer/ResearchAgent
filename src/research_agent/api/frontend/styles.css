@@ -820,6 +820,11 @@ h3,
   place-items: center;
 }
 
+.app-shell[data-sidebar="collapsed"] .project-list-menu-toggle,
+.app-shell[data-sidebar="collapsed"] .project-list-menu {
+  display: none;
+}
+
 .app-shell[data-sidebar="collapsed"] .project-list-icon {
   margin: 0;
 }

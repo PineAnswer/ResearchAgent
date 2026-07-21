@@ -316,6 +316,7 @@ const elements = {
   selectedCount: byId("selectedCount"),
   reviewConstraints: byId("reviewConstraints"),
   reviewQueryRounds: byId("reviewQueryRounds"),
+  supplementalQueries: byId("supplementalQueries"),
   reviewNotice: byId("reviewNotice"),
   candidateFilter: byId("candidateFilter"),
   candidateGrid: byId("candidateGrid"),
@@ -3594,7 +3595,10 @@ function continuationMode(snapshot) {
     reviewVerdict === "REVISE"
     && ["REVIEWED", "EXTRACTED", "SYNTHESIZED", "REVIEW_PENDING"].includes(stage)
   ) {
-    return "revision";
+    const reviseCount = (snapshot?.artifacts || []).filter(
+      (artifact) => artifact.kind === "ReviewResult" && artifact.payload?.verdict === "REVISE",
+    ).length;
+    return reviseCount >= 2 ? null : "pipeline";
   }
   if (["EXTRACTED", "SYNTHESIZED", "REVIEW_PENDING"].includes(stage)) {
     return "pipeline";
@@ -3753,13 +3757,7 @@ function renderProjectSummary(snapshot) {
     "项目正在推进中。",
   ];
   const needsRecovery = continuationMode(snapshot) === "recovery";
-  const needsRevision = continuationMode(snapshot) === "revision";
-  if (needsRevision) {
-    title = "证据审查要求修订";
-    text = "审查已完成，但发现证据归属或结论边界问题。点击下方按钮复用现有证据修订综合报告并重新审查。";
-    elements.stageBadge.textContent = "审查待修订";
-    elements.stageBadge.className = "stage-badge is-warning";
-  } else if (needsRecovery) {
+  if (needsRecovery) {
     const completion = narrativeCompletion(snapshot);
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDrafts = currentSectionDrafts(snapshot);
@@ -3781,8 +3779,12 @@ function renderProjectSummary(snapshot) {
   elements.nextActionText.textContent = text;
 
   const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
+  const latestCandidateSet = latestArtifact(snapshot, "CandidateSetSnapshot")?.payload;
   const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
+  const revisionCount = (snapshot?.artifacts || []).filter(
+    (artifact) => artifact.kind === "ReviewResult" && artifact.payload?.verdict === "REVISE",
+  ).length;
   const metricsAvailable = [
     "EXTRACTED",
     "SYNTHESIZED",
@@ -3799,10 +3801,10 @@ function renderProjectSummary(snapshot) {
     ["综述章节", narrative?.sections?.length || 0, "最终正文"],
   ].filter(([, value]) => metricsAvailable && value > 0);
   elements.resultHighlights.replaceChildren(
-    metricCard("候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"),
+    metricCard("候选论文", latestCandidateSet?.candidates?.length ?? latestSearch?.candidates?.length ?? 0, "当前可审核范围"),
     metricCard("入选精读", latestScreening?.included_paper_ids?.length || 0, "你确认的论文"),
-    metricCard("证据摘录", countFindings(snapshot), "可追踪 evidence"),
-    metricCard("综述章节", narrative?.sections?.length || 0, facts.revise ? `${facts.revise} 章需修订` : "最终正文"),
+    metricCard("证据摘录", countFindings(snapshot), "可追踪证据"),
+    metricCard("综述章节", narrative?.sections?.length || 0, revisionCount ? `${revisionCount} 次审查需修订` : "最终正文"),
   );
   elements.resultHighlights.hidden = metrics.length === 0;
 
@@ -3937,7 +3939,7 @@ function renderStagePanels(snapshot) {
     state.review?.can_undo && snapshot?.project?.stage !== "SEARCH_REVIEW_PENDING",
   );
   elements.reviewPanel.hidden = true;
-  const showContinuePanel = Boolean(mode && mode !== "screening");
+  const showContinuePanel = Boolean(mode);
   elements.continuePanel.hidden = !showContinuePanel;
   elements.undoDecision.hidden = !canUndoDecision;
   elements.continueResearch.hidden = !showContinuePanel;
@@ -3946,13 +3948,6 @@ function renderStagePanels(snapshot) {
     elements.continueTitle.textContent = "候选集已经确认";
     elements.continueText.textContent = "继续后将读取论文、提取证据并完成综述。";
     elements.continueButtonLabel.textContent = "继续研究";
-  } else if (mode === "revision") {
-    const issueCount = latestArtifact(snapshot, "ReviewResult")?.payload?.fatal_issues?.length || 0;
-    elements.continueEyebrow.textContent = "Review revisions required";
-    elements.continueTitle.textContent = "修订综合结论并重新审查";
-    elements.continueText.textContent =
-      `系统将复用已保存的论文和证据，处理 ${issueCount} 项审查问题；不会重新检索或重新精读论文。`;
-    elements.continueButtonLabel.textContent = "修订并重新审查";
   } else if (mode) {
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDraftCount = currentSectionDrafts(snapshot).length;
@@ -4042,20 +4037,25 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
   if (renderInspector) renderDetails(snapshot);
   const activeRun = activeSnapshotRun(snapshot);
   if (activeRun) {
+    const stagePhase = STAGE_RUN_PHASES[snapshot.project?.stage] || "thinking";
+    const activePhase = activeRun.kind === "continue"
+      ? stagePhase
+      : activeRun.phase || stagePhase;
     const isNewRun = activeRun.run_id !== state.activeRunId;
     state.activeRun = activeRun;
     state.activeRunId = activeRun.run_id;
+    elements.continuePanel.hidden = true;
     if (isNewRun || !state.runStartedAt) {
       beginRunSession({
         stage: snapshot.project?.stage || "CREATED",
-        phase: activeRun.phase || "",
-        message: displayRunMessage(activeRun.message, activeRun.phase),
+        phase: activePhase,
+        message: displayRunMessage(activeRun.message, activePhase),
         snapshot,
       });
     } else {
       setRunPhase(
-        activeRun.phase || STAGE_RUN_PHASES[snapshot.project?.stage] || "thinking",
-        displayRunMessage(activeRun.message, activeRun.phase),
+        activePhase,
+        displayRunMessage(activeRun.message, activePhase),
       );
     }
     setBusy(true);
@@ -4546,7 +4546,9 @@ function feedbackBody(action) {
   );
   return {
     action,
-    suggested_queries: [],
+    suggested_queries: action === "refine"
+      ? parseList(elements.supplementalQueries.value)
+      : [],
     added_papers: [
       ...manualCandidates,
       ...dois
@@ -4573,18 +4575,19 @@ async function submitFeedback(action) {
       body.min_papers !== (snapshot.min_papers ?? 1) ||
       body.max_papers !== (snapshot.max_papers ?? 8);
     const hasChange =
+      body.suggested_queries.length ||
       body.added_papers.length ||
       body.excluded_paper_ids.length ||
       controlsChanged ||
       body.comment;
     if (!hasChange) {
-      notify("请先填写 DOI、排除论文或审核说明", true);
+      notify("请先填写补充检索词、DOI、排除论文或审核说明", true);
       return;
     }
     if (
       body.excluded_paper_ids.length &&
       !window.confirm(
-        `将从候选集中移除 ${body.excluded_paper_ids.length} 篇论文。提交后当前版本无法一键恢复，是否继续？`,
+        `将从候选集中移除 ${body.excluded_paper_ids.length} 篇论文。提交后可使用“撤销上一步”恢复，是否继续？`,
       )
     ) {
       return;
@@ -4625,6 +4628,7 @@ async function submitFeedback(action) {
       { method: "POST", body: JSON.stringify(body) },
     );
     const result = payload.data;
+    elements.supplementalQueries.value = "";
     elements.manualDois.value = "";
     elements.feedbackComment.value = "";
     if (action === "refine") {
@@ -4639,15 +4643,7 @@ async function submitFeedback(action) {
     } else if (action === "accept" && result.ready_to_continue) {
       await loadProjects();
       await loadProject(state.projectId, true, true);
-      backgroundStarted = await continueResearch({
-        allowBusy: true,
-        skipConfirm: true,
-        startMessage: "候选集已确认，正在开始精读",
-        successMessage: "候选集已确认，已开始精读",
-      });
-      if (!backgroundStarted) {
-        notify("候选集已确认，但自动开始精读失败，请稍后重试", true);
-      }
+      notify("候选集已确认；你可以先撤销，或点击继续研究开始精读");
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -5149,8 +5145,6 @@ async function continueResearchLegacy() {
   const mode = continuationMode(state.snapshot);
   const confirmation = mode === "screening"
     ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
-    : mode === "revision"
-      ? "将复用已保存的论文和证据，根据审查意见修订综合结论并重新审查；不会重新检索或重新精读论文。确认开始吗？"
     : recoverableOperationalFailure(state.snapshot)
       ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
       : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
@@ -5162,8 +5156,6 @@ async function continueResearchLegacy() {
     stage: state.snapshot?.project?.stage || "SCREENED",
     message: mode === "screening"
       ? "正在恢复项目并启动论文精读"
-      : mode === "revision"
-        ? "正在根据审查意见修订综合结论"
       : "正在恢复写作阶段并生成缺失的综述产物",
     snapshot: state.snapshot,
   });
@@ -5255,22 +5247,19 @@ async function continueResearch(options = {}) {
     notify("旧项目没有独立对话记录，请重新创建一个研究对话", true);
     return false;
   }
-  if (!skipConfirm && !window.confirm("将从已保存进度继续，并在后台运行。确认开始吗？")) {
-    return false;
-  }
   const mode = continuationMode(state.snapshot);
-  const confirmation = mode === "revision"
-    ? "将复用已保存的论文和证据，根据审查意见修订综合结论并重新审查；不会重新检索或重新精读论文。确认开始吗？"
-    : "将从已保存进度继续，并在后台运行。确认开始吗？";
-  if (!window.confirm(confirmation)) return;
+  const confirmation = mode === "screening"
+    ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
+    : recoverableOperationalFailure(state.snapshot)
+      ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
+      : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
+  if (!skipConfirm && !window.confirm(confirmation)) return false;
 
   setBusy(true);
   beginRunSession({
     stage: state.snapshot?.project?.stage || "SCREENED",
-    phase: mode === "revision" ? "synthesizing" : undefined,
-    message: mode === "revision"
-      ? "正在根据审查意见修订综合结论并重新审查"
-      : "正在从已保存进度恢复研究",
+    phase: STAGE_RUN_PHASES[state.snapshot?.project?.stage] || "thinking",
+    message: startMessage,
     snapshot: state.snapshot,
   });
   try {
@@ -5283,12 +5272,14 @@ async function continueResearch(options = {}) {
     if (state.snapshot) state.snapshot.active_run = payload.data;
     await loadProjects();
     startRunPolling();
-    notify(
-      mode === "revision"
-        ? "审查修订已在后台启动；可以切换到其他对话"
-        : "后续研究已在后台启动；可以切换到其他对话",
-    );
+    notify(successMessage);
+    return true;
   } catch (error) {
+    if (error.message === "conversation_already_running") {
+      await loadProject(state.projectId, true, true);
+      notify("研究任务已在后台运行");
+      return true;
+    }
     if (state.runStartedAt) finishRunSession();
     elements.runPanel.hidden = true;
     setBusy(false);

@@ -577,26 +577,6 @@ class ResearchService:
                 "sections": sections,
                 "evidence_chain": evidence_chain,
             }
-        elif kind == "FactCheckReport":
-            issues = []
-            for item in cls._memory_list(payload.get("issues"), limit=20):
-                if isinstance(item, dict):
-                    issues.append(
-                        {
-                            "evidence_id": item.get("evidence_id"),
-                            "claim": cls._memory_text(item.get("claim"), 260),
-                            "problem": cls._memory_text(item.get("problem"), 260),
-                            "correction": cls._memory_text(
-                                item.get("correction"),
-                                260,
-                            ),
-                        }
-                    )
-            summary = {
-                "section_id": payload.get("section_id"),
-                "verdict": payload.get("verdict"),
-                "issues": issues,
-            }
         else:
             summary = {
                 key: cls._memory_text(payload.get(key), 320)
@@ -667,11 +647,6 @@ class ResearchService:
                 "ReviewOutline",
                 "SectionDraft",
                 "NarrativeReview",
-            },
-            "fact-checker": {
-                "PaperCard",
-                "NarrativeReview",
-                "FactCheckReport",
             },
         }
         selected_kinds = role_kinds.get(agent_role, set())
@@ -797,72 +772,6 @@ class ResearchService:
                 "Narrative continuation requires a saved PASS ReviewResult"
             )
         return review
-
-    def _repair_legacy_paper_card_ids(
-        self,
-        project_id: str,
-        artifacts,
-    ) -> list[str]:
-        """Append canonical replacements for legacy cards with cosmetic ID drift.
-
-        PaperCard artifacts are immutable. Older runs could preserve trailing
-        punctuation or an OpenAlex URL in the top-level paper_id while findings
-        used the canonical ID. Keep the original artifact for provenance and
-        append one corrected card, which becomes authoritative through the
-        existing latest-card selection rule.
-        """
-        latest_cards = {}
-        for artifact in artifacts:
-            if artifact.kind == "PaperCard":
-                latest_cards[
-                    normalize_paper_id(artifact.payload.get("paper_id", ""))
-                ] = artifact
-
-        repaired_ids: list[str] = []
-        for canonical_id, artifact in latest_cards.items():
-            if not canonical_id:
-                continue
-            payload = artifact.payload
-            raw_card_id = str(payload.get("paper_id", "")).strip()
-            findings = payload.get("findings", [])
-            finding_id_drift = any(
-                isinstance(item, dict)
-                and same_paper_id(item.get("paper_id", ""), canonical_id)
-                and str(item.get("paper_id", "")).strip() != canonical_id
-                for item in findings
-            )
-            if raw_card_id == canonical_id and not finding_id_drift:
-                continue
-
-            corrected = self._validate_artifact("PaperCard", payload)
-            evidence_ids = [
-                str(item["evidence_id"]) for item in corrected.get("findings", [])
-            ]
-            if len(evidence_ids) != len(set(evidence_ids)):
-                raise WorkflowPrerequisiteError(
-                    "PaperCard evidence_id values must be unique"
-                )
-            mismatched = [
-                item["evidence_id"]
-                for item in corrected.get("findings", [])
-                if not same_paper_id(item.get("paper_id", ""), corrected["paper_id"])
-            ]
-            if mismatched:
-                raise WorkflowPrerequisiteError(
-                    "PaperCard Evidence paper_id mismatch: " + ", ".join(mismatched)
-                )
-            replacement = self.repository.save_artifact(
-                project_id,
-                "PaperCard",
-                corrected,
-            )
-            if self.exporter is not None:
-                self.exporter.export_artifact(replacement)
-            repaired_ids.append(canonical_id)
-
-        if repaired_ids:
-            self._export_snapshot(project_id)
-        return repaired_ids
 
     @classmethod
     def _operational_recovery_target(cls, project, artifacts) -> ResearchStage:
@@ -999,51 +908,44 @@ class ResearchService:
 
         artifacts = self.repository.list_artifacts(project_id)
         active_review = self._latest_review(project, artifacts)
-        revision_stages = {
-            ResearchStage.REVIEWED,
-            ResearchStage.EXTRACTED,
-            ResearchStage.SYNTHESIZED,
-            ResearchStage.REVIEW_PENDING,
-        }
         if (
-            project.stage in revision_stages
+            project.stage is ResearchStage.REVIEWED
             and active_review is not None
             and active_review.verdict is ReviewVerdict.REVISE
         ):
-            repaired_paper_ids: list[str] = []
-            if project.stage is ResearchStage.REVIEWED:
-                repaired_paper_ids = self._repair_legacy_paper_card_ids(
-                    project_id,
-                    artifacts,
+            revise_count = sum(
+                1
+                for item in artifacts
+                if item.kind == "ReviewResult"
+                and item.payload.get("verdict") == ReviewVerdict.REVISE.value
+            )
+            if revise_count >= 2:
+                if not any(
+                    item.kind == "RuntimeIssue"
+                    and item.payload.get("reason") == "review_revision_limit_reached"
+                    for item in artifacts
+                ):
+                    self.save_artifact(
+                        project_id,
+                        "RuntimeIssue",
+                        {
+                            "reason": "review_revision_limit_reached",
+                            "recommendation": (
+                                "证据审查连续两次要求修订；请人工检查研究问题、"
+                                "证据边界和综合结论后再继续。"
+                            ),
+                            "stage": ResearchStage.REVIEWED.value,
+                        },
+                    )
+                raise WorkflowPrerequisiteError(
+                    "Review revision limit reached; manual intervention is required"
                 )
-                project = self.transition(
-                    project_id,
-                    ResearchStage.EXTRACTED,
-                    actor="review-revision",
-                )
-                artifacts = self.repository.list_artifacts(project_id)
-            review_artifact = self._latest_artifact(artifacts, "ReviewResult")
-            synthesis_artifact = self._latest_artifact(artifacts, "SynthesisReport")
-            return {
-                "mode": "revision",
-                "project": project,
-                "context": {
-                    "current_stage": project.stage.value,
-                    "review_verdict": active_review.verdict.value,
-                    "review_artifact_id": (
-                        review_artifact.artifact_id
-                        if review_artifact is not None
-                        else None
-                    ),
-                    "review_result": active_review.model_dump(mode="json"),
-                    "previous_synthesis_artifact_id": (
-                        synthesis_artifact.artifact_id
-                        if synthesis_artifact is not None
-                        else None
-                    ),
-                    "repaired_paper_ids": repaired_paper_ids,
-                },
-            }
+            project = self.transition(
+                project_id,
+                ResearchStage.EXTRACTED,
+                actor="review-revision-recovery",
+            )
+            artifacts = self.repository.list_artifacts(project_id)
 
         recovered_from = None
         if project.stage in {ResearchStage.COMPLETED, ResearchStage.INCONCLUSIVE}:
@@ -1497,7 +1399,7 @@ class ResearchService:
             mismatched = [
                 item["evidence_id"]
                 for item in payload["findings"]
-                if not same_paper_id(item["paper_id"], payload["paper_id"])
+                if str(item["paper_id"]).strip() != str(payload["paper_id"]).strip()
             ]
             if mismatched:
                 raise WorkflowPrerequisiteError(
