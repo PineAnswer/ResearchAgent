@@ -101,9 +101,7 @@ class SearchReviewService:
             else self.max_papers
         )
         max_rounds = (
-            feedback.max_search_rounds
-            if feedback is not None and feedback.max_search_rounds is not None
-            else snapshot.max_search_rounds
+            snapshot.max_search_rounds
             if snapshot is not None
             else self.max_rounds
         )
@@ -112,6 +110,18 @@ class SearchReviewService:
                 "min_papers cannot be greater than max_papers"
             )
         return min_papers, max_papers, max_rounds
+
+    @staticmethod
+    def _query_rounds_from_report(report: Mapping[str, Any]) -> list[list[str]]:
+        rounds: list[list[str]] = []
+        for entry in report.get("search_iteration_log", []) or []:
+            query = str(entry.get("query", "") if isinstance(entry, Mapping) else "").strip()
+            if query:
+                rounds.append([query])
+        if rounds:
+            return rounds
+        terms = [str(item).strip() for item in report.get("search_terms", []) if str(item).strip()]
+        return [terms] if terms else []
 
     @staticmethod
     def _screening_status_from_snapshot(
@@ -249,12 +259,15 @@ class SearchReviewService:
                 f"检索到 {len(filtered_candidates)} 篇论文，但没有论文满足当前筛选条件。"
                 "你可以从未达要求的论文中手动加入，补充 DOI，或调整检索条件。"
             )
+        query_rounds = self._query_rounds_from_report(report)
         snapshot = CandidateSetSnapshot(
             candidates=candidates,
             filtered_candidates=filtered_candidates,
             filtered_candidate_reasons=filtered_candidate_reasons,
             blocked_reason=blocked_reason,
             executed_queries=report.get("search_terms", []),
+            query_rounds=query_rounds,
+            search_round=len(query_rounds),
             max_search_rounds=max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
@@ -506,27 +519,15 @@ class SearchReviewService:
                 f"current stage is {project.stage.value}"
             )
         min_papers, max_papers, max_rounds = self._resolve_limits(snapshot, feedback)
-        raw_queries = [item.strip() for item in feedback.suggested_queries if item.strip()]
-        if len(raw_queries) > self.max_queries_per_round:
+        if any(item.strip() for item in feedback.suggested_queries):
             raise WorkflowPrerequisiteError(
-                f"At most {self.max_queries_per_round} suggested queries are allowed per round"
-            )
-        seen_queries = {_query_key(item) for item in snapshot.executed_queries}
-        new_queries: list[str] = []
-        for query in raw_queries:
-            key = _query_key(query)
-            if key and key not in seen_queries:
-                seen_queries.add(key)
-                new_queries.append(query)
-        if new_queries and snapshot.search_round >= max_rounds:
-            raise WorkflowPrerequisiteError(
-                f"Search review round limit reached: {max_rounds}"
+                "人工审核阶段不再触发新的检索；请手动加入 DOI 或重新创建研究任务。"
             )
 
         manual_candidates = [
             self._resolve_manual_paper(item) for item in feedback.added_papers
         ]
-        searched_candidates, failures = self._search_queries(new_queries, snapshot)
+        failures: list[str] = []
         excluded_ids = {
             *(normalize_paper_id(item) for item in snapshot.excluded_paper_ids),
             *(
@@ -539,7 +540,7 @@ class SearchReviewService:
             excluded_ids.discard(_candidate_id(candidate))
         candidates = self._merge_candidates(
             snapshot.candidates,
-            [*searched_candidates, *manual_candidates],
+            manual_candidates,
             excluded_ids,
         )
         added_ids = {_candidate_id(item) for item in manual_candidates}
@@ -562,14 +563,18 @@ class SearchReviewService:
         if feedback.comment.strip():
             comments.append(feedback.comment.strip())
         prior_status = self._screening_status_from_snapshot(snapshot)
+        prior_query_rounds = snapshot.query_rounds or (
+            [snapshot.executed_queries] if snapshot.executed_queries else []
+        )
         next_snapshot = CandidateSetSnapshot(
             candidates=candidates,
             filtered_candidates=filtered_candidates,
             filtered_candidate_reasons=filtered_candidate_reasons,
             blocked_reason=blocked_reason,
             excluded_paper_ids=sorted(excluded_ids),
-            executed_queries=[*snapshot.executed_queries, *new_queries],
-            search_round=snapshot.search_round + (1 if new_queries else 0),
+            executed_queries=snapshot.executed_queries,
+            query_rounds=prior_query_rounds,
+            search_round=snapshot.search_round,
             max_search_rounds=max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
@@ -604,19 +609,6 @@ class SearchReviewService:
             "SearchFeedback",
             feedback.model_dump(mode="json"),
         )
-        if new_queries:
-            self.service.save_artifact(
-                project_id,
-                "SupplementalSearchReport",
-                {
-                    "query": " | ".join(new_queries),
-                    "search_terms": new_queries,
-                    "candidates": [
-                        item.model_dump(mode="json") for item in searched_candidates
-                    ],
-                    "selection_notes": failures,
-                },
-            )
         snapshot_artifact = self.service.save_artifact(
             project_id,
             "CandidateSetSnapshot",
@@ -640,7 +632,7 @@ class SearchReviewService:
                     "excluded_paper_ids": sorted(excluded_ids),
                     "reasons": [
                         f"用户确认最终候选集，共{len(included_ids)}篇；"
-                        f"补充检索{next_snapshot.search_round}轮。"
+                        f"系统自动检索{next_snapshot.search_round}轮。"
                     ],
                 },
                 ResearchStage.SCREENED,
@@ -683,6 +675,6 @@ class SearchReviewService:
             "awaiting_input": bool(candidates),
             "manual_recovery_allowed": not candidates,
             "message": blocked_reason or "候选集已更新，等待人工审核。",
-            "new_queries": new_queries,
+            "new_queries": [],
             "search_failures": failures,
         }

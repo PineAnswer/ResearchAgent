@@ -36,7 +36,6 @@ SUBAGENT_SCHEMA_TOOLS = {
     "research-outliner": "ReviewOutline",
     "narrative-writer": "SectionDraft",
     "chief-editor": "NarrativeReview",
-    "fact-checker": "FactCheckReport",
 }
 
 SUBAGENT_REQUIRED_KEYS = {
@@ -47,7 +46,6 @@ SUBAGENT_REQUIRED_KEYS = {
     "research-outliner": {"title", "narrative_arc", "sections"},
     "narrative-writer": {"section_id", "heading", "content", "cited_evidence"},
     "chief-editor": {"title", "abstract", "sections", "references"},
-    "fact-checker": {"section_id", "verdict", "issues"},
 }
 
 
@@ -340,6 +338,7 @@ class ResearchRuntimeState:
         self._search_result_counts: dict[str, dict[str, int]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
         self._search_constraints: dict[str, dict[str, Any]] = {}
+        self._prefer_library: dict[str, bool] = {}
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
@@ -364,6 +363,7 @@ class ResearchRuntimeState:
             self._search_result_counts[thread_id] = {}
             self._raw_search_results[thread_id] = []
             self._search_constraints.setdefault(thread_id, {})
+            self._prefer_library.setdefault(thread_id, False)
             for key in [item for item in self._results if item[0] == thread_id]:
                 del self._results[key]
             for key in [item for item in self._rejections if item[0] == thread_id]:
@@ -401,6 +401,14 @@ class ResearchRuntimeState:
     def search_constraints(self, thread_id: str) -> dict[str, Any]:
         with self._lock:
             return dict(self._search_constraints.get(thread_id, {}))
+
+    def set_prefer_library(self, thread_id: str, enabled: bool) -> None:
+        with self._lock:
+            self._prefer_library[thread_id] = bool(enabled)
+
+    def prefer_library(self, thread_id: str) -> bool:
+        with self._lock:
+            return self._prefer_library.get(thread_id, False)
 
     def record_search(self, thread_id: str, query: str) -> bool:
         query = query.strip()
@@ -595,9 +603,10 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
         if name not in {"search_library", "search_openalex", "search_crossref"}:
             return None
         thread_id = thread_id_from_config(request.runtime.config)
-        if name != "search_library" and not self.state.has_search_source(
-            thread_id,
-            "search_library",
+        if (
+            name != "search_library"
+            and self.state.prefer_library(thread_id)
+            and not self.state.has_search_source(thread_id, "search_library")
         ):
             return ToolMessage(
                 content=json.dumps(

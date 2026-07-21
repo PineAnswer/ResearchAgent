@@ -15,15 +15,14 @@ from research_agent.infrastructure.sqlite_repository import (
 STAGE_PHASES = {
     ResearchStage.CREATED: "thinking",
     ResearchStage.SEARCHED: "searching",
-    ResearchStage.SEARCH_REVIEW_PENDING: "reviewing",
+    ResearchStage.SEARCH_REVIEW_PENDING: "searching",
     ResearchStage.SCREENED: "reading",
     ResearchStage.EXTRACTED: "synthesizing",
     ResearchStage.SYNTHESIZED: "reviewing",
     ResearchStage.REVIEW_PENDING: "reviewing",
     ResearchStage.REVIEWED: "outlining",
     ResearchStage.OUTLINED: "writing",
-    ResearchStage.NARRATED: "verifying",
-    ResearchStage.REVISION_PENDING: "writing",
+    ResearchStage.NARRATED: "done",
     ResearchStage.COMPLETED: "done",
     ResearchStage.INCONCLUSIVE: "stopped",
 }
@@ -77,6 +76,7 @@ class ConversationRunManager:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> ConversationRun:
         return await self._start(
             conversation_id,
@@ -89,6 +89,7 @@ class ConversationRunManager:
                 "year_from": year_from,
                 "year_to": year_to,
                 "quality_venues_only": quality_venues_only,
+                "prefer_library": prefer_library,
             },
         )
 
@@ -157,7 +158,7 @@ class ConversationRunManager:
                     message = "候选论文已准备好，等待人工审核"
                 elif project.stage is ResearchStage.COMPLETED:
                     status = "completed"
-                    message = "研究与事实核查已完成"
+                    message = "综述已生成，研究已完成"
                 elif project.stage is ResearchStage.INCONCLUSIVE:
                     status = "inconclusive"
                     message = "本轮研究已停止，可查看已保存产物"

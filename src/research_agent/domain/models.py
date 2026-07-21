@@ -25,7 +25,6 @@ class ResearchStage(StrEnum):
     REVIEWED = "REVIEWED"
     OUTLINED = "OUTLINED"
     NARRATED = "NARRATED"
-    REVISION_PENDING = "REVISION_PENDING"
     COMPLETED = "COMPLETED"
     INCONCLUSIVE = "INCONCLUSIVE"
 
@@ -127,6 +126,7 @@ class CandidateSetSnapshot(BaseModel):
     blocked_reason: str = ""
     excluded_paper_ids: list[str] = Field(default_factory=list)
     executed_queries: list[str] = Field(default_factory=list)
+    query_rounds: list[list[str]] = Field(default_factory=list)
     search_round: int = Field(default=0, ge=0)
     max_search_rounds: int = Field(default=3, ge=0)
     min_papers: int = Field(default=1, ge=1)
@@ -535,16 +535,3 @@ class NarrativeReview(BaseModel):
     writing_style: str = "academic-survey"
     word_count: int = 0
     evidence_chain: dict[str, list[str]] = Field(default_factory=dict)
-
-
-class FactCheckIssue(BaseModel):
-    claim: str
-    evidence_id: str
-    problem: str
-    correction: str = ""
-
-
-class FactCheckReport(BaseModel):
-    section_id: str
-    verdict: Literal["PASS", "REVISE"]
-    issues: list[FactCheckIssue] = Field(default_factory=list)

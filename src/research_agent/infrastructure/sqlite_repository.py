@@ -409,6 +409,14 @@ class SqliteResearchRepository:
             """,
             (DEFAULT_USER_ID, "本地用户", now, now),
         )
+        connection.execute(
+            "UPDATE state_events SET from_stage = 'NARRATED' "
+            "WHERE from_stage = 'REVISION_PENDING'"
+        )
+        connection.execute(
+            "UPDATE state_events SET to_stage = 'NARRATED' "
+            "WHERE to_stage = 'REVISION_PENDING'"
+        )
         rows = connection.execute(
             """
             SELECT project_id, payload_json, updated_at, user_id, conversation_id
@@ -416,7 +424,50 @@ class SqliteResearchRepository:
             """
         ).fetchall()
         for row in rows:
-            project = ResearchProject.model_validate_json(row["payload_json"])
+            project_payload = json.loads(row["payload_json"])
+            if project_payload.get("stage") == "REVISION_PENDING":
+                has_narrative = connection.execute(
+                    """
+                    SELECT 1 FROM artifacts
+                    WHERE project_id = ? AND kind = 'NarrativeReview'
+                    LIMIT 1
+                    """,
+                    (row["project_id"],),
+                ).fetchone()
+                target_stage = (
+                    ResearchStage.COMPLETED
+                    if has_narrative is not None
+                    else ResearchStage.OUTLINED
+                )
+                project_payload["stage"] = target_stage.value
+                migrated_payload = json.dumps(
+                    project_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                connection.execute(
+                    "UPDATE projects SET payload_json = ? WHERE project_id = ?",
+                    (migrated_payload, row["project_id"]),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO state_events(
+                        project_id, from_stage, to_stage, actor, created_at,
+                        artifact_hash, review_verdict
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["project_id"],
+                        ResearchStage.NARRATED.value,
+                        target_stage.value,
+                        "workflow-migration",
+                        now,
+                        hashlib.sha256(migrated_payload.encode("utf-8")).hexdigest(),
+                        None,
+                    ),
+                )
+            project = ResearchProject.model_validate(project_payload)
             user_id = str(row["user_id"] or project.user_id or DEFAULT_USER_ID)
             conversation_id = str(
                 row["conversation_id"]
@@ -801,7 +852,7 @@ class SqliteResearchRepository:
             kind=kind,
             created_at=now,
             updated_at=now,
-            message="任务已排队",
+            message="正在准备文献检索",
         )
         try:
             with self._connect() as connection:

@@ -173,6 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 year_from=request.year_from,
                 year_to=request.year_to,
                 quality_venues_only=request.quality_venues_only,
+                prefer_library=request.prefer_library,
             )
         except ActiveConversationRunError as exc:
             raise HTTPException(status_code=409, detail="conversation_already_running") from exc
@@ -262,6 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 year_from=request.year_from,
                 year_to=request.year_to,
                 quality_venues_only=request.quality_venues_only,
+                prefer_library=request.prefer_library,
             )
             return ApiEnvelope(data=_json_safe(result))
         except Exception as exc:
@@ -289,6 +291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     year_from=request.year_from,
                     year_to=request.year_to,
                     quality_venues_only=request.quality_venues_only,
+                    prefer_library=request.prefer_library,
                 ):
                     payload = json.dumps(_json_safe(event), ensure_ascii=False)
                     event_name = (

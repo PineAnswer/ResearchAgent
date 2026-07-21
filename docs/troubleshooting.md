@@ -38,7 +38,7 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 
 ## 4. `structured_response_missing`
 
-子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft`、`NarrativeReview` 或 `FactCheckReport`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
+子 Agent 通过结构化响应 schema 返回 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft` 或 `NarrativeReview`。如果模型调用结束后没有可解析的 `structured_response`，运行时会记录：
 
 ```json
 {
@@ -80,12 +80,10 @@ Synthesis hypothesis contains unsupported numeric claims: 3, 3, 3
 - `SCREENED`：可以调用 `/continue`，从逐篇精读开始。
 - `REVIEWED + REVISE`：状态机允许返回 `EXTRACTED` 修订。
 - `OUTLINED`：提纲已保存，可能正在逐节生成 `SectionDraft` 或等待 `chief-editor`。
-- `NARRATED`：完整 `NarrativeReview` 已保存，可能正在逐节生成 `FactCheckReport`。
-- `COMPLETED`：最新 NarrativeReview 已逐节核查且全部 PASS 时为终态；旧版缺产物的错误完成可恢复。
+- `NARRATED`：旧版本遗留状态；完整 `NarrativeReview` 已保存，可以直接完成。
+- `COMPLETED`：完整 NarrativeReview 已生成时为终态；旧版缺产物的错误完成可恢复。
 - `INCONCLUSIVE`：真实证据不足仍为终态；结构化输出、模型超时等执行故障可从最近安全阶段恢复。
-- `REVISION_PENDING`：只修订最新 FactCheck 标记为 REVISE 的章节，再生成新 NarrativeReview 并重新核查。
-
-当前主流程只有在最新一轮所有章节事实核查均为 `PASS` 时进入 `COMPLETED`；存在 `REVISE` 会进入 `REVISION_PENDING` 并触发定向章节修订。
+当前主流程在 `chief-editor` 成功提交完整 `NarrativeReview` 后直接进入 `COMPLETED`。
 
 如果项目在综合阶段因格式或校验故障进入 `INCONCLUSIVE`，已保存的 `PaperCard` 和 Evidence 仍保留在 SQLite，从数据和设计上可以复用。当前 `/continue` 只接受 `SCREENED`，系统也没有从 `EXTRACTED` 重新执行综合或重新打开 `INCONCLUSIVE` 的恢复用例，因此现有产品路径无法自动复用这些产物；直接调用 `/continue` 会返回阶段冲突。
 

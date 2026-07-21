@@ -130,7 +130,7 @@ Repository / SQLite：保存通过检查的结果
 ### 2.1 状态主线
 
 ```text
-CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → OUTLINED → NARRATED → COMPLETED
+CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SYNTHESIZED → REVIEW_PENDING → REVIEWED → OUTLINED → COMPLETED
 ```
 
 上述各 `stage` 表示项目当前完成到哪一步，让数据库能够确定回答“项目现在进行到哪里、已经具备哪些正式产物”。
@@ -146,8 +146,8 @@ CREATED → SEARCHED → SEARCH_REVIEW_PENDING → SCREENED → EXTRACTED → SY
 | `REVIEW_PENDING` | 综合报告已提交审查 | `SynthesisReport` 已持久化，项目等待独立 Reviewer 读取 | 给 Reviewer 设置明确入口，防止它在综合报告尚未稳定时提前审查 |
 | `REVIEWED` | 证据审查已完成 | 已保存 `ReviewResult`，Verdict 为 `PASS` 或 `REVISE` | 审查完成不等于项目完成；`REVISE` 仍需返回证据或综合阶段修改 |
 | `OUTLINED` | 综述结构已确定 | `ReviewResult.verdict == PASS` 且已保存 `ReviewOutline` | 固定章节、论文和 Evidence 分配后再逐节写作 |
-| `NARRATED` | 完整综述已整合 | 已保存 `NarrativeReview` | 将正文整合与最后的逐节事实核查分开记录 |
-| `COMPLETED` | 项目流程完成 | 已生成 `NarrativeReview` 和各节 `FactCheckReport` | 完成证据审查、写作和事实核查全链路 |
+| `NARRATED` | 旧版本遗留阶段 | 已保存 `NarrativeReview` | 兼容历史项目直接结束 |
+| `COMPLETED` | 项目流程完成 | 已生成完整 `NarrativeReview` | 完成证据审查和综述写作全链路 |
 | `INCONCLUSIVE` | 流程受控终止 | 已保存 `InsufficientEvidence`，记录证据不足、用户停止或连续结构化结果失败等原因 | 阻止系统在无法安全继续时生成缺乏依据的结论；具体原因需要读取 Artifact 和首个失败事件 |
 
 一条正常成功路径对应的正式产物如下：
@@ -164,9 +164,7 @@ CREATED
   → ReviewResult(PASS)                   → REVIEWED
   → ReviewOutline                        → OUTLINED
   → SectionDraft（每节一份）             → OUTLINED
-  → NarrativeReview                      → NARRATED
-  → FactCheckReport（每节一份）          → NARRATED
-  → 全部章节核查结束                     → COMPLETED
+  → NarrativeReview                      → COMPLETED
 ```
 
 ## 3. 各阶段的工具调用链
@@ -182,7 +180,7 @@ CREATED
 | 3.5 | 逐篇提取可定位证据 | 主 Agent + Reader | `task`、`fetch_paper_text`、`extract_pdf_text`、`commit_subagent_result` | 多个 `PaperCard`，随后进入 `EXTRACTED` |
 | 3.6 | 基于 Evidence 形成跨论文综合 | 主 Agent + Synthesizer | `task`、`get_active_research_project`、`commit_subagent_result` | `SynthesisReport`，阶段为 `SYNTHESIZED` |
 | 3.7 | 独立审查并决定结束方式 | 主 Agent + Reviewer | `advance_project_stage`、`task`、`commit_subagent_result` | `ReviewResult`，随后完成、修订或证据不足终止 |
-| 3.8 | 生成并核查长篇综述 | 主 Agent + 四个写作子 Agent | `task`、`get_active_research_project`、`commit_subagent_result` | `ReviewOutline`、多份 `SectionDraft`、`NarrativeReview` 和多份 `FactCheckReport` |
+| 3.8 | 生成长篇综述 | 主 Agent + 三个写作子 Agent | `task`、`get_active_research_project`、`commit_subagent_result` | `ReviewOutline`、多份 `SectionDraft` 和 `NarrativeReview` |
 
 ### 3.1 创建项目
 
@@ -693,7 +691,7 @@ REVIEW_PENDING → REVIEWED
 | `PASS` | 委派 `research-outliner`，进入综述写作链路 |
 | `REVISE` | 回到 `EXTRACTED` 修订，或进入 `INCONCLUSIVE` |
 
-### 3.8 长篇综述写作与事实核查
+### 3.8 长篇综述写作
 
 > **阶段卡片**
 >
@@ -701,11 +699,11 @@ REVIEW_PENDING → REVIEWED
 >
 > **输入：** `PaperCard`、Evidence、`SynthesisReport` 和 `ReviewResult(PASS)`。
 >
-> **执行者：** 主 Agent 依次委派 `research-outliner`、`narrative-writer`、`chief-editor` 和 `fact-checker`。
+> **执行者：** 主 Agent 依次委派 `research-outliner`、`narrative-writer` 和 `chief-editor`。
 >
-> **输出：** `ReviewOutline`、多份 `SectionDraft`、`NarrativeReview` 和多份 `FactCheckReport`。
+> **输出：** `ReviewOutline`、多份 `SectionDraft` 和 `NarrativeReview`。
 >
-> **状态变化：** `REVIEWED → OUTLINED → NARRATED → COMPLETED`。
+> **状态变化：** `REVIEWED → OUTLINED → COMPLETED`。
 
 调用链如下：
 
@@ -724,21 +722,10 @@ research-outliner
 chief-editor
   → NarrativeReview
   → commit_subagent_result
-  → NARRATED
-
-对 NarrativeReview.sections 逐节：
-  fact-checker(section_id)
-    → FactCheckReport(PASS/REVISE)
-    → commit_subagent_result
-    → 保持 NARRATED
-
-全部章节核查结束
-  → advance_project_stage(COMPLETED)
+  → COMPLETED
 ```
 
-`ReviewOutline` 为每节分配论文、Evidence、核心论点和目标字数。`narrative-writer` 每次只写一个 `section_id`，并通过 `transition_from`、`transition_to` 提供章节衔接。`chief-editor` 统一摘要、引言、结论、参考文献和 `evidence_chain`。`fact-checker` 逐条检查数字、因果强度、证据归属和引文支持关系，产物当前用于诊断，不会自动改写 `NarrativeReview`。
-
-当前实现会在全部事实核查任务结束后推进到 `COMPLETED`，即使某节 `FactCheckReport.verdict` 为 `REVISE`。因此调用方应同时检查这些报告，判断是否需要人工修订正文。
+`ReviewOutline` 为每节分配论文、Evidence、核心论点和目标字数。`narrative-writer` 每次只写一个 `section_id`，并通过 `transition_from`、`transition_to` 提供章节衔接。`chief-editor` 统一摘要、引言、结论、参考文献和 `evidence_chain`；完整综述保存成功后项目立即结束。
 
 ## 4. Agent 与工具权限边界
 
@@ -757,10 +744,9 @@ chief-editor
 | `evidence-reviewer` | `get_active_research_project` | 只读业务能力；项目快照最多读取一次；仅在 `REVIEW_PENDING` 委派 | `ReviewResult` |
 | `research-outliner` | `get_active_research_project` | 仅在 `REVIEWED` 委派；总工具调用上限 2 | `ReviewOutline` |
 | `narrative-writer` | `get_active_research_project` | 仅在 `OUTLINED` 委派；一次只写一个章节 | `SectionDraft` |
-| `chief-editor` | `get_active_research_project` | 仅在 `OUTLINED` 委派；整合全部分节草稿 | `NarrativeReview` |
-| `fact-checker` | `get_active_research_project` | 仅在 `NARRATED` 委派；按章节核查 | `FactCheckReport` |
+| `chief-editor` | `get_active_research_project` | 仅在 `OUTLINED` 委派；整合全部分节草稿并结束项目 | `NarrativeReview` |
 
-八类结构化输出覆盖研究和写作两个阶段。把输出类型与 Agent 一一对应，可以让 `commit_subagent_result` 根据 `subagent_type` 选择固定 Schema、保存方式和目标阶段。
+七类结构化输出覆盖研究和写作两个阶段。把输出类型与 Agent 一一对应，可以让 `commit_subagent_result` 根据 `subagent_type` 选择固定 Schema、保存方式和目标阶段。
 
 ### 4.2 主 Agent 的框架自动工具
 
@@ -851,8 +837,7 @@ verify_doi
 | `evidence-reviewer` | `ReviewResult` | `REVIEW_PENDING → REVIEWED` |
 | `research-outliner` | `ReviewOutline` | `REVIEWED → OUTLINED` |
 | `narrative-writer` | `SectionDraft` | 保持 `OUTLINED` |
-| `chief-editor` | `NarrativeReview` | `OUTLINED → NARRATED` |
-| `fact-checker` | `FactCheckReport` | 保持 `NARRATED` |
+| `chief-editor` | `NarrativeReview` | `OUTLINED → COMPLETED` |
 
 ### 5.2 提交失败处理
 
@@ -908,7 +893,6 @@ Middleware 是模型调用和工具执行之间的拦截层。`SerialToolExecuti
 | `research-outliner` | `REVIEWED` |
 | `narrative-writer` | `OUTLINED` |
 | `chief-editor` | `OUTLINED` |
-| `fact-checker` | `NARRATED` |
 
 WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责告诉模型正确做法；Guard 负责在模型仍然发出越权调用时返回结构化错误。两层同时存在，可以兼顾模型理解能力和确定性执行边界。
 
@@ -926,14 +910,14 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 | `SYNTHESIZED` | `REVIEW_PENDING`、`INCONCLUSIVE` | 无新增产物推进 |
 | `REVIEW_PENDING` | `REVIEWED`、`INCONCLUSIVE` | 结构化 `ReviewResult` |
 | `REVIEWED` | `OUTLINED`、`COMPLETED`、`EXTRACTED`、`INCONCLUSIVE` | 当前主流程中 PASS 进入 `OUTLINED`；保留原有完成与修订迁移兼容性 |
-| `OUTLINED` | `NARRATED`、`INCONCLUSIVE` | 已保存 `ReviewOutline`；`NarrativeReview` 提交后进入 `NARRATED` |
-| `NARRATED` | `COMPLETED`、`INCONCLUSIVE` | 已保存 `NarrativeReview`；完成逐节事实核查后结束 |
+| `OUTLINED` | `COMPLETED`、`INCONCLUSIVE` | 已保存 `ReviewOutline`；`NarrativeReview` 提交后直接完成 |
+| `NARRATED` | `COMPLETED`、`INCONCLUSIVE` | 旧版本遗留阶段；已保存 `NarrativeReview` 后可直接结束 |
 | `COMPLETED` | 无 | 终止状态 |
 | `INCONCLUSIVE` | 无 | 终止状态 |
 
 涉及新产物的迁移通过 `save_artifact_and_transition` 在同一个 SQLite 事务中完成：先验证 Schema 和迁移规则，再写 Artifact、更新项目阶段并追加 `state_event`。任一步失败都会回滚，可以避免“项目已进入新阶段但对应产物缺失”的不一致状态。
 
-`advance_project_stage(project_id, target_stage, actor)` 只用于不需要同时提交新产物的目标：`EXTRACTED`、`REVIEW_PENDING` 和 `COMPLETED`。`OUTLINED` 与 `NARRATED` 分别随 `ReviewOutline`、`NarrativeReview` 原子提交。`actor` 是写入状态事件的角色名，用于审计是谁推进了阶段。
+`advance_project_stage(project_id, target_stage, actor)` 只用于不需要同时提交新产物的目标：`EXTRACTED`、`REVIEW_PENDING`，以及兼容旧 `NARRATED` 项目直接结束的 `COMPLETED`。`OUTLINED` 随 `ReviewOutline` 原子提交，新的 `NarrativeReview` 与 `COMPLETED` 在同一事务中保存。`actor` 是写入状态事件的角色名，用于审计是谁推进了阶段。
 
 ### 7.1 INCONCLUSIVE 的正常触发路径
 
@@ -951,7 +935,7 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 
 ### 8.1 可视化人工审核入口
 
-启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供推荐使用的本地前端，支持发起研究、浏览最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。项目产物默认渲染为结构化 HTML，也可切换到 JSON 原文；已支持 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft`、`NarrativeReview` 和 `FactCheckReport` 等专用视图。Swagger 保留在 `/docs`。
+启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供推荐使用的本地前端，支持发起研究、浏览最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。项目产物默认渲染为结构化 HTML，也可切换到 JSON 原文；已支持 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft` 和 `NarrativeReview` 等专用视图。Swagger 保留在 `/docs`。
 
 排除、`accept` 和 `stop` 当前没有撤销接口；多人同时测试同一项目时也应避免并发提交。前端会锁定单个浏览器中的提交按钮并显示确认提示，这无法替代服务端幂等或项目级运行锁。
 
@@ -963,7 +947,7 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 literature-scout → paper-reader
 paper-reader → research-synthesizer
 research-synthesizer → evidence-reviewer
-research-outliner → narrative-writer → chief-editor → fact-checker
+research-outliner → narrative-writer → chief-editor
 ```
 
 实际数据传递路径统一经过：
