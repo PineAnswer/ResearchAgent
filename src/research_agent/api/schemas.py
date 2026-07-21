@@ -149,3 +149,28 @@ class LibrarySelectionRequest(BaseModel):
 class LibraryAssistantRequest(BaseModel):
     library_ids: list[str] = Field(default_factory=list, max_length=50)
     question: str = Field(min_length=1)
+
+
+class PaperQuestionRequest(BaseModel):
+    scope: Literal["selection", "paper"] = "paper"
+    attachment_id: str | None = None
+    question: str = Field(min_length=1, max_length=4000)
+    page: int | None = Field(default=None, ge=1)
+    selected_text: str = Field(default="", max_length=12000)
+    prefix: str = Field(default="", max_length=1000)
+    suffix: str = Field(default="", max_length=1000)
+
+
+class PaperAnnotationRequest(BaseModel):
+    kind: Literal["highlight", "note", "qa"]
+    attachment_id: str | None = None
+    page: int | None = Field(default=None, ge=1)
+    selected_text: str = Field(default="", max_length=12000)
+    prefix: str = Field(default="", max_length=1000)
+    suffix: str = Field(default="", max_length=1000)
+    rects: list[dict[str, float]] = Field(default_factory=list, max_length=100)
+    color: str = Field(default="yellow", max_length=32)
+    content: str = Field(default="", max_length=20000)
+    question: str = Field(default="", max_length=4000)
+    answer: str = Field(default="", max_length=30000)
+    citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)

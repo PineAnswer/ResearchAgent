@@ -15,7 +15,7 @@ description: 证据驱动科研项目的总流程与状态推进规范
 ## 第二步：检索文献 → SEARCH_REVIEW_PENDING
 
 - 委派一次 literature-scout。
-- literature-scout 每个任务只能委派一次；禁止使用 general-purpose 或第二次委派绕过检索限制。
+- literature-scout 每个任务通常只委派一次；仅当提交工具明确返回 `retry_allowed=true` 时，允许按其 instruction 纠正性地重新委派一次。禁止使用 general-purpose 或额外委派绕过检索限制。
 - literature-scout 负责检索策略设计和标题摘要初筛，只输出 candidate_ids、screening_decisions、screening_reasons、coverage_gaps、search_iteration_log、selection_notes。candidate_ids 必须使用搜索工具返回的真实 paper_id 或 DOI，禁止使用 P001/P002 等临时编号。论文完整元数据由系统从搜索工具返回中自动捕获并重建 candidates 列表。
 - 调用 `commit_subagent_result(project_id, "literature-scout")`，由系统重建 candidates 并提交结构化结果，进入 SEARCHED。
 - 如果 SearchReport 的 `candidates` 为空，立即调用 `finish_inconclusive` 保存检索词、失败原因和建议，项目进入 `INCONCLUSIVE` 并正常结束。禁止创建空 ScreeningDecision 或继续到 EXTRACTED。
@@ -42,36 +42,15 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 按入选论文逐篇完成，禁止一次发出多个 `task`：
 
-1. 从 SearchReport 复制该论文完整元数据，包括 paper_id、title、authors、year、abstract、doi、url、source。
-2. 委派一个 paper-reader。它会使用 `fetch_paper_text` 自动尝试 OpenAlex/arXiv 开放全文。
+1. 从 SearchReport 复制该论文完整元数据，包括 paper_id、library_id、title、authors、year、abstract、doi、url、source。
+2. 委派一个 paper-reader。`library_id` 非空时它只检索一次本地索引；为空时才尝试 OpenAlex/arXiv 开放全文。任务描述只传元数据和研究问题，禁止复制工具调用签名或定义 PaperCard JSON。
 3. 收到 PaperCard 后立即调用 `commit_subagent_result(project_id, "paper-reader")` 原样保存。
 4. 保存成功后再处理下一篇。
 5. 全部入选论文保存完成后，调用 `advance_project_stage(project_id, "EXTRACTED", "paper-reader")`。
 
-PaperCard 官方字段固定为：
-
-```json
-{
-  "paper_id": "P001",
-  "title": "论文标题",
-  "research_question": "研究问题",
-  "methods": [],
-  "datasets": [],
-  "findings": [
-    {
-      "evidence_id": "P001-E1",
-      "paper_id": "P001",
-      "claim": "有证据支持的结论",
-      "quote": "PDF原文",
-      "page": 1,
-      "section": "章节"
-    }
-  ],
-  "limitations": []
-}
-```
-
 全文不可用但摘要非空时，可保存明确标记为 abstract 的摘要级 Evidence。全文和摘要均不可用时 findings 为空。
+paper-reader 已通过 response_format 绑定官方 PaperCard 结构，Supervisor不得在任务描述中重复字段定义。
+单篇论文连续两次返回无效结构时，跳过该论文并继续下一篇；重试额度按paper_id隔离。
 全部卡片保存后若 EXTRACTED 返回 `insufficient_evidence`，立即调用 `finish_inconclusive`，禁止进入综合。
 
 ## 第五步：综合比较 → SYNTHESIZED
@@ -113,6 +92,9 @@ PaperCard 官方字段固定为：
 - 已保存的 FactCheckReport 不得重复生成；恢复执行时只核查缺失章节。
 - 只有 NarrativeReview 的每一节都有对应 FactCheckReport 后，才能调用 `advance_project_stage(project_id, "COMPLETED", "research-supervisor")`。
 - FactCheckReport 为 REVISE 时保留问题和修订建议；所有章节核查均已完成后仍可结束，但不得把 REVISE 描述为“没有问题”。
+- 存在 REVISE 时进入 REVISION_PENDING，汇总最新 NarrativeReview 之后全部 REVISE 章节，只委派 narrative-writer 补齐尚无更新草稿的章节。
+- 所有修订草稿保存后调用 `finalize_narrative_revision` 确定性合并；修订阶段禁止委派 chief-editor 重新输出整篇长 JSON。
+- `finalize_narrative_revision` 返回缺失章节时，按 message 补齐后再次调用；新 NarrativeReview 生成后重新核查全部章节。
 
 ## 停止规则
 

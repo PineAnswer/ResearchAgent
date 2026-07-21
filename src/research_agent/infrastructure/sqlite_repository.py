@@ -22,6 +22,7 @@ from research_agent.domain.models import (
     LibraryCollection,
     LibraryNote,
     LibraryPaper,
+    PaperAnnotation,
     ProjectPaper,
     ResearchConversation,
     ResearchProject,
@@ -201,6 +202,21 @@ class SqliteResearchRepository:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS paper_annotations (
+                    annotation_id TEXT PRIMARY KEY,
+                    library_id TEXT NOT NULL,
+                    attachment_id TEXT,
+                    kind TEXT NOT NULL,
+                    page INTEGER,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    user_id TEXT NOT NULL DEFAULT 'local-user',
+                    FOREIGN KEY(library_id) REFERENCES library_papers(library_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(attachment_id) REFERENCES library_attachments(attachment_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS library_attachments (
                     attachment_id TEXT PRIMARY KEY,
                     library_id TEXT NOT NULL,
@@ -326,6 +342,8 @@ class SqliteResearchRepository:
                     ON library_collection_papers(library_id);
                 CREATE INDEX IF NOT EXISTS idx_library_notes_paper
                     ON library_notes(library_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_paper_annotations_paper
+                    ON paper_annotations(user_id, library_id, page, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_library_attachments_paper
                     ON library_attachments(library_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_library_chunks_paper
@@ -360,6 +378,7 @@ class SqliteResearchRepository:
             for table in (
                 "library_collections",
                 "library_notes",
+                "paper_annotations",
                 "library_attachments",
                 "library_chunks",
                 "library_artifacts",
@@ -1280,6 +1299,7 @@ class SqliteResearchRepository:
             )
             for table in (
                 "library_notes",
+                "paper_annotations",
                 "library_chunks",
                 "library_artifacts",
                 "library_attachments",
@@ -1491,6 +1511,79 @@ class SqliteResearchRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(note_id)
+
+    def save_paper_annotation(self, annotation: PaperAnnotation) -> PaperAnnotation:
+        self.get_library_paper(annotation.library_id)
+        if annotation.attachment_id:
+            attachment = self.get_library_attachment(annotation.attachment_id)
+            if attachment.library_id != annotation.library_id:
+                raise ValueError("Annotation attachment belongs to another paper")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_annotations(
+                    annotation_id, library_id, attachment_id, kind, page,
+                    payload_json, updated_at, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(annotation_id) DO UPDATE SET
+                    library_id = excluded.library_id,
+                    attachment_id = excluded.attachment_id,
+                    kind = excluded.kind,
+                    page = excluded.page,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at,
+                    user_id = excluded.user_id
+                """,
+                (
+                    annotation.annotation_id,
+                    annotation.library_id,
+                    annotation.attachment_id,
+                    annotation.kind,
+                    annotation.page,
+                    annotation.model_dump_json(),
+                    annotation.updated_at.isoformat(),
+                    self.current_user_id,
+                ),
+            )
+        return annotation
+
+    def list_paper_annotations(self, library_id: str) -> list[PaperAnnotation]:
+        self.get_library_paper(library_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM paper_annotations
+                WHERE library_id = ? AND user_id = ?
+                ORDER BY COALESCE(page, 2147483647), updated_at DESC
+                """,
+                (library_id, self.current_user_id),
+            ).fetchall()
+        return [PaperAnnotation.model_validate_json(row["payload_json"]) for row in rows]
+
+    def get_paper_annotation(self, annotation_id: str) -> PaperAnnotation:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM paper_annotations
+                WHERE annotation_id = ? AND user_id = ?
+                """,
+                (annotation_id, self.current_user_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(annotation_id)
+        return PaperAnnotation.model_validate_json(row["payload_json"])
+
+    def delete_paper_annotation(self, annotation_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM paper_annotations
+                WHERE annotation_id = ? AND user_id = ?
+                """,
+                (annotation_id, self.current_user_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(annotation_id)
 
     def save_library_attachment(
         self, attachment: LibraryAttachment
@@ -1751,6 +1844,28 @@ class SqliteResearchRepository:
                 connection.execute(
                     "UPDATE library_notes SET library_id = ?, payload_json = ? WHERE note_id = ?",
                     (primary.library_id, note.model_dump_json(), row["note_id"]),
+                )
+            annotation_rows = connection.execute(
+                """
+                SELECT annotation_id, payload_json FROM paper_annotations
+                WHERE library_id = ? AND user_id = ?
+                """,
+                (duplicate_id, self.current_user_id),
+            ).fetchall()
+            for row in annotation_rows:
+                annotation = PaperAnnotation.model_validate_json(row["payload_json"])
+                annotation.library_id = primary.library_id
+                connection.execute(
+                    """
+                    UPDATE paper_annotations
+                    SET library_id = ?, payload_json = ?
+                    WHERE annotation_id = ?
+                    """,
+                    (
+                        primary.library_id,
+                        annotation.model_dump_json(),
+                        row["annotation_id"],
+                    ),
                 )
             attachment_rows = connection.execute(
                 """

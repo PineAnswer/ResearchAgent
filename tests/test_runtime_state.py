@@ -234,6 +234,33 @@ def test_runtime_state_preserves_local_library_identity_and_search_order() -> No
     assert state.has_search_source("thread-a", "search_library") is True
 
 
+def test_runtime_state_normalizes_search_source_types_for_public_schema() -> None:
+    state = ResearchRuntimeState()
+    state.store_search_results(
+        "thread-a",
+        json.dumps(
+            [
+                {
+                    "paper_id": "W-repository",
+                    "title": "Repository paper",
+                    "source": "OpenAlex",
+                    "venue_type": "repository",
+                },
+                {
+                    "paper_id": "W-proceedings",
+                    "title": "Conference paper",
+                    "source": "OpenAlex",
+                    "venue_type": "proceedings",
+                },
+            ]
+        ),
+    )
+
+    results = state.get_search_results("thread-a")
+    assert results[0]["venue_type"] is None
+    assert results[1]["venue_type"] == "conference"
+
+
 def test_search_middleware_blocks_external_search_until_library_was_queried() -> None:
     state = ResearchRuntimeState()
     middleware = ExecutedSearchTrackingMiddleware(state)
@@ -274,6 +301,50 @@ def test_search_middleware_blocks_external_search_until_library_was_queried() ->
     assert external.status == "success"
 
 
+def test_search_middleware_routes_empty_local_library_to_openalex() -> None:
+    state = ResearchRuntimeState()
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+
+    def request(name: str, query: str, call_id: str) -> ToolCallRequest:
+        return ToolCallRequest(
+            tool_call={"name": name, "args": {"query": query}, "id": call_id},
+            tool=None,
+            state={},
+            runtime=runtime,
+        )
+
+    local = middleware.wrap_tool_call(
+        request("search_library", "local topic", "call-1"),
+        lambda _request: ToolMessage(
+            content="[]",
+            tool_call_id="call-1",
+            name="search_library",
+        ),
+    )
+    repeated_local = middleware.wrap_tool_call(
+        request("search_library", "rewritten local topic", "call-2"),
+        lambda _request: "should not execute",
+    )
+    external = middleware.wrap_tool_call(
+        request("search_openalex", "specific uncovered direction", "call-3"),
+        lambda _request: ToolMessage(
+            content="[]",
+            tool_call_id="call-3",
+            name="search_openalex",
+        ),
+    )
+
+    assert local.status == "success"
+    assert state.search_result_count("thread-a", "search_library") == 0
+    assert repeated_local.status == "error"
+    assert json.loads(repeated_local.content)["error_code"] == (
+        "local_library_empty_use_external"
+    )
+    assert external.status == "success"
+    assert state.has_search_source("thread-a", "search_openalex") is True
+
+
 def test_rejected_result_is_consumed_and_retry_count_resets_on_success() -> None:
     state = ResearchRuntimeState()
     state.record_result("thread-a", "research-synthesizer", {"topic": "t"})
@@ -285,6 +356,20 @@ def test_rejected_result_is_consumed_and_retry_count_resets_on_success() -> None
     state.record_result("thread-a", "research-synthesizer", {"topic": "fixed"})
     state.mark_consumed("thread-a", "research-synthesizer")
     assert state.rejection_count("thread-a", "research-synthesizer") == 0
+
+
+def test_paper_reader_rejections_are_isolated_by_paper_id() -> None:
+    state = ResearchRuntimeState()
+
+    assert state.reject_result("thread-a", "paper-reader", "W1") == 1
+    assert state.reject_result("thread-a", "paper-reader", "W1") == 2
+    assert state.rejection_count("thread-a", "paper-reader", "W1") == 2
+    assert state.rejection_count("thread-a", "paper-reader", "W2") == 0
+
+    assert state.reject_result("thread-a", "paper-reader", "W2") == 1
+    state.mark_consumed("thread-a", "paper-reader", "W2")
+    assert state.rejection_count("thread-a", "paper-reader", "W2") == 0
+    assert state.rejection_count("thread-a", "paper-reader", "W1") == 2
 
 
 def test_paper_fetch_guard_blocks_duplicates_and_per_paper_overflow() -> None:

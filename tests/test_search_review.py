@@ -77,6 +77,21 @@ def _review_service(tmp_path, *, max_rounds: int = 3):
     return service, review, project.project_id
 
 
+class _RejectingVenueIndex:
+    def enrich_candidate(self, candidate):
+        return {
+            **candidate,
+            "venue": candidate.get("venue", ""),
+            "ccf_rank": None,
+            "sci_quartile": None,
+            "nature_portfolio": False,
+        }
+
+    @staticmethod
+    def qualifies_for_quality_filter(candidate):
+        return False
+
+
 def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     service, review, project_id = _review_service(tmp_path)
 
@@ -90,6 +105,112 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     assert service.get_snapshot(project_id)["artifacts"][-1]["kind"] == (
         "CandidateSetSnapshot"
     )
+
+
+def test_empty_filtered_result_stays_searched_and_supports_manual_recovery(
+    tmp_path,
+) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+        venue_index=_RejectingVenueIndex(),
+    )
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["initial query"],
+            "candidates": [
+                {
+                    "paper_id": "P1",
+                    "title": "Relevant but unranked",
+                    "year": 2025,
+                    "source": "OpenAlex",
+                }
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+
+    blocked = review.begin_review(
+        project.project_id,
+        year_from=2024,
+        year_to=2026,
+        quality_venues_only=True,
+    )
+
+    assert blocked["awaiting_input"] is False
+    assert blocked["manual_recovery_allowed"] is True
+    assert "没有论文满足" in blocked["message"]
+    assert blocked["candidate_set"]["candidates"] == []
+    assert blocked["candidate_set"]["filtered_candidates"][0]["paper_id"] == "P1"
+    assert service.get_project(project.project_id).stage is ResearchStage.SEARCHED
+
+    recovered = review.apply_feedback(
+        project.project_id,
+        SearchFeedback(
+            action="accept",
+            added_papers=[
+                {
+                    "paper_id": "P1",
+                    "title": "Relevant but unranked",
+                    "year": 2025,
+                }
+            ],
+        ),
+    )
+
+    assert recovered["ready_to_continue"] is True
+    assert recovered["project"]["stage"] == "SCREENED"
+    assert recovered["screening"]["payload"]["included_paper_ids"] == ["P1"]
+
+
+def test_legacy_empty_snapshot_exposes_original_results_for_manual_recovery(
+    tmp_path,
+) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+    )
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": "P1", "title": "Legacy result", "source": "OpenAlex"}
+            ],
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    service.save_artifact_and_transition(
+        project.project_id,
+        "CandidateSetSnapshot",
+        {"candidates": [], "quality_venues_only": True},
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        actor="human-search-review",
+    )
+
+    result = review.get_review(project.project_id)
+
+    assert result["awaiting_input"] is False
+    assert result["manual_recovery_allowed"] is True
+    assert result["candidate_set"]["filtered_candidates"][0]["paper_id"] == "P1"
+    assert "旧版记录" in result["candidate_set"]["filtered_candidate_reasons"]["P1"][0]
 
 
 def test_feedback_can_refine_add_remove_and_deduplicate_queries(tmp_path) -> None:

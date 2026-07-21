@@ -683,9 +683,13 @@ class ResearchService:
     def assemble_narrative_review(self, project_id: str):
         """Build a valid review from persisted drafts when editor formatting fails."""
         project = self.repository.get_project(project_id)
-        if project.stage is not ResearchStage.OUTLINED:
+        if project.stage not in {
+            ResearchStage.OUTLINED,
+            ResearchStage.REVISION_PENDING,
+        }:
             raise WorkflowPrerequisiteError(
-                "Narrative assembly requires the project to be at OUTLINED"
+                "Narrative assembly requires the project to be at "
+                "OUTLINED or REVISION_PENDING"
             )
 
         artifacts = self.repository.list_artifacts(project_id)
@@ -694,11 +698,11 @@ class ResearchService:
             raise WorkflowPrerequisiteError("Narrative assembly requires a saved ReviewOutline")
         outline = ReviewOutline.model_validate(outline_artifact.payload)
 
-        draft_artifacts = {
-            str(item.payload.get("section_id", "")): item
-            for item in artifacts
-            if item.kind == "SectionDraft" and item.artifact_id > outline_artifact.artifact_id
-        }
+        draft_artifacts = {}
+        for item in artifacts:
+            if item.kind != "SectionDraft" or item.artifact_id <= outline_artifact.artifact_id:
+                continue
+            draft_artifacts[str(item.payload.get("section_id", ""))] = item
         missing = [
             section.section_id
             for section in outline.sections
@@ -710,26 +714,76 @@ class ResearchService:
                 + ", ".join(missing)
             )
 
+        previous_narrative = self._latest_artifact(artifacts, "NarrativeReview")
+        revision_reports = {}
+        if project.stage is ResearchStage.REVISION_PENDING:
+            if previous_narrative is None:
+                raise WorkflowPrerequisiteError(
+                    "Narrative revision requires a saved NarrativeReview"
+                )
+            for item in artifacts:
+                if (
+                    item.kind == "FactCheckReport"
+                    and item.artifact_id > previous_narrative.artifact_id
+                    and item.payload.get("verdict") == "REVISE"
+                ):
+                    revision_reports[str(item.payload.get("section_id", ""))] = item
+            missing_revisions = sorted(
+                section_id
+                for section_id, report in revision_reports.items()
+                if section_id not in draft_artifacts
+                or draft_artifacts[section_id].artifact_id <= report.artifact_id
+            )
+            if missing_revisions:
+                raise WorkflowPrerequisiteError(
+                    "Revised NarrativeReview requires corrected drafts for: "
+                    + ", ".join(missing_revisions)
+                )
+
+        previous_sections = {
+            str(item.get("section_id", "")): item
+            for item in (
+                previous_narrative.payload.get("sections", [])
+                if previous_narrative is not None
+                else []
+            )
+        }
         sections = []
         evidence_chain: dict[str, list[str]] = {}
         for section in outline.sections:
-            draft = SectionDraft.model_validate(draft_artifacts[section.section_id].payload)
-            if not draft.content.strip():
-                raise WorkflowPrerequisiteError(
-                    f"SectionDraft {section.section_id!r} has no content"
+            if (
+                project.stage is ResearchStage.REVISION_PENDING
+                and section.section_id not in revision_reports
+            ):
+                previous = previous_sections.get(section.section_id)
+                if previous is None:
+                    raise WorkflowPrerequisiteError(
+                        f"Previous NarrativeReview omits section {section.section_id!r}"
+                    )
+                narrative_section = dict(previous)
+                cited_evidence = list(
+                    dict.fromkeys(narrative_section.get("cited_evidence", []))
                 )
-            cited_evidence = list(dict.fromkeys(draft.cited_evidence))
-            sections.append(
-                {
+                narrative_section["cited_evidence"] = cited_evidence
+            else:
+                draft = SectionDraft.model_validate(
+                    draft_artifacts[section.section_id].payload
+                )
+                if not draft.content.strip():
+                    raise WorkflowPrerequisiteError(
+                        f"SectionDraft {section.section_id!r} has no content"
+                    )
+                cited_evidence = list(dict.fromkeys(draft.cited_evidence))
+                narrative_section = {
                     "section_id": draft.section_id,
                     "heading": draft.heading or section.heading,
                     "content": draft.content,
                     "subsections": [],
                     "cited_evidence": cited_evidence,
                 }
-            )
+            sections.append(narrative_section)
             for evidence_id in cited_evidence:
-                evidence_chain.setdefault(evidence_id, []).append(draft.section_id)
+                evidence_chain.setdefault(evidence_id, []).append(section.section_id)
 
         candidate_metadata: dict[str, dict[str, Any]] = {}
         for artifact in artifacts:

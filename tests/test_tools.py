@@ -228,6 +228,84 @@ def test_fetch_paper_text_downloads_arxiv_pdf(tmp_path: Path, monkeypatch) -> No
     assert len(result["pages"]) == 1
 
 
+def test_fetch_paper_text_accepts_trusted_arxiv_pdf_path_without_doi(
+    tmp_path: Path, monkeypatch
+) -> None:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        return FakeBinaryResponse(buffer.getvalue())
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["fetch_paper_text"].invoke(
+            {
+                "paper_id": "W7140346934",
+                "doi": "",
+                "url": "https://arxiv.org/pdf/2603.21522",
+                "max_pages": 1,
+            }
+        )
+    )
+
+    assert result["available"] is True
+    assert requested_urls == ["https://arxiv.org/pdf/2603.21522.pdf"]
+
+
+def test_fetch_paper_text_uses_mdpi_resource_fallback_after_403(
+    tmp_path: Path, monkeypatch
+) -> None:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    direct_url = "https://www.mdpi.com/2078-2489/16/2/87/pdf?version=2"
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        if request.full_url.startswith("https://api.openalex.org/"):
+            location = {
+                "pdf_url": direct_url,
+                "source": {"display_name": "Information"},
+            }
+            return FakeJsonResponse(
+                {"best_oa_location": location, "locations": [location]}
+            )
+        if request.full_url == direct_url:
+            raise HTTPError(direct_url, 403, "Forbidden", Message(), None)
+        if request.full_url.startswith("https://mdpi-res.com/d_attachment/information/"):
+            return FakeBinaryResponse(buffer.getvalue())
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["fetch_paper_text"].invoke(
+            {
+                "paper_id": "W4406756422",
+                "doi": "10.3390/info16020087",
+                "url": direct_url,
+                "max_pages": 1,
+            }
+        )
+    )
+
+    assert result["available"] is True
+    assert result["source_url"].startswith(
+        "https://mdpi-res.com/d_attachment/information/"
+    )
+    assert direct_url in requested_urls
+
+
 def test_fetch_paper_text_rejects_guessed_arxiv_url_for_non_arxiv_doi(
     tmp_path: Path, monkeypatch
 ) -> None:

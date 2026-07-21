@@ -269,7 +269,11 @@ class VenueRankingIndex:
             if len(candidate) >= 5 and (
                 candidate in query_key or query_key in candidate
             ):
-                best = max(best, 0.96)
+                length_ratio = min(len(query_key), len(candidate)) / max(
+                    len(query_key), len(candidate)
+                )
+                if length_ratio >= 0.75:
+                    best = max(best, 0.96)
             best = max(best, SequenceMatcher(None, query_key, candidate).ratio())
         return best
 
@@ -402,7 +406,10 @@ class VenueRankingIndex:
         ranking = self.lookup(venue_name, normalized_type) if venue_name else None
         enriched["venue"] = venue_name
         if ranking is None:
-            enriched.setdefault("venue_type", normalized_type)
+            # OpenAlex also returns source types such as ``repository``. Keep
+            # those candidates, but normalize unsupported types to unknown so
+            # they remain compatible with PaperCandidate's public schema.
+            enriched["venue_type"] = normalized_type
             enriched.update(
                 ccf_rank=None,
                 ccf_category=None,

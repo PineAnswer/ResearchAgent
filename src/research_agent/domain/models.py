@@ -122,6 +122,9 @@ class SearchFeedback(BaseModel):
 
 class CandidateSetSnapshot(BaseModel):
     candidates: list[PaperCandidate]
+    filtered_candidates: list[PaperCandidate] = Field(default_factory=list)
+    filtered_candidate_reasons: dict[str, list[str]] = Field(default_factory=dict)
+    blocked_reason: str = ""
     excluded_paper_ids: list[str] = Field(default_factory=list)
     executed_queries: list[str] = Field(default_factory=list)
     search_round: int = Field(default=0, ge=0)
@@ -354,6 +357,27 @@ class LibraryNote(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class PaperAnnotation(BaseModel):
+    """Page-aware highlight, note, or saved Q&A in the paper workspace."""
+
+    annotation_id: str
+    library_id: str
+    attachment_id: str | None = None
+    kind: Literal["highlight", "note", "qa"]
+    page: int | None = None
+    selected_text: str = ""
+    prefix: str = ""
+    suffix: str = ""
+    rects: list[dict[str, float]] = Field(default_factory=list)
+    color: str = "yellow"
+    content: str = ""
+    question: str = ""
+    answer: str = ""
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class LibraryAttachment(BaseModel):
     """File or URL reference associated with a canonical paper."""
 
@@ -398,6 +422,7 @@ class LibraryFinding(BaseModel):
     quote: str
     page: int | None = None
     section: str | None = None
+    source_scope: Literal["full_text", "abstract"] = "full_text"
 
 
 class LibraryPaperAnalysis(BaseModel):
@@ -409,6 +434,7 @@ class LibraryPaperAnalysis(BaseModel):
     findings: list[LibraryFinding] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    evidence_level: Literal["full_text", "abstract"] = "full_text"
 
 
 class LibraryArtifact(BaseModel):
@@ -429,6 +455,21 @@ class LibraryAgentResponse(BaseModel):
     answer: str
     cited_source_ids: list[str] = Field(default_factory=list)
     used_library_ids: list[str] = Field(default_factory=list)
+    coverage_note: str = ""
+
+
+class PaperQuestionCitation(BaseModel):
+    """One page-grounded quotation supporting a single-paper answer."""
+
+    page: int = Field(ge=1)
+    quote: str = Field(min_length=1)
+
+
+class PaperQuestionAnswer(BaseModel):
+    """Structured answer produced after reading a complete paper context."""
+
+    answer: str
+    citations: list[PaperQuestionCitation] = Field(default_factory=list)
     coverage_note: str = ""
 
 

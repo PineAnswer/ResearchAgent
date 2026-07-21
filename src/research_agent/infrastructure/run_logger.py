@@ -239,11 +239,15 @@ class ResearchRunLogger(BaseCallbackHandler):
             if len(names) > 1:
                 self.emit(
                     "llm.tool_choice_batch",
-                    f"LLM提出{len(names)}个工具调用；系统串行执行第一个：{names[0]}",
+                    f"LLM拟调用{len(names)}个工具；系统将尝试串行执行第一个：{names[0]}",
                     tool_calls,
                 )
             else:
-                self.emit("llm.tool_choice", f"LLM决定调用：{names[0]}", tool_calls)
+                self.emit(
+                    "llm.tool_choice",
+                    f"LLM拟调用：{names[0]}（是否执行以tool/search.started事件为准）",
+                    tool_calls,
+                )
             return
         if diagnostics["invalid_tool_calls"]:
             self.emit(

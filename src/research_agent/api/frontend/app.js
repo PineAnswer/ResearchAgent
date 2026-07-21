@@ -136,6 +136,7 @@ const state = {
   activeRunId: null,
   review: null,
   candidates: [],
+  manualCandidates: new Map(),
   selectedIds: new Set(),
   busy: false,
   agentAvailable: false,
@@ -154,6 +155,14 @@ const state = {
   libraryView: "all",
   libraryCollectionId: null,
   libraryAssistantScope: "all",
+  paperWorkspace: null,
+  paperPdf: null,
+  paperPdfLoadingTask: null,
+  paperPdfJs: null,
+  paperZoom: 1,
+  paperSelection: null,
+  paperLastAnswer: null,
+  paperRenderSession: 0,
   runStartedAt: null,
   runClockTimer: null,
   runPollTimer: null,
@@ -180,6 +189,36 @@ const elements = {
   newProjectForm: byId("newProjectForm"),
   createView: byId("createView"),
   libraryView: byId("libraryView"),
+  paperWorkspaceView: byId("paperWorkspaceView"),
+  paperWorkspaceBack: byId("paperWorkspaceBack"),
+  paperWorkspaceTitle: byId("paperWorkspaceTitle"),
+  paperWorkspaceMeta: byId("paperWorkspaceMeta"),
+  generateReadingCard: byId("generateReadingCard"),
+  exportReadingReport: byId("exportReadingReport"),
+  paperPageStatus: byId("paperPageStatus"),
+  paperZoomOut: byId("paperZoomOut"),
+  paperZoomIn: byId("paperZoomIn"),
+  paperZoomLabel: byId("paperZoomLabel"),
+  paperSelectionBar: byId("paperSelectionBar"),
+  paperSelectionPage: byId("paperSelectionPage"),
+  paperSelectionPreview: byId("paperSelectionPreview"),
+  highlightSelection: byId("highlightSelection"),
+  noteSelection: byId("noteSelection"),
+  askSelection: byId("askSelection"),
+  paperPdfPages: byId("paperPdfPages"),
+  paperAskContext: byId("paperAskContext"),
+  paperQuestionForm: byId("paperQuestionForm"),
+  paperQuestionInput: byId("paperQuestionInput"),
+  clearPaperSelection: byId("clearPaperSelection"),
+  paperAnswer: byId("paperAnswer"),
+  paperAskPanel: byId("paperAskPanel"),
+  paperAnnotationsPanel: byId("paperAnnotationsPanel"),
+  paperCardPanel: byId("paperCardPanel"),
+  paperNoteForm: byId("paperNoteForm"),
+  paperNoteInput: byId("paperNoteInput"),
+  cancelPaperNote: byId("cancelPaperNote"),
+  paperAnnotationsList: byId("paperAnnotationsList"),
+  paperReadingCard: byId("paperReadingCard"),
   librarySearch: byId("librarySearch"),
   refreshLibrary: byId("refreshLibrary"),
   askLibrary: byId("askLibrary"),
@@ -253,8 +292,12 @@ const elements = {
   selectedCount: byId("selectedCount"),
   roundCount: byId("roundCount"),
   reviewConstraints: byId("reviewConstraints"),
+  reviewNotice: byId("reviewNotice"),
   candidateFilter: byId("candidateFilter"),
   candidateGrid: byId("candidateGrid"),
+  filteredCandidatesPanel: byId("filteredCandidatesPanel"),
+  filteredCandidateCount: byId("filteredCandidateCount"),
+  filteredCandidateGrid: byId("filteredCandidateGrid"),
   selectAll: byId("selectAll"),
   clearAll: byId("clearAll"),
   minPapers: byId("minPapers"),
@@ -310,8 +353,9 @@ function showWorkspace(view) {
   elements.emptyState.hidden = view !== "empty";
   elements.createView.hidden = view !== "create";
   elements.libraryView.hidden = view !== "library";
+  elements.paperWorkspaceView.hidden = view !== "paper";
   elements.projectView.hidden = view !== "project";
-  elements.libraryToggle.classList.toggle("is-active", view === "library");
+  elements.libraryToggle.classList.toggle("is-active", ["library", "paper"].includes(view));
 }
 
 function setPopover(toggle, popover, open) {
@@ -848,6 +892,25 @@ function renderLibraryDetail(detail) {
     starred: !paper.starred,
   }));
   controls.append(star);
+  if (!paper.archived_at) {
+    const indexedPdf = (detail.attachments || []).some((attachment) => (
+      String(attachment.url || "").startsWith("/api/library/attachments/")
+      && attachment.full_text_status === "indexed"
+    ));
+    const onlineWorkspace = document.createElement("button");
+    onlineWorkspace.type = "button";
+    onlineWorkspace.className = indexedPdf ? "secondary" : "primary";
+    onlineWorkspace.append(iconNode(indexedPdf ? "book-open-text" : "cloud-download"));
+    onlineWorkspace.append(document.createTextNode(
+      indexedPdf ? "打开论文工作台" : "在线获取并打开全文",
+    ));
+    onlineWorkspace.addEventListener("click", () => openPaperWorkspace(
+      paper.library_id,
+      null,
+      !indexedPdf,
+    ));
+    controls.append(onlineWorkspace);
+  }
 
   const metadata = document.createElement("details");
   metadata.className = "library-detail-section library-metadata-editor";
@@ -1153,6 +1216,20 @@ function renderLibraryDetail(detail) {
     const rowActions = document.createElement("div");
     rowActions.className = "library-attachment-row-actions";
     const isUploaded = String(attachment.url || "").startsWith("/api/library/attachments/");
+    const isPdf = String(attachment.media_type || "").toLowerCase() === "application/pdf"
+      || String(attachment.name || "").toLowerCase().endsWith(".pdf");
+    if (isUploaded && isPdf) {
+      const openWorkspace = document.createElement("button");
+      openWorkspace.type = "button";
+      openWorkspace.className = "primary compact-button";
+      openWorkspace.append(iconNode("book-open-text"));
+      openWorkspace.append(document.createTextNode("打开论文工作台"));
+      openWorkspace.addEventListener("click", () => openPaperWorkspace(
+        paper.library_id,
+        attachment.attachment_id,
+      ));
+      rowActions.append(openWorkspace);
+    }
     if (isUploaded && ["uploaded", "failed", "ready"].includes(attachment.full_text_status)) {
       const ingest = document.createElement("button");
       ingest.type = "button";
@@ -1304,6 +1381,516 @@ function renderLibraryDetail(detail) {
     actions,
   );
   refreshIcons();
+}
+
+function setPaperTab(tab) {
+  document.querySelectorAll("[data-paper-tab]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.paperTab === tab);
+  });
+  elements.paperAskPanel.hidden = tab !== "ask";
+  elements.paperAnnotationsPanel.hidden = tab !== "annotations";
+  elements.paperCardPanel.hidden = tab !== "card";
+}
+
+function clearPaperSelection() {
+  state.paperSelection = null;
+  elements.paperSelectionBar.hidden = true;
+  elements.clearPaperSelection.hidden = true;
+  elements.paperAskContext.querySelector("strong").textContent = "论文全文";
+  elements.paperAskContext.querySelector("p").textContent = "回答将基于当前论文，并给出可点击的引用页码。";
+  window.getSelection()?.removeAllRanges();
+}
+
+function setPaperSelection(selection) {
+  state.paperSelection = selection;
+  elements.paperSelectionPage.textContent = String(selection.page);
+  elements.paperSelectionPreview.textContent = selection.text;
+  elements.paperSelectionBar.hidden = false;
+}
+
+function capturePaperSelection() {
+  const selection = window.getSelection();
+  const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
+  if (!text || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  const start = range.startContainer.parentElement?.closest(".pdf-page");
+  const end = range.endContainer.parentElement?.closest(".pdf-page");
+  if (!start || start !== end) {
+    if (start || end) notify("第一版暂支持在同一页内选择文本", true);
+    return;
+  }
+  const pageRect = start.getBoundingClientRect();
+  const rects = [...range.getClientRects()]
+    .filter((rect) => rect.width > 1 && rect.height > 1)
+    .map((rect) => ({
+      x: Math.max(0, (rect.left - pageRect.left) / pageRect.width),
+      y: Math.max(0, (rect.top - pageRect.top) / pageRect.height),
+      width: Math.min(1, rect.width / pageRect.width),
+      height: Math.min(1, rect.height / pageRect.height),
+    }));
+  if (!rects.length) return;
+  const pageText = start.querySelector(".pdf-text-layer")?.textContent || "";
+  const textIndex = pageText.indexOf(text);
+  setPaperSelection({
+    page: Number(start.dataset.page),
+    text: text.slice(0, 12000),
+    prefix: textIndex >= 0 ? pageText.slice(Math.max(0, textIndex - 180), textIndex) : "",
+    suffix: textIndex >= 0 ? pageText.slice(textIndex + text.length, textIndex + text.length + 180) : "",
+    rects,
+  });
+}
+
+function renderPaperReadingCard() {
+  const analyses = (state.paperWorkspace?.analyses || [])
+    .filter((item) => item.kind === "PaperCard");
+  elements.paperReadingCard.replaceChildren();
+  if (!analyses.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "尚未生成精读卡。点击页面顶部的“生成精读卡”开始分析。";
+    elements.paperReadingCard.append(empty);
+    return;
+  }
+  const card = analyses[0].payload || {};
+  const level = document.createElement("span");
+  level.className = "library-analysis-mode";
+  level.textContent = card.evidence_level === "abstract" ? "摘要级精读卡" : "全文级精读卡";
+  const summaryTitle = document.createElement("h3");
+  summaryTitle.textContent = "研究摘要";
+  const summary = document.createElement("p");
+  summary.textContent = card.summary || "尚未提取摘要";
+  elements.paperReadingCard.append(level, summaryTitle, summary);
+  [["方法", card.methods], ["数据集", card.datasets], ["局限", card.limitations], ["关键词", card.keywords]]
+    .forEach(([label, values]) => {
+      const heading = document.createElement("h4");
+      heading.textContent = label;
+      const list = document.createElement("ul");
+      (values || []).forEach((value) => {
+        const item = document.createElement("li");
+        item.textContent = value;
+        list.append(item);
+      });
+      if (!list.children.length) {
+        const item = document.createElement("li");
+        item.textContent = "尚未提取";
+        list.append(item);
+      }
+      elements.paperReadingCard.append(heading, list);
+    });
+  const findingsTitle = document.createElement("h4");
+  findingsTitle.textContent = "主要发现";
+  elements.paperReadingCard.append(findingsTitle);
+  (card.findings || []).forEach((finding) => {
+    const article = document.createElement("article");
+    article.className = "paper-card-finding";
+    const claim = document.createElement("strong");
+    claim.textContent = finding.claim || "研究发现";
+    const quote = document.createElement("blockquote");
+    quote.textContent = finding.quote || "";
+    article.append(claim, quote);
+    if (finding.page) {
+      const page = document.createElement("button");
+      page.type = "button";
+      page.className = "paper-page-link";
+      page.textContent = `第 ${finding.page} 页`;
+      page.addEventListener("click", () => scrollToPaperPage(finding.page));
+      article.append(page);
+    } else if (finding.source_scope === "abstract") {
+      const source = document.createElement("span");
+      source.className = "library-analysis-mode";
+      source.textContent = "来源：论文摘要";
+      article.append(source);
+    }
+    elements.paperReadingCard.append(article);
+  });
+  refreshIcons();
+}
+
+function renderPaperAnnotations() {
+  const annotations = state.paperWorkspace?.annotations || [];
+  elements.paperAnnotationsList.replaceChildren();
+  if (!annotations.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "选择 PDF 文本后，可以添加高亮、普通批注，或把问答保存到这里。";
+    elements.paperAnnotationsList.append(empty);
+  }
+  annotations.forEach((annotation) => {
+    const item = document.createElement("article");
+    item.className = `paper-annotation paper-annotation-${annotation.kind}`;
+    const header = document.createElement("header");
+    const kind = document.createElement("strong");
+    kind.textContent = { highlight: "高亮", note: "批注", qa: "问答" }[annotation.kind] || "批注";
+    const actions = document.createElement("div");
+    if (annotation.page) {
+      const page = document.createElement("button");
+      page.type = "button";
+      page.className = "paper-page-link";
+      page.textContent = `第 ${annotation.page} 页`;
+      page.addEventListener("click", () => scrollToPaperPage(annotation.page));
+      actions.append(page);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button";
+    remove.setAttribute("aria-label", "删除批注");
+    remove.append(iconNode("trash-2"));
+    remove.addEventListener("click", () => deletePaperAnnotation(annotation.annotation_id));
+    actions.append(remove);
+    header.append(kind, actions);
+    item.append(header);
+    if (annotation.selected_text) {
+      const quote = document.createElement("blockquote");
+      quote.textContent = annotation.selected_text;
+      item.append(quote);
+    }
+    if (annotation.content) {
+      const content = document.createElement("p");
+      content.textContent = annotation.content;
+      item.append(content);
+    }
+    if (annotation.question) {
+      const question = document.createElement("p");
+      question.className = "paper-annotation-question";
+      question.textContent = `问：${annotation.question}`;
+      item.append(question);
+    }
+    if (annotation.answer) {
+      const answer = document.createElement("p");
+      answer.className = "paper-annotation-answer";
+      answer.textContent = annotation.answer;
+      item.append(answer);
+    }
+    elements.paperAnnotationsList.append(item);
+  });
+  drawPaperHighlights();
+  refreshIcons();
+}
+
+function drawPaperHighlights() {
+  elements.paperPdfPages.querySelectorAll(".paper-highlight-overlay").forEach((node) => node.remove());
+  (state.paperWorkspace?.annotations || []).forEach((annotation) => {
+    if (!annotation.page || !(annotation.rects || []).length) return;
+    const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${annotation.page}"]`);
+    if (!page) return;
+    annotation.rects.forEach((rect) => {
+      const mark = document.createElement("button");
+      mark.type = "button";
+      mark.className = `paper-highlight-overlay paper-highlight-${annotation.kind}`;
+      mark.style.left = `${rect.x * 100}%`;
+      mark.style.top = `${rect.y * 100}%`;
+      mark.style.width = `${rect.width * 100}%`;
+      mark.style.height = `${rect.height * 100}%`;
+      mark.title = annotation.content || annotation.question || annotation.selected_text || "论文批注";
+      mark.addEventListener("click", () => {
+        setPaperTab("annotations");
+        elements.paperAnnotationsList.querySelectorAll(".paper-annotation").forEach((item) => item.classList.remove("is-target"));
+        const index = (state.paperWorkspace.annotations || []).findIndex((item) => item.annotation_id === annotation.annotation_id);
+        const target = elements.paperAnnotationsList.children[index];
+        target?.classList.add("is-target");
+        target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      page.append(mark);
+    });
+  });
+}
+
+async function savePaperAnnotation(kind, extra = {}) {
+  const workspace = state.paperWorkspace;
+  if (!workspace) return null;
+  const selection = state.paperSelection || {};
+  const payload = await api(`/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/annotations`, {
+    method: "POST",
+    body: JSON.stringify({
+      kind,
+      attachment_id: workspace.workspace_attachment?.attachment_id || null,
+      page: selection.page || null,
+      selected_text: selection.text || "",
+      prefix: selection.prefix || "",
+      suffix: selection.suffix || "",
+      rects: selection.rects || [],
+      color: "yellow",
+      content: "",
+      question: "",
+      answer: "",
+      citations: [],
+      ...extra,
+    }),
+  });
+  workspace.annotations = [...(workspace.annotations || []), payload.data];
+  renderPaperAnnotations();
+  return payload.data;
+}
+
+async function deletePaperAnnotation(annotationId) {
+  if (!window.confirm("删除这条批注？")) return;
+  await api(`/api/library/annotations/${encodeURIComponent(annotationId)}`, { method: "DELETE" });
+  state.paperWorkspace.annotations = (state.paperWorkspace.annotations || [])
+    .filter((item) => item.annotation_id !== annotationId);
+  renderPaperAnnotations();
+  notify("批注已删除");
+}
+
+function scrollToPaperPage(pageNumber) {
+  const page = elements.paperPdfPages.querySelector(`.pdf-page[data-page="${pageNumber}"]`);
+  if (!page) return;
+  page.scrollIntoView({ behavior: "smooth", block: "start" });
+  page.classList.add("is-cited");
+  window.setTimeout(() => page.classList.remove("is-cited"), 1600);
+}
+
+function renderPaperAnswer(answer) {
+  elements.paperAnswer.replaceChildren();
+  elements.paperAnswer.hidden = false;
+  const heading = document.createElement("h3");
+  heading.textContent = answer.scope === "selection" ? "选文回答" : "全文回答";
+  const mode = document.createElement("p");
+  mode.className = "muted";
+  mode.textContent = answer.mode === "agent" && answer.context_scope === "full_text"
+    ? `LLM 全文分析 · 已发送 ${answer.pages_sent || 0} 页`
+    : "本地证据检索（LLM 全文分析当前不可用）";
+  const text = document.createElement("p");
+  text.className = "paper-answer-text";
+  text.textContent = answer.answer || "未获得可追溯回答。";
+  elements.paperAnswer.append(heading, mode, text);
+  if ((answer.citations || []).length) {
+    const citations = document.createElement("ol");
+    citations.className = "paper-citations";
+    answer.citations.forEach((citation) => {
+      const item = document.createElement("li");
+      const title = document.createElement("strong");
+      title.textContent = `${citation.citation || ""} ${citation.title || "论文证据"}`.trim();
+      const quote = document.createElement("blockquote");
+      quote.textContent = citation.quote || "";
+      item.append(title, quote);
+      if (citation.page) {
+        const page = document.createElement("button");
+        page.type = "button";
+        page.className = "paper-page-link";
+        page.textContent = `跳转第 ${citation.page} 页`;
+        page.addEventListener("click", () => scrollToPaperPage(citation.page));
+        item.append(page);
+      }
+      citations.append(item);
+    });
+    elements.paperAnswer.append(citations);
+  }
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "secondary paper-save-answer";
+  save.append(iconNode("message-square-plus"), document.createTextNode("将问答保存为批注"));
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      await savePaperAnnotation("qa", {
+        page: answer.selection?.page || null,
+        selected_text: answer.selection?.text || "",
+        prefix: answer.selection?.prefix || "",
+        suffix: answer.selection?.suffix || "",
+        rects: answer.selection_rects || [],
+        question: answer.question,
+        answer: answer.answer,
+        citations: answer.citations || [],
+      });
+      save.textContent = "已保存为批注";
+      notify("问答已加入论文批注");
+    } catch (error) {
+      save.disabled = false;
+      notify(`保存失败：${error.message}`, true);
+    }
+  });
+  elements.paperAnswer.append(save);
+  refreshIcons();
+}
+
+async function renderPdfPage(pageNumber, sessionId) {
+  const page = await state.paperPdf.getPage(pageNumber);
+  if (sessionId !== state.paperRenderSession) return;
+  const viewport = page.getViewport({ scale: 1.25 * state.paperZoom });
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const wrapper = document.createElement("article");
+  wrapper.className = "pdf-page";
+  wrapper.dataset.page = String(pageNumber);
+  wrapper.style.width = `${viewport.width}px`;
+  wrapper.style.height = `${viewport.height}px`;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(viewport.width * pixelRatio);
+  canvas.height = Math.floor(viewport.height * pixelRatio);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  const context = canvas.getContext("2d", { alpha: false });
+  const textLayer = document.createElement("div");
+  textLayer.className = "pdf-text-layer";
+  const pageLabel = document.createElement("span");
+  pageLabel.className = "pdf-page-number";
+  pageLabel.textContent = String(pageNumber);
+  wrapper.append(canvas, textLayer, pageLabel);
+  elements.paperPdfPages.append(wrapper);
+  await page.render({
+    canvasContext: context,
+    viewport,
+    transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+  }).promise;
+  const textContent = await page.getTextContent();
+  const styles = textContent.styles || {};
+  textContent.items.forEach((item) => {
+    if (!item.str) return;
+    const transform = state.paperPdfJs.Util.transform(viewport.transform, item.transform);
+    const angle = Math.atan2(transform[1], transform[0]);
+    const fontHeight = Math.hypot(transform[2], transform[3]);
+    const fontStyle = styles[item.fontName] || {};
+    const ascent = fontStyle.ascent ?? (fontStyle.descent ? 1 + fontStyle.descent : 0.8);
+    const span = document.createElement("span");
+    span.textContent = item.str;
+    span.style.left = `${transform[4]}px`;
+    span.style.top = `${transform[5] - fontHeight * ascent}px`;
+    span.style.fontSize = `${fontHeight}px`;
+    span.style.fontFamily = fontStyle.fontFamily || "sans-serif";
+    span.style.transform = angle ? `rotate(${angle}rad)` : "none";
+    textLayer.append(span);
+    const measured = span.getBoundingClientRect().width;
+    const expected = Math.abs(item.width * viewport.scale);
+    if (measured > 0 && expected > 0) {
+      const rotation = angle ? `rotate(${angle}rad) ` : "";
+      span.style.transform = `${rotation}scaleX(${expected / measured})`;
+    }
+  });
+}
+
+async function renderPaperPdf() {
+  if (!state.paperPdf) return;
+  const sessionId = ++state.paperRenderSession;
+  elements.paperPdfPages.replaceChildren();
+  elements.paperZoomLabel.textContent = `${Math.round(state.paperZoom * 100)}%`;
+  const pageCount = state.paperPdf.numPages;
+  for (let page = 1; page <= pageCount; page += 1) {
+    if (sessionId !== state.paperRenderSession) return;
+    elements.paperPageStatus.textContent = `正在渲染第 ${page} / ${pageCount} 页`;
+    await renderPdfPage(page, sessionId);
+  }
+  if (sessionId !== state.paperRenderSession) return;
+  elements.paperPageStatus.textContent = `全文共 ${pageCount} 页 · 可选择文本提问或批注`;
+  drawPaperHighlights();
+}
+
+async function loadPaperPdf(attachment) {
+  elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在通过 PDF.js 加载全文…</p></div>';
+  try {
+    if (!state.paperPdfJs) {
+      state.paperPdfJs = await import("/ui-assets/vendor/pdfjs/pdf.mjs?v=6.1.200");
+      state.paperPdfJs.GlobalWorkerOptions.workerSrc = "/ui-assets/vendor/pdfjs/pdf.worker.mjs?v=6.1.200";
+    }
+    if (state.paperPdfLoadingTask) {
+      await state.paperPdfLoadingTask.destroy();
+      state.paperPdfLoadingTask = null;
+    } else if (state.paperPdf?.cleanup) {
+      await state.paperPdf.cleanup();
+    }
+    state.paperPdf = null;
+    const loadingTask = state.paperPdfJs.getDocument({
+      url: attachment.url,
+      cMapUrl: "/ui-assets/vendor/pdfjs/cmaps/",
+      cMapPacked: true,
+      wasmUrl: "/ui-assets/vendor/pdfjs/wasm/",
+      standardFontDataUrl: "/ui-assets/vendor/pdfjs/standard_fonts/",
+    });
+    state.paperPdfLoadingTask = loadingTask;
+    const documentProxy = await loadingTask.promise;
+    if (state.paperPdfLoadingTask !== loadingTask) {
+      await loadingTask.destroy();
+      return;
+    }
+    state.paperPdf = documentProxy;
+    await renderPaperPdf();
+  } catch (error) {
+    elements.paperPageStatus.textContent = "PDF 加载失败";
+    elements.paperPdfPages.replaceChildren();
+    const message = document.createElement("div");
+    message.className = "paper-pdf-placeholder is-error";
+    message.textContent = `无法加载 PDF：${error.message}`;
+    elements.paperPdfPages.append(message);
+  }
+}
+
+async function openPaperWorkspace(libraryId, attachmentId = null, forceAcquire = false) {
+  showWorkspace("paper");
+  elements.paperWorkspaceTitle.textContent = "正在加载论文…";
+  elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在准备论文全文…</p></div>';
+  clearPaperSelection();
+  elements.paperAnswer.hidden = true;
+  try {
+    const payload = await api(`/api/library/papers/${encodeURIComponent(libraryId)}/workspace`);
+    let workspace = payload.data;
+    if (attachmentId) {
+      workspace.workspace_attachment = (workspace.attachments || [])
+        .find((item) => item.attachment_id === attachmentId) || workspace.workspace_attachment;
+    }
+    const hasInternalPdf = (workspace.attachments || []).some((item) => (
+      String(item.url || "").startsWith("/api/library/attachments/")
+      && (String(item.media_type || "").toLowerCase() === "application/pdf"
+        || String(item.name || "").toLowerCase().endsWith(".pdf"))
+    ));
+    if (!attachmentId && (forceAcquire || !hasInternalPdf)) {
+      elements.paperWorkspaceTitle.textContent = workspace.paper.title;
+      elements.paperPageStatus.textContent = "正在查找可公开获取的论文全文…";
+      const acquisition = await api(
+        `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/acquire-full-text`,
+        { method: "POST" },
+      );
+      const result = acquisition.data || {};
+      if (!["acquired", "existing", "failed"].includes(result.status)) {
+        const attempted = (result.attempted_urls || []).length;
+        const firstError = result.errors?.[0]?.error || "";
+        const reason = firstError.includes("403")
+          ? "来源站点拒绝后端下载（HTTP 403）"
+          : firstError === "response_is_not_pdf"
+            ? "来源地址返回了网页而非 PDF"
+            : firstError;
+        notify(
+          attempted
+            ? `尝试了 ${attempted} 个开放获取地址，均未取得有效 PDF${reason ? `：${reason}` : ""}`
+            : "未发现可公开获取的全文，可继续使用摘要或手动上传 PDF",
+          true,
+        );
+      } else {
+        const refreshed = await api(`/api/library/papers/${encodeURIComponent(libraryId)}/workspace`);
+        workspace = refreshed.data;
+      }
+      if (result.status === "acquired") notify("已在线获取全文并完成索引");
+      if (result.status === "failed") {
+        notify(result.message || result.attachment?.error || "全文已获取，但文本解析失败", true);
+      }
+    }
+    state.paperWorkspace = workspace;
+    const paper = workspace.paper;
+    elements.paperWorkspaceTitle.textContent = paper.title;
+    elements.paperWorkspaceMeta.textContent = [
+      (paper.authors || []).join(", "),
+      paper.year,
+      workspace.workspace_attachment?.name,
+    ].filter(Boolean).join(" · ");
+    elements.exportReadingReport.href = `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/report.md`;
+    renderPaperAnnotations();
+    renderPaperReadingCard();
+    setPaperTab("ask");
+    const attachment = workspace.workspace_attachment;
+    if (!attachment || !String(attachment.url || "").startsWith("/api/library/attachments/")) {
+      elements.paperPageStatus.textContent = "当前未加载 PDF";
+      elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>可直接生成摘要级精读卡，或手动上传 PDF 后升级为全文级精读卡。</p></div>';
+      refreshIcons();
+      return;
+    }
+    await loadPaperPdf(attachment);
+    refreshIcons();
+  } catch (error) {
+    elements.paperWorkspaceTitle.textContent = "单论文工作台";
+    elements.paperPdfPages.replaceChildren();
+    const message = document.createElement("div");
+    message.className = "paper-pdf-placeholder is-error";
+    message.textContent = error.message;
+    elements.paperPdfPages.append(message);
+    notify(`工作台加载失败：${error.message}`, true);
+  }
 }
 
 async function selectLibraryPaper(libraryId) {
@@ -3126,11 +3713,20 @@ async function loadProject(projectId, quiet = false, force = false) {
     const snapshot = payload.data;
     await loadProjectLibrary(projectId);
     applyProjectSnapshot(snapshot);
-    if (["SEARCH_REVIEW_PENDING", "SCREENED", "INCONCLUSIVE"].includes(snapshot.project.stage)) {
+    const hasCandidateSnapshot = (snapshot.artifacts || []).some(
+      (artifact) => artifact.kind === "CandidateSetSnapshot",
+    );
+    if (
+      ["SEARCH_REVIEW_PENDING", "SCREENED", "INCONCLUSIVE"].includes(snapshot.project.stage)
+      || (snapshot.project.stage === "SEARCHED" && hasCandidateSnapshot)
+    ) {
       const reviewPayload = await api(
         `/api/projects/${encodeURIComponent(projectId)}/search-review`,
       );
-      if (snapshot.project.stage === "SEARCH_REVIEW_PENDING") {
+      if (
+        snapshot.project.stage === "SEARCH_REVIEW_PENDING"
+        || (snapshot.project.stage === "SEARCHED" && reviewPayload.data.manual_recovery_allowed)
+      ) {
         renderReview(reviewPayload.data);
       } else {
         state.review = reviewPayload.data;
@@ -3341,6 +3937,73 @@ function renderCandidateCards() {
   refreshIcons();
 }
 
+function acceptedPaperCount(selectedIds, addedPapers) {
+  const acceptedIds = new Set([...selectedIds].map(normalizePaperId));
+  addedPapers.forEach((paper) => {
+    // Match the backend's _candidate_id precedence so a paper carrying both
+    // paper_id and DOI is counted once.
+    const id = paper.paper_id || paper.doi;
+    if (id) acceptedIds.add(normalizePaperId(id));
+  });
+  return acceptedIds.size;
+}
+
+function renderFilteredCandidateCards() {
+  const snapshot = state.review?.candidate_set || {};
+  const filtered = (snapshot.filtered_candidates || []).filter(
+    (candidate) => !state.manualCandidates.has(candidateId(candidate)),
+  );
+  elements.filteredCandidateCount.textContent = String(filtered.length);
+  elements.filteredCandidatesPanel.hidden = !(snapshot.filtered_candidates || []).length;
+  elements.filteredCandidateGrid.replaceChildren();
+
+  filtered.forEach((candidate) => {
+    const id = candidateId(candidate);
+    const card = document.createElement("article");
+    card.className = "filtered-candidate-card";
+    const title = document.createElement("h4");
+    title.textContent = candidate.title || "未命名论文";
+    const reasons = document.createElement("p");
+    const reasonList = snapshot.filtered_candidate_reasons?.[id] || [];
+    reasons.textContent = [
+      candidate.year ? `年份 ${candidate.year}` : "年份未知",
+      ...reasonList,
+    ].join(" · ");
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "secondary";
+    addButton.textContent = "手动加入候选";
+    addButton.addEventListener("click", () => {
+      state.manualCandidates.set(id, {
+        paper_id: candidate.paper_id || id,
+        title: candidate.title || "手动加入的论文",
+        authors: candidate.authors || [],
+        year: candidate.year || null,
+        doi: candidate.doi || "",
+        url: candidate.url || null,
+        source: "user",
+      });
+      if (!state.candidates.some((item) => candidateId(item) === id)) {
+        state.candidates.push(candidate);
+      }
+      state.selectedIds.add(id);
+      renderCandidateCards();
+      renderFilteredCandidateCards();
+      updateReviewStats();
+      notify("论文已手动加入候选集，提交后保存");
+    });
+    card.append(title, reasons, addButton);
+    elements.filteredCandidateGrid.append(card);
+  });
+
+  if (!filtered.length && (snapshot.filtered_candidates || []).length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = "所有未达要求的论文均已手动加入";
+    elements.filteredCandidateGrid.append(empty);
+  }
+}
+
 function updateReviewStats() {
   elements.candidateCount.textContent = String(state.candidates.length);
   elements.selectedCount.textContent = String(state.selectedIds.size);
@@ -3350,6 +4013,7 @@ function updateReviewStats() {
 
 function renderReview(review) {
   state.review = review;
+  state.manualCandidates = new Map();
   state.candidates = review.candidate_set?.candidates || [];
   const snapshot = review.candidate_set || {};
   const agentIncluded = new Set(
@@ -3378,6 +4042,8 @@ function renderReview(review) {
       ? "仅 CCF-A、JCR Q1 或 Nature Portfolio"
       : "出版物等级不限",
   ].join(" · ");
+  elements.reviewNotice.hidden = !review.message;
+  elements.reviewNotice.textContent = review.message || "";
   renderProjectHeader(review.project);
   renderProjectSummary({
     project: review.project,
@@ -3388,6 +4054,7 @@ function renderReview(review) {
   elements.continuePanel.hidden = true;
   elements.undoReview.hidden = !review.can_undo;
   renderCandidateCards();
+  renderFilteredCandidateCards();
   updateReviewStats();
 }
 
@@ -3397,10 +4064,19 @@ function feedbackBody(action) {
     .filter((id) => !state.selectedIds.has(id));
   const queries = parseList(elements.querySuggestions.value);
   const dois = parseList(elements.manualDois.value, true);
+  const manualCandidates = [...state.manualCandidates.values()];
+  const knownManualIds = new Set(
+    manualCandidates.flatMap((paper) => [paper.doi, paper.paper_id].filter(Boolean).map(normalizePaperId)),
+  );
   return {
     action,
     suggested_queries: queries,
-    added_papers: dois.map((doi) => ({ doi })),
+    added_papers: [
+      ...manualCandidates,
+      ...dois
+        .filter((doi) => !knownManualIds.has(normalizePaperId(doi)))
+        .map((doi) => ({ doi })),
+    ],
     excluded_paper_ids: exclusions,
     comment: elements.feedbackComment.value.trim(),
     min_papers: numberInputValue(elements.minPapers, 1),
@@ -3447,7 +4123,7 @@ async function submitFeedback(action) {
   }
 
   if (action === "accept") {
-    const acceptedCount = state.selectedIds.size + body.added_papers.length;
+    const acceptedCount = acceptedPaperCount(state.selectedIds, body.added_papers);
     if (!acceptedCount) {
       notify("至少保留或加入一篇论文后才能确认", true);
       return;
@@ -4060,6 +4736,137 @@ elements.closeLibraryCompare.addEventListener("click", () => {
   elements.libraryComparePanel.hidden = true;
 });
 elements.libraryAssistantForm.addEventListener("submit", askLibraryAssistant);
+elements.paperWorkspaceBack.addEventListener("click", async () => {
+  showWorkspace("library");
+  if (state.selectedLibraryId) await selectLibraryPaper(state.selectedLibraryId);
+});
+document.querySelectorAll("[data-paper-tab]").forEach((button) => {
+  button.addEventListener("click", () => setPaperTab(button.dataset.paperTab));
+});
+elements.paperPdfPages.addEventListener("mouseup", () => window.setTimeout(capturePaperSelection, 0));
+elements.paperPdfPages.addEventListener("pointerup", () => window.setTimeout(capturePaperSelection, 0));
+let paperSelectionFrame = null;
+document.addEventListener("selectionchange", () => {
+  if (elements.paperWorkspaceView.hidden || paperSelectionFrame !== null) return;
+  paperSelectionFrame = window.requestAnimationFrame(() => {
+    paperSelectionFrame = null;
+    capturePaperSelection();
+  });
+});
+elements.highlightSelection.addEventListener("click", async () => {
+  if (!state.paperSelection) return;
+  try {
+    await savePaperAnnotation("highlight");
+    notify("高亮已保存");
+  } catch (error) {
+    notify(`高亮保存失败：${error.message}`, true);
+  }
+});
+elements.noteSelection.addEventListener("click", () => {
+  if (!state.paperSelection) return;
+  setPaperTab("annotations");
+  elements.paperNoteForm.hidden = false;
+  elements.paperNoteInput.focus();
+});
+elements.cancelPaperNote.addEventListener("click", () => {
+  elements.paperNoteForm.hidden = true;
+  elements.paperNoteInput.value = "";
+});
+elements.paperNoteForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const content = elements.paperNoteInput.value.trim();
+  if (!content || !state.paperSelection) return;
+  try {
+    await savePaperAnnotation("note", { content });
+    elements.paperNoteInput.value = "";
+    elements.paperNoteForm.hidden = true;
+    notify("批注已保存");
+  } catch (error) {
+    notify(`批注保存失败：${error.message}`, true);
+  }
+});
+elements.askSelection.addEventListener("click", () => {
+  if (!state.paperSelection) return;
+  setPaperTab("ask");
+  elements.paperAskContext.querySelector("strong").textContent = `第 ${state.paperSelection.page} 页选中文本`;
+  elements.paperAskContext.querySelector("p").textContent = state.paperSelection.text;
+  elements.clearPaperSelection.hidden = false;
+  elements.paperQuestionInput.focus();
+});
+elements.clearPaperSelection.addEventListener("click", clearPaperSelection);
+elements.paperQuestionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const question = elements.paperQuestionInput.value.trim();
+  const workspace = state.paperWorkspace;
+  if (!question || !workspace) return;
+  const selection = state.paperSelection;
+  const submit = elements.paperQuestionForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  elements.paperAnswer.hidden = false;
+  elements.paperAnswer.textContent = "正在检索论文证据并组织回答…";
+  try {
+    const payload = await api(
+      `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace/question`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          scope: selection ? "selection" : "paper",
+          attachment_id: workspace.workspace_attachment?.attachment_id || null,
+          question,
+          page: selection?.page || null,
+          selected_text: selection?.text || "",
+          prefix: selection?.prefix || "",
+          suffix: selection?.suffix || "",
+        }),
+      },
+    );
+    state.paperLastAnswer = {
+      ...payload.data,
+      selection_rects: selection?.rects || [],
+    };
+    renderPaperAnswer(state.paperLastAnswer);
+  } catch (error) {
+    elements.paperAnswer.textContent = `提问失败：${error.message}`;
+    notify(`论文提问失败：${error.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+elements.generateReadingCard.addEventListener("click", async () => {
+  const workspace = state.paperWorkspace;
+  if (!workspace?.paper?.library_id) return;
+  elements.generateReadingCard.disabled = true;
+  const original = elements.generateReadingCard.textContent;
+  elements.generateReadingCard.textContent = "正在生成精读卡…";
+  try {
+    const attachmentQuery = workspace.workspace_attachment?.attachment_id
+      ? `?attachment_id=${encodeURIComponent(workspace.workspace_attachment.attachment_id)}`
+      : "";
+    const generated = await api(
+      `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace/reading-card${attachmentQuery}`,
+      { method: "POST" },
+    );
+    const refreshed = await api(`/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace`);
+    state.paperWorkspace.analyses = refreshed.data.analyses || [];
+    renderPaperReadingCard();
+    setPaperTab("card");
+    notify(generated.data?.evidence_level === "abstract" ? "摘要级精读卡已生成" : "全文级精读卡已生成");
+  } catch (error) {
+    notify(`精读卡生成失败：${error.message}`, true);
+  } finally {
+    elements.generateReadingCard.disabled = false;
+    elements.generateReadingCard.textContent = original;
+    refreshIcons();
+  }
+});
+elements.paperZoomOut.addEventListener("click", async () => {
+  state.paperZoom = Math.max(0.6, Number((state.paperZoom - 0.15).toFixed(2)));
+  await renderPaperPdf();
+});
+elements.paperZoomIn.addEventListener("click", async () => {
+  state.paperZoom = Math.min(2, Number((state.paperZoom + 0.15).toFixed(2)));
+  await renderPaperPdf();
+});
 let librarySearchTimer = null;
 elements.librarySearch.addEventListener("input", () => {
   window.clearTimeout(librarySearchTimer);
