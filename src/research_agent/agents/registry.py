@@ -82,12 +82,12 @@ def build_subagent_registry(
         ToolCallLimitMiddleware(
             tool_name="search_library",
             run_limit=2,
-            exit_behavior="end",
+            exit_behavior="continue",
         ),
         ToolCallLimitMiddleware(
             tool_name="search_openalex",
             run_limit=max_openalex_searches,
-            exit_behavior="end",
+            exit_behavior="continue",
         ),
     ]
     if max_crossref_searches > 0:
@@ -95,7 +95,7 @@ def build_subagent_registry(
             ToolCallLimitMiddleware(
                 tool_name="search_crossref",
                 run_limit=max_crossref_searches,
-                exit_behavior="end",
+                exit_behavior="continue",
             )
         )
     scout_middleware.append(ExecutedSearchTrackingMiddleware(state))
@@ -105,7 +105,15 @@ def build_subagent_registry(
             "literature-scout",
             "检索并筛选学术论文，返回结构化 SearchReport。",
             inject_skill(
-                SCOUT_PROMPT,
+                SCOUT_PROMPT
+                + (
+                    "\n\n## 本次任务的真实工具预算\n"
+                    "- search_library：最多2次；首次返回空数组后禁止再次调用，"
+                    "下一次必须调用search_openalex。\n"
+                    f"- search_openalex：最多{max_openalex_searches}次。\n"
+                    f"- search_crossref：最多{max_crossref_searches}次。\n"
+                    "- 检索迭代轮数与单个工具调用上限是不同概念，禁止混用。\n"
+                ),
                 "literature-search",
                 skill_contents["literature-search"],
             ),
@@ -129,12 +137,12 @@ def build_subagent_registry(
                 ToolCallLimitMiddleware(
                     tool_name="retrieve_library_passages",
                     run_limit=1,
-                    exit_behavior="end",
+                    exit_behavior="continue",
                 ),
                 ToolCallLimitMiddleware(
                     tool_name="extract_pdf_text",
                     run_limit=1,
-                    exit_behavior="end",
+                    exit_behavior="continue",
                 ),
                 PaperFetchGuardMiddleware(state, max_paper_fetches_per_paper),
             ],

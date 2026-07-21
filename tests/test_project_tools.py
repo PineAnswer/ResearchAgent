@@ -240,6 +240,103 @@ def test_atomic_commit_returns_recoverable_error_for_malformed_json(tmp_path) ->
     assert service.get_project(project.project_id).stage is ResearchStage.CREATED
 
 
+def test_empty_local_search_report_requires_external_search_before_commit(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    state = ResearchRuntimeState()
+    tools = {
+        tool.name: tool for tool in build_project_tools(service, runtime_state=state)
+    }
+    runtime = _runtime("thread-a")
+    project = json.loads(
+        tools["create_research_project"].func("topic", "question", runtime=runtime)
+    )
+    project_id = project["project_id"]
+    empty_report = {
+        "query": "local topic",
+        "search_terms": ["local topic"],
+        "candidates": [],
+        "candidate_ids": [],
+        "screening_decisions": {},
+        "screening_reasons": {},
+        "coverage_gaps": ["本地文献库为空，需要外部检索"],
+        "search_iteration_log": [],
+        "selection_notes": [],
+    }
+
+    state.mark_search_source("thread-a", "search_library")
+    state.store_search_results("thread-a", "[]", source="search_library")
+    state.record_result("thread-a", "literature-scout", empty_report)
+    rejected = json.loads(
+        tools["commit_subagent_result"].func(
+            project_id, "literature-scout", runtime=runtime
+        )
+    )
+
+    assert rejected["error_code"] == "external_search_required"
+    assert rejected["retry_allowed"] is True
+    assert service.get_project(project_id).stage is ResearchStage.CREATED
+    assert service.get_snapshot(project_id)["artifacts"] == []
+
+    state.mark_search_source("thread-a", "search_openalex")
+    state.store_search_results("thread-a", "[]", source="search_openalex")
+    state.record_result("thread-a", "literature-scout", empty_report)
+    committed = json.loads(
+        tools["commit_subagent_result"].func(
+            project_id, "literature-scout", runtime=runtime
+        )
+    )
+
+    assert committed["artifact"]["kind"] == "SearchReport"
+    assert committed["project"]["stage"] == ResearchStage.SEARCHED.value
+
+
+def test_invalid_literature_scout_result_gets_one_corrective_retry(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    state = ResearchRuntimeState()
+    tools = {
+        tool.name: tool for tool in build_project_tools(service, runtime_state=state)
+    }
+    runtime = _runtime("thread-a")
+    project = json.loads(
+        tools["create_research_project"].func("topic", "question", runtime=runtime)
+    )
+
+    def reject() -> dict:
+        state.record_result(
+            "thread-a",
+            "literature-scout",
+            {
+                "query": "query",
+                "search_terms": ["query"],
+                "candidates": [
+                    {
+                        "paper_id": "W-repository",
+                        "title": "Repository paper",
+                        "source": "OpenAlex",
+                        "venue_type": "repository",
+                    }
+                ],
+                "candidate_ids": ["W-repository"],
+                "screening_decisions": {},
+            },
+        )
+        return json.loads(
+            tools["commit_subagent_result"].func(
+                project["project_id"], "literature-scout", runtime=runtime
+            )
+        )
+
+    first = reject()
+    second = reject()
+
+    assert first["retry_allowed"] is True
+    assert first["rejection_count"] == 1
+    assert "纠正性" in first["instruction"]
+    assert second["retry_allowed"] is False
+    assert second["rejection_count"] == 2
+    assert service.get_project(project["project_id"]).stage is ResearchStage.CREATED
+
+
 def test_atomic_commit_returns_recoverable_error_for_stage_skip(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     tools = _tools_by_name(service)
@@ -545,6 +642,47 @@ def test_invalid_synthesis_is_discarded_and_can_be_regenerated(tmp_path) -> None
     assert result["rejection_count"] == 1
     assert state.pending_result("thread-a", "research-synthesizer") is None
     assert service.get_project(project_id).stage is ResearchStage.EXTRACTED
+
+
+def test_invalid_paper_reader_retry_limit_does_not_block_next_paper(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    state = ResearchRuntimeState()
+    tools = {
+        tool.name: tool for tool in build_project_tools(service, runtime_state=state)
+    }
+    runtime = _runtime("thread-a")
+    project = json.loads(
+        tools["create_research_project"].func("topic", "question", runtime=runtime)
+    )
+    project_id = project["project_id"]
+
+    def reject(paper_id: str) -> dict:
+        state.record_result(
+            "thread-a",
+            "paper-reader",
+            {
+                "_subagent_error": "structured_response_missing",
+                "_paper_id": paper_id,
+                "paper_id": paper_id,
+            },
+        )
+        return json.loads(
+            tools["commit_subagent_result"].func(
+                project_id, "paper-reader", runtime=runtime
+            )
+        )
+
+    first = reject("W1")
+    second = reject("W1")
+    next_paper = reject("W2")
+
+    assert first["retry_allowed"] is True
+    assert second["retry_allowed"] is False
+    assert second["skip_current_paper"] is True
+    assert second["rejection_scope"] == "W1"
+    assert next_paper["retry_allowed"] is True
+    assert next_paper["rejection_count"] == 1
+    assert next_paper["rejection_scope"] == "W2"
 
 
 def test_chief_editor_missing_structure_uses_saved_draft_fallback(tmp_path) -> None:

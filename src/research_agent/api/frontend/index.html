@@ -347,6 +347,122 @@
           </section>
         </section>
 
+        <section id="paperWorkspaceView" class="paper-workspace" hidden>
+          <header class="paper-workspace-header">
+            <button id="paperWorkspaceBack" class="secondary" type="button">
+              <i data-lucide="arrow-left" aria-hidden="true"></i>
+              返回文献库
+            </button>
+            <div class="paper-workspace-title">
+              <p class="eyebrow">Single paper workspace</p>
+              <h2 id="paperWorkspaceTitle">单论文工作台</h2>
+              <p id="paperWorkspaceMeta"></p>
+            </div>
+            <div class="paper-workspace-actions">
+              <button id="generateReadingCard" class="secondary" type="button">
+                <i data-lucide="sparkles" aria-hidden="true"></i>
+                生成精读卡
+              </button>
+              <a id="exportReadingReport" class="primary" href="#" download>
+                <i data-lucide="download" aria-hidden="true"></i>
+                导出 Markdown
+              </a>
+            </div>
+          </header>
+
+          <div class="paper-workspace-layout">
+            <section class="paper-reader" aria-label="PDF 全文阅读器">
+              <div class="paper-reader-toolbar">
+                <div class="paper-page-status">
+                  <i data-lucide="file-text" aria-hidden="true"></i>
+                  <span id="paperPageStatus">准备加载 PDF</span>
+                </div>
+                <div class="paper-zoom-controls">
+                  <button id="paperZoomOut" class="icon-button bordered" type="button" aria-label="缩小">
+                    <i data-lucide="zoom-out" aria-hidden="true"></i>
+                  </button>
+                  <span id="paperZoomLabel">100%</span>
+                  <button id="paperZoomIn" class="icon-button bordered" type="button" aria-label="放大">
+                    <i data-lucide="zoom-in" aria-hidden="true"></i>
+                  </button>
+                </div>
+              </div>
+              <div id="paperSelectionBar" class="paper-selection-bar" hidden>
+                <div>
+                  <strong>已选择第 <span id="paperSelectionPage">—</span> 页文本</strong>
+                  <p id="paperSelectionPreview"></p>
+                </div>
+                <div class="paper-selection-actions">
+                  <button id="highlightSelection" class="secondary" type="button">
+                    <i data-lucide="highlighter" aria-hidden="true"></i>
+                    高亮
+                  </button>
+                  <button id="noteSelection" class="secondary" type="button">
+                    <i data-lucide="message-square-plus" aria-hidden="true"></i>
+                    添加批注
+                  </button>
+                  <button id="askSelection" class="primary" type="button">
+                    <i data-lucide="message-circle-question" aria-hidden="true"></i>
+                    针对选文提问
+                  </button>
+                </div>
+              </div>
+              <div id="paperPdfPages" class="paper-pdf-pages" aria-live="polite">
+                <div class="paper-pdf-placeholder">
+                  <i data-lucide="loader-circle" aria-hidden="true"></i>
+                  <p>正在准备论文全文…</p>
+                </div>
+              </div>
+            </section>
+
+            <aside class="paper-research-panel" aria-label="论文研究助手">
+              <div class="paper-panel-tabs" role="tablist" aria-label="论文工具">
+                <button class="is-active" type="button" data-paper-tab="ask">提问</button>
+                <button type="button" data-paper-tab="annotations">批注</button>
+                <button type="button" data-paper-tab="card">精读卡</button>
+              </div>
+
+              <section id="paperAskPanel" class="paper-tab-panel">
+                <div id="paperAskContext" class="paper-ask-context">
+                  <span>当前范围</span>
+                  <strong>论文全文</strong>
+                  <p>回答将基于当前论文，并给出可点击的引用页码。</p>
+                </div>
+                <form id="paperQuestionForm" class="paper-question-form">
+                  <label for="paperQuestionInput">你想了解什么？</label>
+                  <textarea id="paperQuestionInput" rows="5" placeholder="例如：作者的核心假设是什么？实验是否充分支持结论？" required></textarea>
+                  <div class="paper-question-actions">
+                    <button id="clearPaperSelection" class="quiet-button" type="button" hidden>改为询问全文</button>
+                    <button class="primary" type="submit">
+                      <i data-lucide="send" aria-hidden="true"></i>
+                      提问
+                    </button>
+                  </div>
+                </form>
+                <div id="paperAnswer" class="paper-answer" hidden></div>
+              </section>
+
+              <section id="paperAnnotationsPanel" class="paper-tab-panel" hidden>
+                <form id="paperNoteForm" class="paper-note-form" hidden>
+                  <label for="paperNoteInput">为选中文本添加批注</label>
+                  <textarea id="paperNoteInput" rows="4" placeholder="记录你的理解、疑问或后续动作"></textarea>
+                  <div>
+                    <button id="cancelPaperNote" class="quiet-button" type="button">取消</button>
+                    <button class="primary" type="submit">保存批注</button>
+                  </div>
+                </form>
+                <div id="paperAnnotationsList" class="paper-annotations-list"></div>
+              </section>
+
+              <section id="paperCardPanel" class="paper-tab-panel" hidden>
+                <div id="paperReadingCard" class="paper-reading-card">
+                  <p class="muted">生成精读卡后，将在这里展示研究摘要、方法、数据集、发现与局限。</p>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
         <section id="projectView" class="project-view" hidden>
           <header class="project-masthead">
             <div class="project-masthead-copy">
@@ -445,6 +561,7 @@
             </div>
 
             <p id="reviewConstraints" class="review-constraints"></p>
+            <div id="reviewNotice" class="review-notice" role="status" hidden></div>
 
             <div class="review-toolbar">
               <label class="search-field" for="candidateFilter">
@@ -463,6 +580,20 @@
             </div>
 
             <div id="candidateGrid" class="candidate-grid"></div>
+
+            <section id="filteredCandidatesPanel" class="filtered-candidates-panel" hidden>
+              <div class="section-heading-row compact">
+                <div>
+                  <p class="eyebrow">Filtered results</p>
+                  <h3>未达到筛选要求的论文</h3>
+                </div>
+                <span><strong id="filteredCandidateCount">0</strong> 篇</span>
+              </div>
+              <p class="filtered-candidates-help">
+                这些论文不会自动进入候选集。你可以查看原因，并手动加入认为相关的论文。
+              </p>
+              <div id="filteredCandidateGrid" class="filtered-candidate-grid"></div>
+            </section>
 
             <section class="feedback-panel">
               <div class="section-heading-row compact">

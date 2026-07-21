@@ -213,7 +213,9 @@ class SearchReviewService:
         resolved_year_from = 2000 if year_from is None else year_from
         resolved_year_to = 2026 if year_to is None else year_to
         enforce_year_range = year_from is not None or year_to is not None
-        candidates = []
+        candidates: list[PaperCandidate] = []
+        filtered_candidates: list[PaperCandidate] = []
+        filtered_candidate_reasons: dict[str, list[str]] = {}
         for item in report.get("candidates", []):
             payload = (
                 self.venue_index.enrich_candidate(item)
@@ -221,19 +223,37 @@ class SearchReviewService:
                 else item
             )
             candidate = PaperCandidate.model_validate(payload)
-            if enforce_year_range and (
-                candidate.year is None
-                or not resolved_year_from <= candidate.year <= resolved_year_to
+            reasons: list[str] = []
+            if enforce_year_range and candidate.year is None:
+                reasons.append("年份未知，不符合当前年份限制")
+            elif enforce_year_range and not (
+                resolved_year_from <= candidate.year <= resolved_year_to
             ):
-                continue
+                reasons.append(
+                    f"发表年份 {candidate.year} 不在 "
+                    f"{resolved_year_from}-{resolved_year_to} 范围内"
+                )
             if quality_venues_only and (
                 self.venue_index is None
                 or not self.venue_index.qualifies_for_quality_filter(payload)
             ):
-                continue
-            candidates.append(candidate)
+                reasons.append("未确认属于 CCF-A、JCR Q1 或 Nature Portfolio")
+            if reasons:
+                filtered_candidates.append(candidate)
+                filtered_candidate_reasons[_candidate_id(candidate)] = reasons
+            else:
+                candidates.append(candidate)
+        blocked_reason = ""
+        if not candidates:
+            blocked_reason = (
+                f"检索到 {len(filtered_candidates)} 篇论文，但没有论文满足当前筛选条件。"
+                "你可以从未达要求的论文中手动加入，补充 DOI，或调整检索条件。"
+            )
         snapshot = CandidateSetSnapshot(
             candidates=candidates,
+            filtered_candidates=filtered_candidates,
+            filtered_candidate_reasons=filtered_candidate_reasons,
+            blocked_reason=blocked_reason,
             executed_queries=report.get("search_terms", []),
             max_search_rounds=max_rounds,
             min_papers=min_papers,
@@ -249,23 +269,55 @@ class SearchReviewService:
                 max_papers=max_papers,
             ),
         )
-        artifact, project = self.service.save_artifact_and_transition(
-            project_id,
-            "CandidateSetSnapshot",
-            snapshot.model_dump(mode="json"),
-            ResearchStage.SEARCH_REVIEW_PENDING,
-            actor="human-search-review",
-        )
+        if candidates:
+            artifact, project = self.service.save_artifact_and_transition(
+                project_id,
+                "CandidateSetSnapshot",
+                snapshot.model_dump(mode="json"),
+                ResearchStage.SEARCH_REVIEW_PENDING,
+                actor="human-search-review",
+            )
+        else:
+            artifact = self.service.save_artifact(
+                project_id,
+                "CandidateSetSnapshot",
+                snapshot.model_dump(mode="json"),
+            )
+            project = self.service.get_project(project_id)
         return {
             "project": project.model_dump(mode="json"),
             "candidate_set": artifact.payload,
-            "awaiting_input": True,
+            "awaiting_input": bool(candidates),
+            "manual_recovery_allowed": not candidates,
+            "message": blocked_reason or "候选论文已准备好，等待人工审核。",
         }
 
     def get_review(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         snapshot = self._latest_snapshot(project_id)
         artifacts = self.service.repository.list_artifacts(project_id)
+        if not snapshot.candidates and not snapshot.filtered_candidates:
+            reports = [item for item in artifacts if item.kind == "SearchReport"]
+            if reports:
+                legacy_filtered = [
+                    PaperCandidate.model_validate(item)
+                    for item in reports[-1].payload.get("candidates", [])
+                ]
+                if legacy_filtered:
+                    legacy_reason = "未通过当前筛选条件（旧版记录未保存逐项原因）"
+                    snapshot = snapshot.model_copy(
+                        update={
+                            "filtered_candidates": legacy_filtered,
+                            "filtered_candidate_reasons": {
+                                _candidate_id(item): [legacy_reason]
+                                for item in legacy_filtered
+                            },
+                            "blocked_reason": (
+                                f"检索到 {len(legacy_filtered)} 篇论文，但没有论文满足当前筛选条件。"
+                                "你可以从未达要求的论文中手动加入，补充 DOI，或调整检索条件。"
+                            ),
+                        }
+                    )
         feedbacks = [item for item in artifacts if item.kind == "SearchFeedback"]
         latest_action = feedbacks[-1].payload.get("action") if feedbacks else None
         reversible_stage = {
@@ -280,7 +332,14 @@ class SearchReviewService:
         return {
             "project": project.model_dump(mode="json"),
             "candidate_set": snapshot.model_dump(mode="json"),
-            "awaiting_input": project.stage is ResearchStage.SEARCH_REVIEW_PENDING,
+            "awaiting_input": (
+                project.stage is ResearchStage.SEARCH_REVIEW_PENDING
+                and bool(snapshot.candidates)
+            ),
+            "manual_recovery_allowed": (
+                not snapshot.candidates and bool(snapshot.filtered_candidates)
+            ),
+            "message": snapshot.blocked_reason or "候选论文已准备好，等待人工审核。",
             "can_undo": can_undo,
             "last_feedback_action": latest_action,
         }
@@ -434,12 +493,18 @@ class SearchReviewService:
         if feedback.action == "undo":
             return self.undo_last_feedback(project_id)
         project = self.service.get_project(project_id)
-        if project.stage is not ResearchStage.SEARCH_REVIEW_PENDING:
+        snapshot = self._latest_snapshot(project_id)
+        recovering_filtered_empty = (
+            project.stage is ResearchStage.SEARCHED and bool(snapshot.blocked_reason)
+        )
+        if (
+            project.stage is not ResearchStage.SEARCH_REVIEW_PENDING
+            and not recovering_filtered_empty
+        ):
             raise WorkflowPrerequisiteError(
                 "Search feedback is only accepted at SEARCH_REVIEW_PENDING; "
                 f"current stage is {project.stage.value}"
             )
-        snapshot = self._latest_snapshot(project_id)
         min_papers, max_papers, max_rounds = self._resolve_limits(snapshot, feedback)
         raw_queries = [item.strip() for item in feedback.suggested_queries if item.strip()]
         if len(raw_queries) > self.max_queries_per_round:
@@ -477,12 +542,31 @@ class SearchReviewService:
             [*searched_candidates, *manual_candidates],
             excluded_ids,
         )
+        added_ids = {_candidate_id(item) for item in manual_candidates}
+        filtered_candidates = [
+            item
+            for item in snapshot.filtered_candidates
+            if _candidate_id(item) not in added_ids
+        ]
+        filtered_candidate_reasons = {
+            key: value
+            for key, value in snapshot.filtered_candidate_reasons.items()
+            if normalize_paper_id(key) not in {normalize_paper_id(item) for item in added_ids}
+        }
+        blocked_reason = ""
+        if not candidates:
+            blocked_reason = snapshot.blocked_reason or (
+                "当前没有论文满足筛选条件。请手动加入论文、补充 DOI 或调整检索条件。"
+            )
         comments = list(snapshot.user_comments)
         if feedback.comment.strip():
             comments.append(feedback.comment.strip())
         prior_status = self._screening_status_from_snapshot(snapshot)
         next_snapshot = CandidateSetSnapshot(
             candidates=candidates,
+            filtered_candidates=filtered_candidates,
+            filtered_candidate_reasons=filtered_candidate_reasons,
+            blocked_reason=blocked_reason,
             excluded_paper_ids=sorted(excluded_ids),
             executed_queries=[*snapshot.executed_queries, *new_queries],
             search_round=snapshot.search_round + (1 if new_queries else 0),
@@ -539,6 +623,13 @@ class SearchReviewService:
             next_snapshot.model_dump(mode="json"),
         )
 
+        if recovering_filtered_empty and candidates:
+            project = self.service.transition(
+                project_id,
+                ResearchStage.SEARCH_REVIEW_PENDING,
+                actor="human-search-review-manual-recovery",
+            )
+
         if feedback.action == "accept":
             included_ids = [_candidate_id(item) for item in candidates]
             screening, project = self.service.save_artifact_and_transition(
@@ -589,7 +680,9 @@ class SearchReviewService:
             "project": project.model_dump(mode="json"),
             "candidate_set": snapshot_artifact.payload,
             "feedback_artifact_id": feedback_artifact.artifact_id,
-            "awaiting_input": True,
+            "awaiting_input": bool(candidates),
+            "manual_recovery_allowed": not candidates,
+            "message": blocked_reason or "候选集已更新，等待人工审核。",
             "new_queries": new_queries,
             "search_failures": failures,
         }

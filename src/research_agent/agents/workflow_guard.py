@@ -35,6 +35,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "save_artifact_and_transition",
         "save_paper_card",
         "advance_project_stage",
+        "finalize_narrative_revision",
         "finish_inconclusive",
     }
 
@@ -45,7 +46,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "evidence-reviewer": {ResearchStage.REVIEW_PENDING},
         "research-outliner": {ResearchStage.REVIEWED},
         "narrative-writer": {ResearchStage.OUTLINED, ResearchStage.REVISION_PENDING},
-        "chief-editor": {ResearchStage.OUTLINED, ResearchStage.REVISION_PENDING},
+        "chief-editor": {ResearchStage.OUTLINED},
         "fact-checker": {ResearchStage.NARRATED},
     }
 
@@ -149,12 +150,30 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                     "subagent_result_must_be_committed",
                     f"先调用commit_subagent_result保存上一份{subagent_type}结果。",
                 )
-            if self.runtime_state.rejection_count(thread_id, subagent_type) >= 2:
+            rejection_scope = None
+            if subagent_type == "paper-reader":
+                description = str(args.get("description", ""))
+                rejection_scope = self._extract_reader_paper_id(description)
+            if (
+                self.runtime_state.rejection_count(
+                    thread_id, subagent_type, rejection_scope
+                )
+                >= 2
+            ):
+                subject = (
+                    f"paper-reader处理论文{rejection_scope}"
+                    if rejection_scope
+                    else subagent_type
+                )
+                next_step = (
+                    "停止重试该论文并继续处理下一篇入选论文。"
+                    if subagent_type == "paper-reader"
+                    else "停止重试并调用finish_inconclusive保存失败原因。"
+                )
                 return self._error(
                     request,
                     "subagent_retry_limit_reached",
-                    f"{subagent_type}已连续生成两份无效结果；停止重试并调用"
-                    "finish_inconclusive保存失败原因。",
+                    f"{subject}已连续生成两份无效结果；{next_step}",
                 )
         if (
             subagent_type == "paper-reader"

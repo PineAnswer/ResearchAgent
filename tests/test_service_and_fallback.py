@@ -733,6 +733,13 @@ def test_revise_fact_check_requires_targeted_revision_and_recheck(tmp_path) -> N
         actor="research-supervisor",
     )
     assert project.stage is ResearchStage.REVISION_PENDING
+
+    with pytest.raises(
+        WorkflowPrerequisiteError,
+        match="corrected drafts for: sec-1",
+    ):
+        service.assemble_narrative_review(project.project_id)
+
     service.save_artifact(
         project.project_id,
         "SectionDraft",
@@ -743,25 +750,10 @@ def test_revise_fact_check_requires_targeted_revision_and_recheck(tmp_path) -> N
             "cited_evidence": ["P1:E1"],
         },
     )
-    _, project = service.save_artifact_and_transition(
-        project.project_id,
-        "NarrativeReview",
-        {
-            "title": "Evidence Review",
-            "abstract": "Revised abstract",
-            "sections": [
-                {
-                    "section_id": "sec-1",
-                    "heading": "Findings",
-                    "content": "The evidence cautiously supports this finding [P1:E1].",
-                    "cited_evidence": ["P1:E1"],
-                }
-            ],
-            "references": [],
-            "word_count": 8,
-        },
-        ResearchStage.NARRATED,
-        actor="chief-editor",
+    revised_artifact, project = service.assemble_narrative_review(project.project_id)
+    assert project.stage is ResearchStage.NARRATED
+    assert revised_artifact.payload["sections"][0]["content"] == (
+        "The evidence cautiously supports this finding [P1:E1]."
     )
     service.save_artifact(
         project.project_id,

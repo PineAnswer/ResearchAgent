@@ -64,6 +64,22 @@ def test_narrative_continuation_prompt_skips_completed_work() -> None:
     assert '"saved_section_draft_ids": [\n    "sec-1"\n  ]' in prompt
 
 
+def test_supervisor_uses_configured_graph_recursion_limit(tmp_path) -> None:
+    supervisor = object.__new__(ResearchSupervisor)
+    supervisor.settings = Settings(
+        model="test-model",
+        data_dir=tmp_path,
+        database_path=tmp_path / "agent.db",
+        filesystem_root=tmp_path / "filesystem",
+        graph_recursion_limit=640,
+    )
+
+    config = supervisor.build_config("thread-a")
+
+    assert config["configurable"]["thread_id"] == "thread-a"
+    assert config["recursion_limit"] == 640
+
+
 def test_skill_injection_rejects_empty_content_and_missing_subagent_skills() -> None:
     with pytest.raises(ValueError, match="Skill content is empty: test-skill"):
         inject_skill("base", "test-skill", "  ")
@@ -150,6 +166,7 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert "commit_subagent_result" in exposed_names
     assert "save_screening_decision" in exposed_names
     assert "advance_project_stage" in exposed_names
+    assert "finalize_narrative_revision" in exposed_names
     assert "save_artifact_and_transition" not in exposed_names
     assert "save_paper_card" not in exposed_names
     assert "save_project_artifact" not in exposed_names
@@ -186,10 +203,10 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert reader["middleware"][1].exit_behavior == "end"
     assert reader["middleware"][2].tool_name == "retrieve_library_passages"
     assert reader["middleware"][2].run_limit == 1
-    assert reader["middleware"][2].exit_behavior == "end"
+    assert reader["middleware"][2].exit_behavior == "continue"
     assert reader["middleware"][3].tool_name == "extract_pdf_text"
     assert reader["middleware"][3].run_limit == 1
-    assert reader["middleware"][3].exit_behavior == "end"
+    assert reader["middleware"][3].exit_behavior == "continue"
     assert isinstance(reader["middleware"][4], PaperFetchGuardMiddleware)
     assert reader["middleware"][4].max_attempts_per_paper == 2
     assert [tool.name for tool in reader["tools"]] == [
@@ -214,13 +231,18 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert scout_captured["middleware"][1].exit_behavior == "end"
     assert scout_captured["middleware"][2].tool_name == "search_library"
     assert scout_captured["middleware"][2].run_limit == 2
-    assert scout_captured["middleware"][2].exit_behavior == "end"
+    assert scout_captured["middleware"][2].exit_behavior == "continue"
+    assert "首次返回空数组后禁止再次调用" in scout_captured["system_prompt"]
+    assert "search_openalex：最多3次" in scout_captured["system_prompt"]
+    assert "检索迭代轮数与单个工具调用上限是不同概念" in scout_captured[
+        "system_prompt"
+    ]
     assert scout_captured["middleware"][3].tool_name == "search_openalex"
     assert scout_captured["middleware"][3].run_limit == 3
-    assert scout_captured["middleware"][3].exit_behavior == "end"
+    assert scout_captured["middleware"][3].exit_behavior == "continue"
     assert scout_captured["middleware"][4].tool_name == "search_crossref"
     assert scout_captured["middleware"][4].run_limit == 1
-    assert scout_captured["middleware"][4].exit_behavior == "end"
+    assert scout_captured["middleware"][4].exit_behavior == "continue"
     assert isinstance(scout_captured["middleware"][5], ExecutedSearchTrackingMiddleware)
     assert len(scout_captured["middleware"]) == 6
     assert isinstance(scout_captured["response_format"], dict)
