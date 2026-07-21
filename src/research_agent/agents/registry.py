@@ -9,7 +9,6 @@ from langchain_core.tools import BaseTool
 
 from research_agent.agents.prompts import (
     CHIEF_EDITOR_PROMPT,
-    FACT_CHECKER_PROMPT,
     NARRATIVE_WRITER_PROMPT,
     OUTLINER_PROMPT,
     READER_PROMPT,
@@ -26,7 +25,6 @@ from research_agent.agents.runtime_state import (
 )
 from research_agent.agents.serial_tools import SerialToolExecutionMiddleware
 from research_agent.domain.models import (
-    FactCheckReport,
     NarrativeReview,
     PaperCard,
     ReviewOutline,
@@ -108,8 +106,8 @@ def build_subagent_registry(
                 SCOUT_PROMPT
                 + (
                     "\n\n## 本次任务的真实工具预算\n"
-                    "- search_library：最多2次；首次返回空数组后禁止再次调用，"
-                    "下一次必须调用search_openalex。\n"
+                    "- search_library：可选，最多2次；仅在任务要求文献库优先或确有复用需要时调用。"
+                    "首次返回空数组后禁止再次调用，下一次必须调用search_openalex。\n"
                     f"- search_openalex：最多{max_openalex_searches}次。\n"
                     f"- search_crossref：最多{max_crossref_searches}次。\n"
                     "- 检索迭代轮数与单个工具调用上限是不同概念，禁止混用。\n"
@@ -202,14 +200,6 @@ def build_subagent_registry(
             CHIEF_EDITOR_PROMPT,
             [tools_by_name["get_active_research_project"]],
             NarrativeReview,
-            _bounded_middleware(2),
-        ),
-        (
-            "fact-checker",
-            "核查综述中每条证据引用是否被原始证据支持，输出 FactCheckReport。",
-            FACT_CHECKER_PROMPT,
-            [tools_by_name["get_active_research_project"]],
-            FactCheckReport,
             _bounded_middleware(2),
         ),
     ]

@@ -26,7 +26,6 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "research-outliner",
         "narrative-writer",
         "chief-editor",
-        "fact-checker",
     }
     project_scoped_tools = {
         "get_research_project",
@@ -35,7 +34,6 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "save_artifact_and_transition",
         "save_paper_card",
         "advance_project_stage",
-        "finalize_narrative_revision",
         "finish_inconclusive",
     }
 
@@ -45,9 +43,8 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
         "research-synthesizer": {ResearchStage.EXTRACTED},
         "evidence-reviewer": {ResearchStage.REVIEW_PENDING},
         "research-outliner": {ResearchStage.REVIEWED},
-        "narrative-writer": {ResearchStage.OUTLINED, ResearchStage.REVISION_PENDING},
+        "narrative-writer": {ResearchStage.OUTLINED},
         "chief-editor": {ResearchStage.OUTLINED},
-        "fact-checker": {ResearchStage.NARRATED},
     }
 
     def __init__(
@@ -124,7 +121,7 @@ class ResearchWorkflowGuardMiddleware(AgentMiddleware):
                 return self._error(
                     request,
                     "subagent_not_allowed",
-                    "只能委派已注册的检索、精读、综合、审查、提纲、写作、编辑或事实核查Agent。",
+                    "只能委派已注册的检索、精读、综合、审查、提纲、写作或编辑Agent。",
                 )
         if self.service is not None and self.runtime_state is not None:
             project_id = self.runtime_state.project_id(thread_id)

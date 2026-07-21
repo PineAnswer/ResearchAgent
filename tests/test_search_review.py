@@ -100,11 +100,50 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     assert result["awaiting_input"] is True
     assert result["project"]["stage"] == "SEARCH_REVIEW_PENDING"
     assert result["candidate_set"]["candidates"][0]["paper_id"] == "P1"
+    assert result["candidate_set"]["query_rounds"] == [["initial query"]]
     assert result["candidate_set"]["agent_included_paper_ids"] == ["P1"]
     assert result["candidate_set"]["agent_approved"] is True
     assert service.get_snapshot(project_id)["artifacts"][-1]["kind"] == (
         "CandidateSetSnapshot"
     )
+
+
+def test_review_records_system_search_terms_by_iteration(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+    )
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["initial query", "refined query"],
+            "search_iteration_log": [
+                {"query": "initial query", "count": 5, "new_count": 5},
+                {"query": "refined query", "count": 3, "new_count": 2},
+            ],
+            "candidates": [
+                {"paper_id": "P1", "title": "Existing", "source": "OpenAlex"}
+            ],
+            "screening_decisions": {"P1": "include"},
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+
+    result = review.begin_review(project.project_id, max_search_rounds=3)
+
+    assert result["candidate_set"]["query_rounds"] == [
+        ["initial query"],
+        ["refined query"],
+    ]
+    assert result["candidate_set"]["search_round"] == 2
 
 
 def test_empty_filtered_result_stays_searched_and_supports_manual_recovery(
@@ -213,14 +252,13 @@ def test_legacy_empty_snapshot_exposes_original_results_for_manual_recovery(
     assert "旧版记录" in result["candidate_set"]["filtered_candidate_reasons"]["P1"][0]
 
 
-def test_feedback_can_refine_add_remove_and_deduplicate_queries(tmp_path) -> None:
+def test_feedback_can_refine_add_remove_without_supplemental_search(tmp_path) -> None:
     service, review, project_id = _review_service(tmp_path)
 
     result = review.apply_feedback(
         project_id,
         SearchFeedback(
             action="refine",
-            suggested_queries=["supplemental query"],
             added_papers=[
                 {
                     "paper_id": "P3",
@@ -237,7 +275,7 @@ def test_feedback_can_refine_add_remove_and_deduplicate_queries(tmp_path) -> Non
     candidate_ids = {
         item["paper_id"] for item in result["candidate_set"]["candidates"]
     }
-    assert candidate_ids == {"P2", "P3"}
+    assert candidate_ids == {"P3"}
     manual = next(
         item
         for item in result["candidate_set"]["candidates"]
@@ -246,17 +284,22 @@ def test_feedback_can_refine_add_remove_and_deduplicate_queries(tmp_path) -> Non
     assert manual["source"] == "user-unverified"
     assert manual["abstract"] == ""
     assert result["candidate_set"]["search_round"] == 1
-    assert result["new_queries"] == ["supplemental query"]
+    assert result["candidate_set"]["query_rounds"] == [["initial query"]]
+    assert result["new_queries"] == []
 
-    duplicate = review.apply_feedback(
-        project_id,
-        SearchFeedback(action="refine", suggested_queries=["query supplemental"]),
-    )
-    assert duplicate["new_queries"] == []
-    assert duplicate["candidate_set"]["search_round"] == 1
     kinds = [item["kind"] for item in service.get_snapshot(project_id)["artifacts"]]
     assert "SearchFeedback" in kinds
-    assert "SupplementalSearchReport" in kinds
+    assert "SupplementalSearchReport" not in kinds
+
+
+def test_feedback_rejects_user_triggered_supplemental_queries(tmp_path) -> None:
+    _service, review, project_id = _review_service(tmp_path)
+
+    with pytest.raises(WorkflowPrerequisiteError, match="不再触发新的检索"):
+        review.apply_feedback(
+            project_id,
+            SearchFeedback(action="refine", suggested_queries=["supplemental query"]),
+        )
 
 
 def test_verified_doi_can_be_added_and_user_can_accept(tmp_path) -> None:
@@ -338,18 +381,8 @@ def test_feedback_controls_candidate_count_bounds(tmp_path) -> None:
         )
 
 
-def test_search_round_limit_and_stop_are_enforced(tmp_path) -> None:
+def test_stop_can_be_undone_after_review(tmp_path) -> None:
     service, review, project_id = _review_service(tmp_path, max_rounds=1)
-    review.apply_feedback(
-        project_id,
-        SearchFeedback(action="refine", suggested_queries=["first supplement"]),
-    )
-
-    with pytest.raises(WorkflowPrerequisiteError, match="round limit"):
-        review.apply_feedback(
-            project_id,
-            SearchFeedback(action="refine", suggested_queries=["second supplement"]),
-        )
 
     stopped = review.apply_feedback(
         project_id,

@@ -263,6 +263,7 @@ def test_runtime_state_normalizes_search_source_types_for_public_schema() -> Non
 
 def test_search_middleware_blocks_external_search_until_library_was_queried() -> None:
     state = ResearchRuntimeState()
+    state.set_prefer_library("thread-a", True)
     middleware = ExecutedSearchTrackingMiddleware(state)
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
 
@@ -299,6 +300,34 @@ def test_search_middleware_blocks_external_search_until_library_was_queried() ->
     assert "local_library_search_required" in blocked.content
     assert local.status == "success"
     assert external.status == "success"
+
+
+def test_search_middleware_allows_external_search_by_default() -> None:
+    state = ResearchRuntimeState()
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+    request = ToolCallRequest(
+        tool_call={
+            "name": "search_openalex",
+            "args": {"query": "external first"},
+            "id": "call-1",
+        },
+        tool=None,
+        state={},
+        runtime=runtime,
+    )
+
+    result = middleware.wrap_tool_call(
+        request,
+        lambda _request: ToolMessage(
+            content="[]",
+            tool_call_id="call-1",
+            name="search_openalex",
+        ),
+    )
+
+    assert result.status == "success"
+    assert state.has_search_source("thread-a", "search_openalex") is True
 
 
 def test_search_middleware_routes_empty_local_library_to_openalex() -> None:

@@ -42,6 +42,10 @@ def test_revise_review_returns_to_extraction() -> None:
     validate_transition(project, ResearchStage.EXTRACTED)
 
 
+def test_outlined_project_can_complete_when_narrative_is_committed() -> None:
+    validate_transition(make_project(ResearchStage.OUTLINED), ResearchStage.COMPLETED)
+
+
 def test_searched_project_can_end_inconclusive() -> None:
     validate_transition(
         make_project(ResearchStage.SEARCHED),

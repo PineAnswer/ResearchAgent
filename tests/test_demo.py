@@ -7,9 +7,8 @@ def test_offline_demo_completes_the_current_writing_workflow(tmp_path) -> None:
     assert result["project"]["stage"] == "COMPLETED"
     assert result["premature_completion_blocked"] is True
     artifact_kinds = [artifact["kind"] for artifact in result["artifacts"]]
-    assert artifact_kinds[-4:] == [
+    assert artifact_kinds[-3:] == [
         "ReviewOutline",
         "SectionDraft",
         "NarrativeReview",
-        "FactCheckReport",
     ]

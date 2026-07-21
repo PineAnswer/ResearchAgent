@@ -161,8 +161,8 @@ def build_project_tools(
         """Commit the exact structured output returned by the latest subagent.
 
         Supported subagents are the registered search, reading, synthesis,
-        review, outlining, writing, editing, and fact-checking agents. The model
-        does not resubmit or reconstruct JSON fields.
+        review, outlining, writing, and editing agents. The model does not
+        resubmit or reconstruct JSON fields.
         """
         thread_id = thread_id_from_config(runtime.config)
         active_id = state.project_id(thread_id)
@@ -277,15 +277,12 @@ def build_project_tools(
                             project_id,
                             "NarrativeReview",
                             payload,
-                            ResearchStage.NARRATED,
+                            ResearchStage.COMPLETED,
                             actor="chief-editor",
                         )
                     except (ValidationError, WorkflowPrerequisiteError, ValueError):
                         artifact, project = service.assemble_narrative_review(project_id)
                         deterministic_fallback = True
-            elif subagent_type == "fact-checker":
-                artifact = service.save_artifact(project_id, "FactCheckReport", payload)
-                project = service.get_project(project_id)
             else:
                 raise ValueError(f"Unsupported subagent_type: {subagent_type}")
         except (
@@ -506,15 +503,13 @@ def build_project_tools(
         """Advance a stage that does not require a newly submitted artifact.
 
         Allowed targets are EXTRACTED after all PaperCards, REVIEW_PENDING,
-        REVISION_PENDING after failed fact checks, and COMPLETED after every
-        latest FactCheckReport passes.
+        and COMPLETED for legacy NARRATED projects with a saved NarrativeReview.
         """
         try:
             target = ResearchStage(target_stage)
             allowed_targets = {
                 ResearchStage.EXTRACTED,
                 ResearchStage.REVIEW_PENDING,
-                ResearchStage.REVISION_PENDING,
                 ResearchStage.COMPLETED,
             }
             if target not in allowed_targets:
@@ -554,60 +549,6 @@ def build_project_tools(
                 ensure_ascii=False,
             )
         return project.model_dump_json()
-
-    @tool
-    def finalize_narrative_revision(
-        project_id: str,
-        runtime: ToolRuntime,
-    ) -> str:
-        """Deterministically merge corrected drafts and return to NARRATED."""
-        thread_id = thread_id_from_config(runtime.config)
-        active_id = state.project_id(thread_id)
-        if active_id != project_id:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error_code": "active_project_mismatch",
-                    "message": f"Active project is {active_id!r}, requested {project_id!r}",
-                    "instruction": "使用当前运行绑定的原始project_id。",
-                },
-                ensure_ascii=False,
-            )
-        try:
-            project = service.get_project(project_id)
-            if project.stage is not ResearchStage.REVISION_PENDING:
-                raise WorkflowPrerequisiteError(
-                    "Narrative revision finalization requires REVISION_PENDING"
-                )
-            artifact, project = service.assemble_narrative_review(project_id)
-        except (
-            ValidationError,
-            WorkflowPrerequisiteError,
-            InvalidTransition,
-            ProjectNotFound,
-            ValueError,
-        ) as exc:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error_code": "narrative_revision_not_ready",
-                    "message": str(exc),
-                    "instruction": (
-                        "逐篇委派narrative-writer补齐message列出的修订章节并提交，"
-                        "随后再次调用finalize_narrative_revision；禁止委派chief-editor。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        return json.dumps(
-            {
-                "artifact": artifact.model_dump(mode="json"),
-                "project": project.model_dump(mode="json"),
-                "deterministic": True,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
 
     @tool
     def finish_inconclusive(
@@ -671,6 +612,5 @@ def build_project_tools(
         save_artifact_and_transition,
         save_paper_card,
         advance_project_stage,
-        finalize_narrative_revision,
         finish_inconclusive,
     ]

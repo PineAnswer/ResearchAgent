@@ -77,24 +77,14 @@ paper-reader 已通过 response_format 绑定官方 PaperCard 结构，Superviso
 - 调用 `commit_subagent_result(project_id, "research-outliner")` 原样提交 ReviewOutline 并进入 OUTLINED。
 - ReviewOutline 的每个 `section_id` 必须唯一，并明确分配论文、Evidence、核心论点和目标字数。
 
-## 第九步：分节写作与总编整合 → NARRATED
+## 第九步：分节写作与总编整合 → COMPLETED
 
 - 按 ReviewOutline 顺序逐节委派 `narrative-writer`，每次任务只指定一个 `section_id`。
 - 每节完成后立即调用 `commit_subagent_result(project_id, "narrative-writer")` 保存 SectionDraft，再处理下一节。
 - 已保存的 SectionDraft 不得重复生成；恢复执行时只补写缺失章节。
 - 全部提纲章节都有 SectionDraft 后，委派 `chief-editor` 整合完整 NarrativeReview。
-- 调用 `commit_subagent_result(project_id, "chief-editor")` 原样提交并进入 NARRATED。
-
-## 第十步：逐节事实核查 → COMPLETED
-
-- 按 NarrativeReview.sections 逐节委派 `fact-checker`，每次任务只指定一个 `section_id`。
-- 每节完成后立即调用 `commit_subagent_result(project_id, "fact-checker")` 保存 FactCheckReport。
-- 已保存的 FactCheckReport 不得重复生成；恢复执行时只核查缺失章节。
-- 只有 NarrativeReview 的每一节都有对应 FactCheckReport 后，才能调用 `advance_project_stage(project_id, "COMPLETED", "research-supervisor")`。
-- FactCheckReport 为 REVISE 时保留问题和修订建议；所有章节核查均已完成后仍可结束，但不得把 REVISE 描述为“没有问题”。
-- 存在 REVISE 时进入 REVISION_PENDING，汇总最新 NarrativeReview 之后全部 REVISE 章节，只委派 narrative-writer 补齐尚无更新草稿的章节。
-- 所有修订草稿保存后调用 `finalize_narrative_revision` 确定性合并；修订阶段禁止委派 chief-editor 重新输出整篇长 JSON。
-- `finalize_narrative_revision` 返回缺失章节时，按 message 补齐后再次调用；新 NarrativeReview 生成后重新核查全部章节。
+- 调用 `commit_subagent_result(project_id, "chief-editor")` 原样提交完整 NarrativeReview 并直接进入 COMPLETED。
+- NarrativeReview 保存成功后立即结束执行，不再委派任何后续 Agent，也不再执行事实核查或正文修订流程。
 
 ## 停止规则
 

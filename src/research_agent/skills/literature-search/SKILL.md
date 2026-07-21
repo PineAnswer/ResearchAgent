@@ -15,7 +15,7 @@ description: 学术检索、去重与候选论文筛选方法
 4. 优先使用 OpenAlex；只有确实需要 DOI/标题交叉核对时使用一次 Crossref。
 5. 按 DOI、paper_id 和规范化标题依次去重（在上下文中完成）。
 6. 对每篇论文做标题摘要级初筛，给出 include / exclude / uncertain 决定和简短理由。
-7. 把本轮初筛意见、uncertain 理由和覆盖盲区反馈到下一轮检索词；未达到精读篇数下限且仍有预算时继续补搜，超过精读篇数上限时用筛选理由收紧候选。
+7. 把本轮初筛意见、uncertain 理由和覆盖盲区反馈到下一轮检索词；未达到精读篇数下限且仍有预算时继续检索，超过精读篇数上限时用筛选理由收紧候选。
 8. 分析覆盖盲区，填入 coverage_gaps。
 9. 输出符合 response_format 的 SearchReport。
 

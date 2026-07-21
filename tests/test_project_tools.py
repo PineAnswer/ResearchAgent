@@ -711,7 +711,7 @@ def test_chief_editor_missing_structure_uses_saved_draft_fallback(tmp_path) -> N
     )
 
     assert result["deterministic_fallback"] is True
-    assert result["project"]["stage"] == "NARRATED"
+    assert result["project"]["stage"] == "COMPLETED"
     assert result["artifact"]["payload"]["sections"][0]["content"] == (
         "Saved draft [P1:E1]."
     )

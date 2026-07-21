@@ -113,7 +113,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     ) = asyncio.run(exercise_api())
 
     assert index.status_code == 200
-    assert "文献研究工作台" in index.text
+    assert "论文研读工作台" in index.text
     assert favicon.status_code == 200
     assert "#245b48" in favicon.text
     assert "continueButtonLabel" in index.text
@@ -121,7 +121,16 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert 'id="runPhaseTitle"' in index.text
     assert 'id="usageGuide"' in index.text
     assert 'id="usageGuideOpen"' in index.text
-    assert "欢迎使用文献研究工作台" in index.text
+    assert "欢迎使用论文研读工作台" in index.text
+    assert "今天想研究什么？" in index.text
+    assert "继续上次研究" not in index.text
+    assert 'id="projectSearch"' in index.text
+    assert 'id="toggleProjectSelection"' in index.text
+    assert 'id="projectBulkBar"' in index.text
+    assert 'id="deleteSelectedProjects"' in index.text
+    assert 'id="emptyReadPaper"' in index.text
+    assert 'id="brandHome"' in index.text
+    assert 'id="homeToggle"' in index.text
     assert "vendor/marked.umd.js" in index.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
@@ -139,6 +148,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "本次停止来自主编输出格式故障" in script.text
     assert "renderMarkdown" in script.text
     assert "maybeOpenUsageGuide" in script.text
+    assert "deleteSelectedProjectRecords" in script.text
     assert "research-agent.usage-guide-dismissed.v1" in script.text
     assert lucide.status_code == 200
     assert "createIcons" in lucide.text

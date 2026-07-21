@@ -247,11 +247,13 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> dict[str, Any]:
         options: dict[str, Any] = {
             "year_from": year_from,
             "year_to": year_to,
             "quality_venues_only": quality_venues_only,
+            "prefer_library": prefer_library,
         }
         if min_papers is not None:
             options["min_papers"] = min_papers
@@ -270,6 +272,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> None:
         options = self._search_review_options(
             min_papers=min_papers,
@@ -278,14 +281,18 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
-        self._search_review_options_by_thread[thread_id] = options
+        self._search_review_options_by_thread[thread_id] = {
+            key: value for key, value in options.items() if key != "prefer_library"
+        }
         self.runtime_state.set_search_constraints(
             thread_id,
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
         )
+        self.runtime_state.set_prefer_library(thread_id, prefer_library)
 
     def _begin_search_review(self, project_id: str, thread_id: str) -> dict[str, Any]:
         options = self._search_review_options_by_thread.get(thread_id, {})
@@ -365,6 +372,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> str:
         limits: list[str] = [
             f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
@@ -379,6 +387,11 @@ class ResearchSupervisor:
             limits.append(
                 "- 出版物质量：仅 CCF-A、JCR Q1 或 Nature Portfolio 期刊（后端强制过滤）"
             )
+        limits.append(
+            "- 检索来源策略：优先检索本地文献库，再补充外部来源"
+            if prefer_library
+            else "- 检索来源策略：直接检索外部学术来源；本地文献库仅按需使用"
+        )
         limit_text = ""
         if limits:
             limit_text = (
@@ -436,6 +449,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> str:
         base = cls.build_prompt(
             topic,
@@ -446,6 +460,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
         return (
             f"系统已经为当前隔离对话创建科研项目：{project_id}\n"
@@ -465,11 +480,9 @@ class ResearchSupervisor:
             "禁止创建新项目、重新检索、重新筛选、重新精读、重新综合或重新审查。\n"
             "从 narrative_context.current_stage 继续综述写作："
             "REVIEWED先生成提纲；OUTLINED只补写尚未保存的SectionDraft再交给chief-editor；"
-            "NARRATED只核查尚未保存FactCheckReport的章节；"
-            "REVISION_PENDING只重写revision_section_ids列出的章节，再交给chief-editor整合。"
+            "NARRATED是旧版本遗留阶段，确认已有NarrativeReview后直接推进到COMPLETED。"
             "必须复用已保存产物并跳过context中列出的已完成章节。"
-            "事实核查全部PASS才推进到COMPLETED；存在REVISE时推进到REVISION_PENDING，"
-            "修订并生成新NarrativeReview后重新核查。\n\n"
+            "chief-editor提交NarrativeReview后项目直接完成，禁止委派任何后续Agent。\n\n"
             "narrative_context:\n"
             f"{json.dumps(narrative_context, ensure_ascii=False, indent=2)}"
         )
@@ -568,6 +581,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
         search_review_options = self._search_review_options(
@@ -577,6 +591,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(
@@ -616,6 +631,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> dict:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -629,6 +645,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)
@@ -748,6 +765,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> dict:
         """Start research for a project pre-created by the conversation service."""
         if self.graph is None:
@@ -766,6 +784,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
         self._register_search_review_options(thread_id, **options)
         self.runtime_state.register_project(
@@ -830,6 +849,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         quality_venues_only: bool = False,
+        prefer_library: bool = False,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
             raise AgentUnavailableError(
@@ -843,6 +863,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             quality_venues_only=quality_venues_only,
+            prefer_library=prefer_library,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
         run_logger = self._new_run_logger(topic, research_question, active_thread_id, False)

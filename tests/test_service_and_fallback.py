@@ -631,7 +631,7 @@ def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) ->
         )
 
 
-def test_completion_requires_narrative_and_fact_check_for_every_section(tmp_path) -> None:
+def test_narrative_review_completes_project_without_post_processing(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = _create_reviewed_project(service)
     _, project = service.save_artifact_and_transition(
@@ -681,91 +681,23 @@ def test_completion_requires_narrative_and_fact_check_for_every_section(tmp_path
             "references": [],
             "word_count": 4,
         },
-        ResearchStage.NARRATED,
+        ResearchStage.COMPLETED,
         actor="chief-editor",
     )
 
-    with pytest.raises(WorkflowPrerequisiteError, match="FactCheckReport"):
-        service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
-
-    service.save_artifact(
-        project.project_id,
-        "FactCheckReport",
-        {"section_id": "sec-1", "verdict": "PASS", "issues": []},
-    )
-    completed = service.transition(
-        project.project_id,
-        ResearchStage.COMPLETED,
-        actor="pi",
-    )
-
-    assert completed.stage is ResearchStage.COMPLETED
+    assert project.stage is ResearchStage.COMPLETED
+    assert service.get_snapshot(project.project_id)["artifacts"][-1]["kind"] == "NarrativeReview"
 
 
-def test_revise_fact_check_requires_targeted_revision_and_recheck(tmp_path) -> None:
+def test_fact_check_artifacts_are_no_longer_supported(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = _create_reviewed_project(service)
-    _save_narrative_inputs(service, project.project_id)
-    _, project = service.assemble_narrative_review(project.project_id)
-    service.save_artifact(
-        project.project_id,
-        "FactCheckReport",
-        {
-            "section_id": "sec-1",
-            "verdict": "REVISE",
-            "issues": [
-                {
-                    "claim": "overstated claim",
-                    "evidence_id": "P1:E1",
-                    "problem": "overclaim",
-                    "correction": "Use cautious wording.",
-                }
-            ],
-        },
-    )
-
-    with pytest.raises(WorkflowPrerequisiteError, match="blocked by REVISE"):
-        service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
-
-    project = service.transition(
-        project.project_id,
-        ResearchStage.REVISION_PENDING,
-        actor="research-supervisor",
-    )
-    assert project.stage is ResearchStage.REVISION_PENDING
-
-    with pytest.raises(
-        WorkflowPrerequisiteError,
-        match="corrected drafts for: sec-1",
-    ):
-        service.assemble_narrative_review(project.project_id)
-
-    service.save_artifact(
-        project.project_id,
-        "SectionDraft",
-        {
-            "section_id": "sec-1",
-            "heading": "Findings",
-            "content": "The evidence cautiously supports this finding [P1:E1].",
-            "cited_evidence": ["P1:E1"],
-        },
-    )
-    revised_artifact, project = service.assemble_narrative_review(project.project_id)
-    assert project.stage is ResearchStage.NARRATED
-    assert revised_artifact.payload["sections"][0]["content"] == (
-        "The evidence cautiously supports this finding [P1:E1]."
-    )
-    service.save_artifact(
-        project.project_id,
-        "FactCheckReport",
-        {"section_id": "sec-1", "verdict": "PASS", "issues": []},
-    )
-    completed = service.transition(
-        project.project_id,
-        ResearchStage.COMPLETED,
-        actor="research-supervisor",
-    )
-    assert completed.stage is ResearchStage.COMPLETED
+    with pytest.raises(ValueError, match="Unsupported artifact kind 'FactCheckReport'"):
+        service.save_artifact(
+            project.project_id,
+            "FactCheckReport",
+            {"section_id": "sec-1", "verdict": "PASS", "issues": []},
+        )
 
 
 def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
@@ -774,11 +706,6 @@ def test_prepare_continuation_repairs_legacy_false_completion(tmp_path) -> None:
     project = service.repository.transition(
         project.project_id,
         ResearchStage.OUTLINED,
-        actor="legacy-supervisor",
-    )
-    project = service.repository.transition(
-        project.project_id,
-        ResearchStage.NARRATED,
         actor="legacy-supervisor",
     )
     service.repository.transition(
@@ -922,7 +849,7 @@ def test_deterministic_narrative_assembly_preserves_saved_drafts(tmp_path) -> No
 
     artifact, updated = service.assemble_narrative_review(project.project_id)
 
-    assert updated.stage is ResearchStage.NARRATED
+    assert updated.stage is ResearchStage.COMPLETED
     assert artifact.kind == "NarrativeReview"
     assert artifact.payload["sections"][0]["content"] == (
         "Persisted evidence-backed text [P1:E1]."

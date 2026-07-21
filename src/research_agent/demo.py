@@ -152,7 +152,7 @@ def run_offline_demo(database_path: Path | None = None) -> dict:
         "ReviewOutline",
         {
             "title": "离线演示综述",
-            "narrative_arc": "仅验证写作与事实核查流程",
+            "narrative_arc": "仅验证综述写作流程",
             "sections": [
                 {
                     "section_id": section_id,
@@ -196,19 +196,9 @@ def run_offline_demo(database_path: Path | None = None) -> dict:
             "word_count": len(section_content),
             "evidence_chain": {"DEMO-PAPER:E1": [section_id]},
         },
-        ResearchStage.NARRATED,
+        ResearchStage.COMPLETED,
         actor="chief-editor",
     )
-    service.save_artifact(
-        project.project_id,
-        "FactCheckReport",
-        {
-            "section_id": section_id,
-            "verdict": "PASS",
-            "issues": [],
-        },
-    )
-    project = service.transition(project.project_id, ResearchStage.COMPLETED, actor="pi")
 
     result = {
         "project": project.model_dump(mode="json"),
