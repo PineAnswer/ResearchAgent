@@ -20,7 +20,7 @@ from deepagents.backends import FilesystemBackend
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from anthropic import (
     APIConnectionError as AnthropicAPIConnectionError,
@@ -127,6 +127,25 @@ PAPER_QUESTION_PROMPT = """
 """.strip()
 
 
+PROJECT_QUESTION_PROMPT = """
+你是研究综述问答助手。请优先依据输入中带 source_id 的综述和论文材料回答，同时可以使用
+稳定、通用的领域知识解释术语、机制和背景概念。
+你的任务是针对用户实际提出的问题进行解释和推理，禁止仅复述、拼接或改写输入材料。
+
+回答规则：
+1. 先直接回应用户问题，再解释判断过程；根据用户的提问方式调整术语密度和解释深度。
+2. 选段提问应依次说明：这段话的含义、原文怎样表达、通俗解释、它在当前研究中的作用。
+3. 输入包含项目论文证据时，优先从论文中寻找定义、机制或结论，并明确指出对应论文。
+4. 若材料只列出术语名称，直接根据领域通用知识给出清晰解释；不要要求用户再次提供材料，
+   不要输出“无法回答”“现有材料只告诉我们”“缺少的信息”等模板化段落。
+5. 全文或研究材料提问应综合相关章节，指出联系、差异、条件和局限。
+6. 来自输入材料的具体事实和研究结论应使用 [[source_id]] 标明依据；通用概念解释无需伪造引用，
+   必要时用“从领域通用意义上说”自然区分。
+7. cited_source_ids 只填写输入中真实存在的 source_id，并按首次使用顺序排列。
+8. coverage_note 仅供系统记录，保持简短，不要在 answer 中加入材料范围声明或免责开场白。
+""".strip()
+
+
 LIBRARY_AGENT_PROMPT = """
 你是可调用工具的 Ask Library Agent。你必须先拆解问题，再迭代检索文献库，必要时读取
 单篇上下文或追加更精确的段落检索。只允许依据工具返回的文献库材料回答，禁止使用外部
@@ -177,6 +196,7 @@ class ResearchSupervisor:
             self.literature_tools_by_name,
             max_rounds=self.settings.max_search_review_rounds,
             max_queries_per_round=self.settings.max_suggested_queries_per_round,
+            max_papers=self.settings.max_deep_read_papers,
             venue_index=self.venue_rankings,
         )
         self.workflow_guard = ResearchWorkflowGuardMiddleware(
@@ -264,8 +284,8 @@ class ResearchSupervisor:
             credentials["aws_session_token"] = session_token.strip()
         return credentials
 
-    @staticmethod
     def _search_review_options(
+        self,
         min_papers: int | None = None,
         max_papers: int | None = None,
         max_search_rounds: int | None = None,
@@ -274,16 +294,18 @@ class ResearchSupervisor:
         quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> dict[str, Any]:
+        # Deep-reading bounds protect system workload and completion reliability.
+        # Keep request fields for API compatibility, but never let callers redefine
+        # the backend capacity policy.
+        del min_papers, max_papers
         options: dict[str, Any] = {
+            "min_papers": 1,
+            "max_papers": self.search_review.max_papers,
             "year_from": year_from,
             "year_to": year_to,
             "quality_venues_only": quality_venues_only,
             "prefer_library_search": prefer_library_search,
         }
-        if min_papers is not None:
-            options["min_papers"] = min_papers
-        if max_papers is not None:
-            options["max_papers"] = max_papers
         if max_search_rounds is not None:
             options["max_search_rounds"] = max_search_rounds
         return options
@@ -405,10 +427,8 @@ class ResearchSupervisor:
         limits: list[str] = [
             f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
         ]
-        if min_papers is not None:
-            limits.append(f"- 精读篇数下限：{min_papers}")
         if max_papers is not None:
-            limits.append(f"- 精读篇数上限：{max_papers}")
+            limits.append(f"- 系统单次精读容量：最多 {max_papers} 篇；至少选择 1 篇")
         if max_search_rounds is not None:
             limits.append(f"- 系统检索-筛选迭代轮数上限：{max_search_rounds}")
         if quality_venues_only:
@@ -422,12 +442,12 @@ class ResearchSupervisor:
         limit_text = ""
         if limits:
             limit_text = (
-                "\n用户在前端设置了检索审核限制：\n"
+                "\n本次研究的检索约束与系统容量：\n"
                 + "\n".join(limits)
                 + "\n委派 literature-scout 时必须把这些限制传入任务描述。"
                 " literature-scout 应在单次子任务内自动执行：检索→标题摘要级筛选→"
                 "总结覆盖盲区/筛选意见→据此改写下一轮检索词；达到轮数上限、"
-                "入选论文数满足上下限且覆盖盲区可接受，或工具上限触发后，才返回最终 SearchReport。"
+                "入选论文数不超过系统精读容量且覆盖盲区可接受，或工具上限触发后，才返回最终 SearchReport。"
                 " 不要在每一轮后等待用户反馈。"
             )
         return (
@@ -1498,6 +1518,344 @@ class ResearchSupervisor:
                 "mode": "extractive",
                 "coverage_note": f"Ask Library Agent 不可用，已返回本地检索结果：{str(exc)[:240]}",
             }
+
+    async def answer_project_question(
+        self,
+        project_id: str,
+        question: str,
+        *,
+        scope: str = "narrative",
+        selected_text: str = "",
+    ) -> dict[str, Any]:
+        """Answer over a selection, the review, project papers, or the full library."""
+        clean_question = question.strip()
+        if not clean_question:
+            raise ValueError("Question is required")
+        if scope not in {"selection", "narrative", "project", "library"}:
+            raise ValueError("Unsupported project question scope")
+        if scope == "selection" and not selected_text.strip():
+            raise ValueError("Selection question requires selected text")
+        self.repository.get_project(project_id)
+        if scope == "library":
+            result = await self.answer_library_question([], clean_question)
+            return {**result, "scope": scope, "project_id": project_id}
+
+        artifacts = await asyncio.to_thread(self.repository.list_artifacts, project_id)
+        narratives = [item.payload for item in artifacts if item.kind == "NarrativeReview"]
+        narrative = narratives[-1] if narratives else None
+        if narrative is None:
+            raise ValueError("Project has no generated narrative review")
+
+        sources: list[dict[str, Any]] = []
+
+        def add_source(source_id: str, title: str, text: str, **metadata: Any) -> None:
+            clean_text = str(text or "").strip()
+            if not clean_text:
+                return
+            sources.append(
+                {
+                    "source_id": source_id,
+                    "source_type": metadata.pop("source_type", "narrative"),
+                    "title": title,
+                    "text": clean_text[:16000],
+                    **metadata,
+                }
+            )
+
+        review_title = str(narrative.get("title") or "研究综述")
+        if scope == "selection":
+            add_source("REVIEW_SELECTION", f"{review_title} · 选中文本", selected_text)
+        else:
+            add_source("REVIEW_ABSTRACT", f"{review_title} · 摘要", narrative.get("abstract", ""))
+            for index, section in enumerate(narrative.get("sections") or [], start=1):
+                section_id = str(section.get("section_id") or index)
+                add_source(
+                    f"REVIEW_SECTION_{section_id}",
+                    f"{review_title} · {section.get('heading') or f'第 {index} 节'}",
+                    section.get("content", ""),
+                )
+                for sub_index, subsection in enumerate(section.get("subsections") or [], start=1):
+                    add_source(
+                        f"REVIEW_SECTION_{section_id}_{sub_index}",
+                        f"{review_title} · {subsection.get('heading') or '小节'}",
+                        subsection.get("content", ""),
+                    )
+
+        if scope in {"selection", "project"}:
+            project_papers = await asyncio.to_thread(
+                self.service.library.sync_project,
+                project_id,
+            )
+            library_ids = [
+                item["paper"]["library_id"]
+                for item in project_papers
+                if item.get("relation", {}).get("status") == "included"
+            ]
+            retrieved = (
+                await asyncio.to_thread(
+                    self.service.library.retrieve_library_sources,
+                    f"{clean_question}\n{selected_text}" if scope == "selection" else clean_question,
+                    library_ids=library_ids,
+                    limit=12 if scope == "selection" else 16,
+                )
+                if library_ids
+                else []
+            )
+            for source in retrieved:
+                add_source(
+                    str(source.get("source_id") or f"PROJECT_SOURCE_{len(sources) + 1}"),
+                    str(source.get("title") or "项目论文"),
+                    str(source.get("text") or ""),
+                    source_type=source.get("source_type") or "project-evidence",
+                    library_id=source.get("library_id"),
+                    page=source.get("page"),
+                    attachment_id=source.get("attachment_id"),
+                )
+
+        # Keep requests bounded for unusually long reviews or very large evidence stores.
+        bounded_sources: list[dict[str, Any]] = []
+        character_count = 0
+        for source in sources:
+            remaining = 120000 - character_count
+            if remaining <= 0:
+                break
+            item = {**source, "text": source["text"][:remaining]}
+            bounded_sources.append(item)
+            character_count += len(item["text"])
+        sources = bounded_sources
+        if not sources:
+            raise ValueError("No material is available for this question scope")
+
+        fallback_sources = sources[: min(4, len(sources))]
+        fallback = {
+            "project_id": project_id,
+            "scope": scope,
+            "question": clean_question,
+            "answer": "\n\n".join(
+                f"{item['text'][:500].strip()} [{index}]"
+                for index, item in enumerate(fallback_sources, start=1)
+            ),
+            "citations": [
+                {
+                    "citation": f"[{index}]",
+                    "source_id": item["source_id"],
+                    "source_type": item.get("source_type"),
+                    "library_id": item.get("library_id"),
+                    "title": item.get("title"),
+                    "page": item.get("page"),
+                    "attachment_id": item.get("attachment_id"),
+                    "quote": item["text"][:800],
+                }
+                for index, item in enumerate(fallback_sources, start=1)
+            ],
+            "mode": "extractive",
+            "coverage_note": "模型不可用时展示当前范围内最相关的原始材料。",
+        }
+        if self.graph is None:
+            return {
+                **fallback,
+                "coverage_note": "LLM 当前不可用，本次回答仅展示原文摘录。请检查模型配置或服务状态。",
+            }
+
+        source_map = {item["source_id"]: item for item in sources}
+        context = "\n\n".join(
+            f"--- SOURCE {item['source_id']} | {item['title']} ---\n{item['text']}"
+            for item in sources
+        )
+        try:
+            model = self._build_model()
+            if isinstance(model, str):
+                model = init_chat_model(model)
+            structured_model = model.with_structured_output(
+                LibraryAgentResponse,
+                method="function_calling",
+            )
+            raw = await structured_model.ainvoke(
+                [
+                    SystemMessage(content=PROJECT_QUESTION_PROMPT),
+                    HumanMessage(
+                        content=(
+                            f"问题范围：{scope}\n"
+                            f"用户问题：{clean_question}\n\n"
+                            f"研究材料：\n{context}"
+                        )
+                    ),
+                ]
+            )
+            response = LibraryAgentResponse.model_validate(raw)
+            cited_ids = list(dict.fromkeys(response.cited_source_ids))
+            marker_ids = list(
+                dict.fromkeys(re.findall(r"\[\[([^\]]+)\]\]", response.answer))
+            )
+            markers = set(marker_ids)
+            if not response.answer.strip() or markers - set(source_map):
+                return fallback
+            valid_ids = [
+                item
+                for item in dict.fromkeys([*cited_ids, *marker_ids])
+                if item in source_map
+            ]
+            # Concept explanations may legitimately rely on stable general knowledge
+            # when the review only names a term. They remain LLM answers without a
+            # fabricated paper citation.
+            if not valid_ids and markers:
+                return fallback
+            answer = response.answer.strip()
+            citations = []
+            for index, source_id in enumerate(valid_ids, start=1):
+                source = source_map[source_id]
+                answer = answer.replace(f"[[{source_id}]]", f"[{index}]")
+                citations.append(
+                    {
+                        "citation": f"[{index}]",
+                        "source_id": source_id,
+                        "source_type": source.get("source_type"),
+                        "library_id": source.get("library_id"),
+                        "title": source.get("title"),
+                        "page": source.get("page"),
+                        "attachment_id": source.get("attachment_id"),
+                        "quote": source["text"][:800],
+                    }
+                )
+            uncited_ids = [
+                source_id
+                for source_id in valid_ids
+                if f"[[{source_id}]]" not in response.answer
+            ]
+            if uncited_ids:
+                citation_numbers = [
+                    f"[{valid_ids.index(source_id) + 1}]" for source_id in uncited_ids
+                ]
+                answer = f"{answer}\n\n依据：{'、'.join(citation_numbers)}"
+            return {
+                **fallback,
+                "answer": answer,
+                "citations": citations,
+                "mode": "agent",
+                "coverage_note": response.coverage_note,
+            }
+        except Exception as exc:
+            return {
+                **fallback,
+                "coverage_note": f"研究问答模型暂不可用，已返回范围内原始材料：{str(exc)[:240]}",
+            }
+
+    @staticmethod
+    def _chat_chunk_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text") or item.get("content") or ""
+                    if isinstance(value, str):
+                        parts.append(value)
+            return "".join(parts)
+        return str(content or "")
+
+    async def stream_project_chat(
+        self,
+        project_id: str,
+        question: str,
+        *,
+        scope: str = "narrative",
+        selected_text: str = "",
+        history: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream an unrestricted, multi-turn LLM chat with optional research context."""
+        clean_question = question.strip()
+        if not clean_question:
+            raise ValueError("Question is required")
+        if scope not in {"selection", "narrative", "project", "library"}:
+            raise ValueError("Unsupported project chat scope")
+        project = self.repository.get_project(project_id)
+        artifacts = await asyncio.to_thread(self.repository.list_artifacts, project_id)
+        narratives = [item.payload for item in artifacts if item.kind == "NarrativeReview"]
+        narrative = narratives[-1] if narratives else {}
+
+        context_parts: list[str] = []
+        if selected_text.strip():
+            context_parts.append(f"【用户选中的综述原文】\n{selected_text.strip()}")
+        if narrative:
+            review_parts = [
+                str(narrative.get("title") or ""),
+                str(narrative.get("abstract") or ""),
+            ]
+            for section in narrative.get("sections") or []:
+                review_parts.extend(
+                    [
+                        str(section.get("heading") or ""),
+                        str(section.get("content") or ""),
+                    ]
+                )
+                for subsection in section.get("subsections") or []:
+                    review_parts.extend(
+                        [
+                            str(subsection.get("heading") or ""),
+                            str(subsection.get("content") or ""),
+                        ]
+                    )
+            context_parts.append("【当前综述】\n" + "\n\n".join(filter(None, review_parts)))
+
+        if scope in {"selection", "narrative", "project", "library"}:
+            library_ids: list[str] | None = None
+            if scope != "library":
+                project_papers = await asyncio.to_thread(
+                    self.service.library.sync_project,
+                    project_id,
+                )
+                library_ids = [
+                    item["paper"]["library_id"]
+                    for item in project_papers
+                    if item.get("relation", {}).get("status") == "included"
+                ]
+            sources = (
+                await asyncio.to_thread(
+                    self.service.library.retrieve_library_sources,
+                    f"{clean_question}\n{selected_text}",
+                    library_ids=library_ids,
+                    limit=16,
+                )
+                if scope == "library" or library_ids
+                else []
+            )
+            for index, source in enumerate(sources, start=1):
+                page = f"，第 {source.get('page')} 页" if source.get("page") else ""
+                context_parts.append(
+                    f"【参考材料 {index}：{source.get('title') or '未命名论文'}{page}】\n"
+                    f"{source.get('text') or ''}"
+                )
+
+        context = "\n\n".join(context_parts)[:120000]
+        system_content = (
+            "你是一个自然、专业、善于解释的研究聊天助手。直接回答用户的问题，可以使用你"
+            "掌握的知识，也可以参考下面提供的研究上下文。研究上下文只是辅助信息，不构成"
+            "回答范围限制。理解并承接此前对话，支持连续追问；避免无意义的免责说明和模板化"
+            "开场。回答使用 Markdown。"
+            f"\n\n当前研究主题：{project.topic}"
+            + (f"\n\n可选研究上下文：\n{context}" if context else "")
+        )
+        messages: list[Any] = [SystemMessage(content=system_content)]
+        for item in (history or [])[-40:]:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            if item.get("role") == "assistant":
+                messages.append(AIMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
+        messages.append(HumanMessage(content=clean_question))
+
+        model = self._build_model()
+        if isinstance(model, str):
+            model = init_chat_model(model)
+        async for chunk in model.astream(messages):
+            text = self._chat_chunk_text(getattr(chunk, "content", chunk))
+            if text:
+                yield text
 
     async def answer_paper_question(
         self,

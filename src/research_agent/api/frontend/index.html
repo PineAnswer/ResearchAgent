@@ -239,14 +239,6 @@
 
             <fieldset class="brief-settings">
               <legend>研究范围</legend>
-              <label class="field" for="initialMinPapers">
-                <span>精读下限</span>
-                <input id="initialMinPapers" type="number" min="1" value="2" />
-              </label>
-              <label class="field" for="initialMaxPapers">
-                <span>精读上限</span>
-                <input id="initialMaxPapers" type="number" min="1" value="6" />
-              </label>
               <label class="field" for="initialMaxSearchRounds">
                 <span>自动检索轮次</span>
                 <input id="initialMaxSearchRounds" type="number" min="1" value="3" />
@@ -650,13 +642,27 @@
                 <div><strong id="selectedCount">0</strong><span>已选精读</span></div>
               </div>
               <div class="selection-actions">
-                <button id="selectAll" class="text-button" type="button">全部保留</button>
+                <button id="selectAll" class="text-button" type="button">全选本页</button>
                 <span aria-hidden="true"></span>
-                <button id="clearAll" class="text-button" type="button">全部取消</button>
+                <button id="clearAll" class="text-button" type="button">取消本页</button>
               </div>
             </div>
 
             <div id="candidateGrid" class="candidate-grid"></div>
+            <nav id="candidatePagination" class="review-pagination" aria-label="候选论文分页">
+              <button id="candidatePrevPage" class="secondary" type="button">上一页</button>
+              <span id="candidatePageStatus">第 1 / 1 页</span>
+              <button id="candidateNextPage" class="secondary" type="button">下一页</button>
+              <label for="candidatePageSize">
+                每页
+                <select id="candidatePageSize">
+                  <option value="10">10</option>
+                  <option value="20" selected>20</option>
+                  <option value="50">50</option>
+                </select>
+                篇
+              </label>
+            </nav>
 
             <section id="filteredCandidatesPanel" class="filtered-candidates-panel" hidden>
               <div class="section-heading-row compact">
@@ -670,6 +676,11 @@
                 这些论文不会自动进入候选集。你可以查看原因，并手动加入认为相关的论文。
               </p>
               <div id="filteredCandidateGrid" class="filtered-candidate-grid"></div>
+              <nav id="filteredCandidatePagination" class="review-pagination" aria-label="未达要求论文分页">
+                <button id="filteredCandidatePrevPage" class="secondary" type="button">上一页</button>
+                <span id="filteredCandidatePageStatus">第 1 / 1 页</span>
+                <button id="filteredCandidateNextPage" class="secondary" type="button">下一页</button>
+              </nav>
             </section>
 
             <section class="feedback-panel">
@@ -681,19 +692,15 @@
                 <span class="optional-label">选填</span>
               </div>
 
+              <div class="review-capacity" role="note">
+                <div>
+                  <strong>系统精读容量</strong>
+                  <small>用于控制全文读取、模型调用和失败重试的工作量</small>
+                </div>
+                <span id="paperCapacity">已选 0 篇</span>
+              </div>
+
               <div class="feedback-grid">
-                <label for="minPapers">
-                  <span>精读篇数下限</span>
-                  <small>确认时校验</small>
-                </label>
-                <input id="minPapers" type="number" min="1" value="1" />
-
-                <label for="maxPapers">
-                  <span>精读篇数上限</span>
-                  <small>限制入选规模</small>
-                </label>
-                <input id="maxPapers" type="number" min="1" value="8" />
-
                 <label for="supplementalQueries">
                   <span>补充联网检索词</span>
                   <small>仅“更新候选集”时执行；换行分隔，最多 3 条</small>
@@ -705,12 +712,6 @@
                   <small>换行或逗号分隔</small>
                 </label>
                 <textarea id="manualDois" rows="3" placeholder="10.1000/example"></textarea>
-
-                <label for="feedbackComment">
-                  <span>审核备注</span>
-                  <small>记录手动加入或排除理由，并保存到研究记录</small>
-                </label>
-                <textarea id="feedbackComment" rows="3" placeholder="例如：补充三维目标定位方向；排除只讨论二维图像的论文"></textarea>
               </div>
 
               <div class="feedback-actions">

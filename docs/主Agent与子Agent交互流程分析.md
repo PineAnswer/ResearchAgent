@@ -304,7 +304,7 @@ CREATED
 | `candidates` | 由运行时从原始搜索结果重建的完整候选论文列表 |
 | `candidate_ids` | Scout 初筛后保留的论文 ID |
 | `screening_decisions` | 每篇论文的 `include`、`exclude` 或 `uncertain` 决定 |
-| `screening_reasons` | 排除或待确认论文的简短理由 |
+| `screening_reasons` | 每篇候选论文的一句话说明：入选理由或文章核心内容；待确认/排除项写明判断依据 |
 | `coverage_gaps` | 当前检索覆盖不足的方向 |
 | `search_iteration_log` | 每轮查询、返回数、新增数和策略理由 |
 | `selection_notes` | 检索、去重和候选选择说明 |

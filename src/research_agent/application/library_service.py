@@ -1378,6 +1378,23 @@ class LibraryService:
 
     def sync_project(self, project_id: str) -> list[dict[str, Any]]:
         """Incrementally index legacy project artifacts without rewriting history."""
+        existing_items = self.list_project_papers(project_id)
+        existing_by_identity: dict[str, dict[str, Any]] = {}
+        for item in existing_items:
+            relation = item["relation"]
+            paper = item["paper"]
+            for identity in {
+                normalize_paper_id(relation.get("source_paper_id")),
+                normalize_paper_id(paper.get("paper_id")),
+                normalize_doi(paper.get("doi")),
+                canonical_paper_key(
+                    title=paper.get("title"),
+                    year=paper.get("year"),
+                ),
+            }:
+                if identity:
+                    existing_by_identity[identity] = item
+
         artifacts = self.repository.list_artifacts(project_id)
         candidates: dict[str, dict[str, Any]] = {}
         statuses: dict[str, ProjectPaperStatus] = {}
@@ -1436,17 +1453,54 @@ class LibraryService:
                         "source": existing.get("source") or "project-paper-card",
                     }
 
+        project_changed = False
         for identity, candidate in candidates.items():
             paper_id = self._candidate_id(candidate) or identity
             status = statuses.get(paper_id, "candidate")
+            existing = existing_by_identity.get(paper_id) or existing_by_identity.get(identity)
+            desired_reason = reasons.get(paper_id, "")
+            if existing is not None:
+                relation = existing["relation"]
+                paper = existing["paper"]
+                comparable_fields = (
+                    "title",
+                    "year",
+                    "abstract",
+                    "venue",
+                    "venue_type",
+                    "venue_acronym",
+                    "ccf_rank",
+                    "sci_quartile",
+                    "impact_factor",
+                )
+                metadata_is_current = (
+                    all(
+                        not candidate.get(field)
+                        or paper.get(field) == candidate.get(field)
+                        for field in comparable_fields
+                    )
+                    and (
+                        not candidate.get("doi")
+                        or normalize_doi(paper.get("doi"))
+                        == normalize_doi(candidate.get("doi"))
+                    )
+                )
+                if (
+                    relation.get("status") == status
+                    and relation.get("reason", "") == desired_reason
+                    and (paper_id not in saved_ids or paper.get("saved"))
+                    and metadata_is_current
+                ):
+                    continue
             self.add_project_paper(
                 project_id,
                 candidate,
                 status=status,
-                reason=reasons.get(paper_id, ""),
+                reason=desired_reason,
                 saved=paper_id in saved_ids,
             )
-        return self.list_project_papers(project_id)
+            project_changed = True
+        return self.list_project_papers(project_id) if project_changed else existing_items
 
     @staticmethod
     def _parse_bibtex(content: str) -> list[dict[str, Any]]:

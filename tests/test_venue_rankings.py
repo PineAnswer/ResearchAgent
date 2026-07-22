@@ -210,11 +210,14 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
     assert "suggested_queries: action === \"refine\"" in script
     assert 'method: "PATCH"' in script
     assert "project-list-menu-toggle" in script
-    assert 'latestSearch?.candidates?.length ?? 0, "首次检索去重结果"' in script
+    assert "latestSearch?.candidate_count ?? latestSearch?.candidates?.length ?? 0" in script
     assert "latestCandidateSet" not in script
     assert "...metrics.map(([label, value, hint]) => metricCard(label, value, hint))" in script
     assert "project-hover-preview" in script
     assert "projectListRenderSignature" in script
+    assert "completedProjectCache" in script
+    assert "state.projectLoadController?.abort()" in script
+    assert "Array.isArray(snapshot.project_library)" in script
     assert "function preserveExistingProjectOrder" in script
     assert "loadProjects({ preserveOrder: true })" in script
     assert "const previousScrollTop = elements.projectList.scrollTop" in script

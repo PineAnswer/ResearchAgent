@@ -39,6 +39,11 @@ class SearchFeedbackRequest(SearchFeedback):
     pass
 
 
+class SearchReviewSelectionRequest(BaseModel):
+    paper_ids: list[str] = Field(min_length=1, max_length=100)
+    selected: bool
+
+
 class ContinueProjectRequest(BaseModel):
     thread_id: str | None = None
 
@@ -164,6 +169,27 @@ class LibrarySelectionRequest(BaseModel):
 class LibraryAssistantRequest(BaseModel):
     library_ids: list[str] = Field(default_factory=list, max_length=50)
     question: str = Field(min_length=1)
+
+
+class ProjectChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=30000)
+
+
+class ProjectAssistantRequest(BaseModel):
+    scope: Literal["selection", "narrative", "project", "library"] = "narrative"
+    question: str = Field(min_length=1, max_length=4000)
+    selected_text: str = Field(default="", max_length=12000)
+    history: list[ProjectChatMessage] = Field(default_factory=list, max_length=40)
+
+
+class ResearchNoteRequest(BaseModel):
+    kind: Literal["note", "annotation", "qa"] = "note"
+    selected_text: str = Field(default="", max_length=12000)
+    content: str = Field(default="", max_length=20000)
+    question: str = Field(default="", max_length=4000)
+    answer: str = Field(default="", max_length=30000)
+    citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
 class PaperQuestionRequest(BaseModel):

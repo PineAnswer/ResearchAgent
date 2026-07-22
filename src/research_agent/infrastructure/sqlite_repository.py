@@ -26,6 +26,7 @@ from research_agent.domain.models import (
     PaperReadingProgress,
     ProjectPaper,
     ResearchConversation,
+    ResearchNote,
     ResearchProject,
     ResearchStage,
     ReviewResult,
@@ -338,6 +339,27 @@ class SqliteResearchRepository:
                     FOREIGN KEY(run_id) REFERENCES conversation_runs(run_id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS research_notes (
+                    note_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    user_id TEXT NOT NULL DEFAULT 'local-user',
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS search_review_selections (
+                    project_id TEXT NOT NULL,
+                    paper_id TEXT NOT NULL,
+                    selected INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id, paper_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS user_library_papers (
                     user_id TEXT NOT NULL,
                     library_id TEXT NOT NULL,
@@ -370,6 +392,8 @@ class SqliteResearchRepository:
                     ON library_chunks(library_id, attachment_id, page, chunk_index);
                 CREATE INDEX IF NOT EXISTS idx_library_artifacts_paper
                     ON library_artifacts(library_id, kind, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_research_notes_project
+                    ON research_notes(project_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
                     ON conversations(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_runs_conversation
@@ -379,6 +403,8 @@ class SqliteResearchRepository:
                     WHERE status IN ('queued', 'running');
                 CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
                     ON conversation_messages(conversation_id, message_id);
+                CREATE INDEX IF NOT EXISTS idx_search_review_selections_project
+                    ON search_review_selections(project_id, selected, paper_id);
                 CREATE INDEX IF NOT EXISTS idx_user_library_updated
                     ON user_library_papers(user_id, saved, updated_at DESC);
                 """
@@ -410,6 +436,7 @@ class SqliteResearchRepository:
             for table in (
                 "library_collections",
                 "library_notes",
+                "research_notes",
                 "paper_annotations",
                 "library_attachments",
                 "library_chunks",
@@ -1209,8 +1236,79 @@ class SqliteResearchRepository:
                 "DELETE FROM project_papers WHERE project_id = ?", (project_id,)
             )
             connection.execute(
+                "DELETE FROM search_review_selections WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
                 "DELETE FROM projects WHERE project_id = ?", (project_id,)
             )
+
+    def replace_search_review_selections(
+        self,
+        project_id: str,
+        selections: dict[str, bool],
+    ) -> None:
+        """Replace the persisted candidate selection state for one project."""
+        self.get_project(project_id)
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM search_review_selections WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO search_review_selections(
+                    project_id, paper_id, selected, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (project_id, paper_id, int(selected), now)
+                    for paper_id, selected in selections.items()
+                    if paper_id
+                ],
+            )
+
+    def update_search_review_selections(
+        self,
+        project_id: str,
+        paper_ids: list[str],
+        *,
+        selected: bool,
+    ) -> None:
+        """Upsert one or more candidate selection decisions."""
+        self.get_project(project_id)
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO search_review_selections(
+                    project_id, paper_id, selected, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(project_id, paper_id) DO UPDATE SET
+                    selected = excluded.selected,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (project_id, paper_id, int(selected), now)
+                    for paper_id in paper_ids
+                    if paper_id
+                ],
+            )
+
+    def list_search_review_selections(self, project_id: str) -> dict[str, bool]:
+        """Return every persisted candidate selection for a project."""
+        self.get_project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT paper_id, selected
+                FROM search_review_selections
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchall()
+        return {str(row["paper_id"]): bool(row["selected"]) for row in rows}
 
     def get_library_paper(self, library_id: str) -> LibraryPaper:
         with self._connect() as connection:
@@ -1688,6 +1786,67 @@ class SqliteResearchRepository:
         with self._connect() as connection:
             cursor = connection.execute(
                 "DELETE FROM library_notes WHERE note_id = ? AND user_id = ?",
+                (note_id, self.current_user_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(note_id)
+
+    def save_research_note(self, note: ResearchNote) -> ResearchNote:
+        self.get_project(note.project_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO research_notes(
+                    note_id, project_id, kind, payload_json, updated_at, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(note_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    kind = excluded.kind,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at,
+                    user_id = excluded.user_id
+                """,
+                (
+                    note.note_id,
+                    note.project_id,
+                    note.kind,
+                    note.model_dump_json(),
+                    note.updated_at.isoformat(),
+                    self.current_user_id,
+                ),
+            )
+        return note
+
+    def list_research_notes(self, project_id: str) -> list[ResearchNote]:
+        self.get_project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM research_notes
+                WHERE project_id = ? AND user_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (project_id, self.current_user_id),
+            ).fetchall()
+        return [ResearchNote.model_validate_json(row["payload_json"]) for row in rows]
+
+    def get_research_note(self, note_id: str) -> ResearchNote:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM research_notes
+                WHERE note_id = ? AND user_id = ?
+                """,
+                (note_id, self.current_user_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(note_id)
+        return ResearchNote.model_validate_json(row["payload_json"])
+
+    def delete_research_note(self, note_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM research_notes WHERE note_id = ? AND user_id = ?",
                 (note_id, self.current_user_id),
             )
             if cursor.rowcount == 0:

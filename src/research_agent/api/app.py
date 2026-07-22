@@ -6,6 +6,7 @@ import mimetypes
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,15 +33,18 @@ from research_agent.api.schemas import (
     PaperAnnotationRequest,
     PaperReadingProgressRequest,
     PaperQuestionRequest,
+    ProjectAssistantRequest,
+    ResearchNoteRequest,
     LibraryPaperRequest,
     LibraryPaperUpdateRequest,
     LibrarySelectionRequest,
     ProjectLibraryPaperRequest,
     ResearchRequest,
     SearchFeedbackRequest,
+    SearchReviewSelectionRequest,
 )
 from research_agent.application.research_service import WorkflowPrerequisiteError
-from research_agent.domain.models import LibraryAttachment
+from research_agent.domain.models import LibraryAttachment, ResearchNote
 from research_agent.infrastructure.config import Settings
 from research_agent.infrastructure.sqlite_repository import (
     ActiveConversationRunError,
@@ -68,6 +72,37 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _compact_project_artifacts(data: dict[str, Any]) -> dict[str, Any]:
+    """Keep project snapshots light; candidate details are served page by page."""
+    for artifact in data.get("artifacts") or []:
+        kind = artifact.get("kind")
+        payload = artifact.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if kind in {"SearchReport", "SupplementalSearchReport"}:
+            candidates = payload.get("candidates") or []
+            decisions = payload.get("screening_decisions") or {}
+            payload["candidate_count"] = len(candidates)
+            payload["screening_summary"] = {
+                decision: sum(1 for value in decisions.values() if value == decision)
+                for decision in ("include", "exclude", "uncertain")
+            }
+            payload["candidates"] = []
+            payload["screening_decisions"] = {}
+            payload["screening_reasons"] = {}
+        elif kind == "CandidateSetSnapshot":
+            candidates = payload.get("candidates") or []
+            filtered = payload.get("filtered_candidates") or []
+            payload["candidate_count"] = len(candidates)
+            payload["filtered_candidate_count"] = len(filtered)
+            payload["selected_count"] = len(payload.get("selected_paper_ids") or [])
+            payload["candidates"] = []
+            payload["filtered_candidates"] = []
+            payload["filtered_candidate_reasons"] = {}
+            payload["agent_screening_reasons"] = {}
+    return data
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         load_dotenv()
@@ -75,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     run_manager = ConversationRunManager(supervisor)
 
     def with_runtime_events(snapshot: Any) -> dict[str, Any]:
-        data = _json_safe(snapshot)
+        data = _compact_project_artifacts(_json_safe(snapshot))
         active_run = data.get("active_run") or {}
         runs = data.get("runs") or []
         latest_run = active_run or (runs[0] if runs else {})
@@ -1006,11 +1041,153 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def get_project(project_id: str) -> ApiEnvelope:
         try:
-            await asyncio.to_thread(supervisor.service.library.sync_project, project_id)
+            project_library = await asyncio.to_thread(
+                supervisor.service.library.sync_project,
+                project_id,
+            )
             snapshot = supervisor.service.get_snapshot(project_id)
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
-        return ApiEnvelope(data=with_runtime_events(snapshot))
+        data = with_runtime_events(snapshot)
+        data["project_library"] = project_library
+        return ApiEnvelope(data=data)
+
+    @app.post(
+        "/api/projects/{project_id}/assistant",
+        response_model=ApiEnvelope,
+    )
+    async def project_assistant(
+        project_id: str,
+        request: ProjectAssistantRequest,
+    ) -> ApiEnvelope:
+        try:
+            data = await supervisor.answer_project_question(
+                project_id,
+                request.question,
+                scope=request.scope,
+                selected_text=request.selected_text,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ApiEnvelope(data=data)
+
+    @app.post("/api/projects/{project_id}/assistant/stream")
+    async def stream_project_assistant(
+        project_id: str,
+        request: ProjectAssistantRequest,
+    ) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            try:
+                async for delta in supervisor.stream_project_chat(
+                    project_id,
+                    request.question,
+                    scope=request.scope,
+                    selected_text=request.selected_text,
+                    history=[item.model_dump() for item in request.history],
+                ):
+                    payload = json.dumps({"text": delta}, ensure_ascii=False)
+                    yield f"event: delta\ndata: {payload}\n\n"
+                yield "event: done\ndata: {}\n\n"
+            except ProjectNotFound:
+                payload = json.dumps({"message": "project_not_found"}, ensure_ascii=False)
+                yield f"event: error\ndata: {payload}\n\n"
+            except Exception as exc:
+                payload = json.dumps({"message": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {payload}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get(
+        "/api/projects/{project_id}/notes",
+        response_model=ApiEnvelope,
+    )
+    async def list_research_notes(project_id: str) -> ApiEnvelope:
+        try:
+            notes = await asyncio.to_thread(
+                supervisor.repository.list_research_notes,
+                project_id,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        return ApiEnvelope(data=[note.model_dump(mode="json") for note in notes])
+
+    @app.post(
+        "/api/projects/{project_id}/notes",
+        response_model=ApiEnvelope,
+    )
+    async def create_research_note(
+        project_id: str,
+        request: ResearchNoteRequest,
+    ) -> ApiEnvelope:
+        if request.kind in {"note", "annotation"} and not request.content.strip():
+            raise HTTPException(status_code=400, detail="note_content_required")
+        if request.kind == "annotation" and not request.selected_text.strip():
+            raise HTTPException(status_code=400, detail="annotation_selection_required")
+        if request.kind == "qa" and (not request.question.strip() or not request.answer.strip()):
+            raise HTTPException(status_code=400, detail="qa_question_and_answer_required")
+        note = ResearchNote(
+            note_id=f"rnote-{uuid.uuid4().hex}",
+            project_id=project_id,
+            **request.model_dump(),
+        )
+        try:
+            saved = await asyncio.to_thread(supervisor.repository.save_research_note, note)
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        return ApiEnvelope(message="research_note_saved", data=saved.model_dump(mode="json"))
+
+    @app.patch(
+        "/api/projects/{project_id}/notes/{note_id}",
+        response_model=ApiEnvelope,
+    )
+    async def update_research_note(
+        project_id: str,
+        note_id: str,
+        request: ResearchNoteRequest,
+    ) -> ApiEnvelope:
+        try:
+            existing = await asyncio.to_thread(
+                supervisor.repository.get_research_note,
+                note_id,
+            )
+            if existing.project_id != project_id:
+                raise KeyError(note_id)
+            updated = existing.model_copy(
+                update={**request.model_dump(), "updated_at": datetime.now(UTC)}
+            )
+            saved = await asyncio.to_thread(
+                supervisor.repository.save_research_note,
+                updated,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="research_note_not_found") from exc
+        return ApiEnvelope(message="research_note_updated", data=saved.model_dump(mode="json"))
+
+    @app.delete(
+        "/api/projects/{project_id}/notes/{note_id}",
+        response_model=ApiEnvelope,
+    )
+    async def delete_research_note(project_id: str, note_id: str) -> ApiEnvelope:
+        try:
+            existing = await asyncio.to_thread(
+                supervisor.repository.get_research_note,
+                note_id,
+            )
+            if existing.project_id != project_id:
+                raise KeyError(note_id)
+            await asyncio.to_thread(supervisor.repository.delete_research_note, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="research_note_not_found") from exc
+        return ApiEnvelope(message="research_note_deleted", data={"note_id": note_id})
 
     @app.get(
         "/api/projects/{project_id}/library",
@@ -1068,14 +1245,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/api/projects/{project_id}/search-review",
         response_model=ApiEnvelope,
     )
-    async def get_search_review(project_id: str) -> ApiEnvelope:
+    async def get_search_review(
+        project_id: str,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=50),
+        q: str = Query(default="", max_length=300),
+        filtered_page: int = Query(default=1, ge=1),
+    ) -> ApiEnvelope:
         try:
-            result = supervisor.search_review.get_review(project_id)
+            result = await asyncio.to_thread(
+                supervisor.search_review.get_review,
+                project_id,
+                page=page,
+                page_size=page_size,
+                query=q,
+                filtered_page=filtered_page,
+            )
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
         except WorkflowPrerequisiteError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return ApiEnvelope(data=_json_safe(result))
+
+    @app.patch(
+        "/api/projects/{project_id}/search-review/selection",
+        response_model=ApiEnvelope,
+    )
+    async def update_search_review_selection(
+        project_id: str,
+        request: SearchReviewSelectionRequest,
+    ) -> ApiEnvelope:
+        try:
+            result = await asyncio.to_thread(
+                supervisor.search_review.update_selection,
+                project_id,
+                request.paper_ids,
+                selected=request.selected,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except WorkflowPrerequisiteError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ApiEnvelope(message="search_review_selection_updated", data=result)
 
     @app.post(
         "/api/projects/{project_id}/search-feedback",

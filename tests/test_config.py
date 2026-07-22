@@ -13,6 +13,7 @@ def test_search_settings_are_configurable_from_environment(tmp_path, monkeypatch
     monkeypatch.setenv("RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS", "12")
     monkeypatch.setenv("RESEARCH_AGENT_MAX_SEARCH_REVIEW_ROUNDS", "4")
     monkeypatch.setenv("RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND", "2")
+    monkeypatch.setenv("RESEARCH_AGENT_MAX_DEEP_READ_PAPERS", "12")
     monkeypatch.setenv("RESEARCH_AGENT_GRAPH_RECURSION_LIMIT", "640")
     monkeypatch.setenv("RESEARCH_AGENT_MULTI_USER_MODE", "true")
     monkeypatch.setenv("RESEARCH_AGENT_AWS_REGION", "us-west-2")
@@ -30,6 +31,7 @@ def test_search_settings_are_configurable_from_environment(tmp_path, monkeypatch
     assert settings.search_max_retry_wait_seconds == 12
     assert settings.max_search_review_rounds == 4
     assert settings.max_suggested_queries_per_round == 2
+    assert settings.max_deep_read_papers == 12
     assert settings.graph_recursion_limit == 640
     assert settings.multi_user_mode is True
     assert settings.aws_region == "us-west-2"

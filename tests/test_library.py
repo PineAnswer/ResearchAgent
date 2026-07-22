@@ -97,6 +97,37 @@ def test_agent_recommendation_does_not_auto_save_before_human_screening(tmp_path
     assert service.list_papers() == []
 
 
+def test_project_sync_skips_unchanged_existing_candidates(tmp_path, monkeypatch) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    project = repository.create_project("topic", "question")
+    repository.save_artifact(
+        project.project_id,
+        "CandidateSetSnapshot",
+        {
+            "candidates": [
+                {
+                    "paper_id": "W1",
+                    "title": "Already indexed",
+                    "doi": "https://doi.org/10.1000/example",
+                    "source": "OpenAlex",
+                },
+            ],
+        },
+    )
+    service.sync_project(project.project_id)
+
+    def fail_if_reindexed(*args, **kwargs):
+        raise AssertionError("unchanged candidates should not be indexed again")
+
+    monkeypatch.setattr(service, "add_project_paper", fail_if_reindexed)
+
+    linked = service.sync_project(project.project_id)
+
+    assert len(linked) == 1
+    assert linked[0]["paper"]["title"] == "Already indexed"
+
+
 def test_library_import_export_supports_bibtex_and_ris(tmp_path) -> None:
     repository = SqliteResearchRepository(tmp_path / "test.db")
     service = LibraryService(repository)

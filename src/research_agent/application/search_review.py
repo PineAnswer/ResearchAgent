@@ -47,6 +47,57 @@ def _candidate_id(candidate: PaperCandidate) -> str:
     )
 
 
+def _candidate_matches(candidate: PaperCandidate, query: str) -> bool:
+    normalized = query.casefold().strip()
+    if not normalized:
+        return True
+    haystack = " ".join(
+        str(item)
+        for item in [
+            candidate.paper_id,
+            candidate.doi or "",
+            candidate.title,
+            candidate.venue,
+            candidate.venue_acronym,
+            candidate.ccf_rank or "",
+            candidate.sci_quartile or "",
+            *candidate.authors,
+        ]
+        if item
+    ).casefold()
+    return normalized in haystack
+
+
+def _abstract_core_sentence(abstract: str, *, limit: int = 180) -> str:
+    """Return a compact, source-grounded fallback for candidate review cards."""
+    normalized = " ".join(str(abstract or "").split())
+    if not normalized:
+        return ""
+    sentence = re.split(r"(?<=[。！？.!?])\s+", normalized, maxsplit=1)[0]
+    if len(sentence) <= limit:
+        return sentence
+    return sentence[: limit - 1].rstrip("，,；;：: ") + "…"
+
+
+def _candidate_reason(
+    candidate: PaperCandidate,
+    *,
+    decision: str,
+    supplied_reason: str | None,
+) -> str:
+    reason = " ".join(str(supplied_reason or "").split())
+    if reason:
+        return reason
+    core = _abstract_core_sentence(candidate.abstract)
+    if core:
+        return f"文章核心内容：{core}"
+    if decision == "include":
+        return "标题与研究问题直接相关；当前摘要缺失，建议结合全文进一步确认。"
+    if decision == "exclude":
+        return "Agent 判断该论文偏离当前研究范围；当前摘要缺失，建议人工复核。"
+    return "标题或元数据与研究问题可能相关；当前摘要不足，需要人工或全文确认。"
+
+
 class SearchReviewService:
     """Persist and apply human feedback while a project waits after retrieval."""
 
@@ -79,37 +130,92 @@ class SearchReviewService:
             raise WorkflowPrerequisiteError(
                 "Search review has no CandidateSetSnapshot; finish the initial search first"
             )
-        return CandidateSetSnapshot.model_validate(artifacts[-1].payload)
+        snapshot = CandidateSetSnapshot.model_validate(artifacts[-1].payload)
+        return snapshot.model_copy(
+            update={"min_papers": 1, "max_papers": self.max_papers}
+        )
+
+    @staticmethod
+    def _default_selected_ids(snapshot: CandidateSetSnapshot) -> set[str]:
+        candidate_ids = {_candidate_id(candidate) for candidate in snapshot.candidates}
+        saved = {
+            normalize_paper_id(item)
+            for item in snapshot.selected_paper_ids
+            if normalize_paper_id(item) in candidate_ids
+        }
+        if saved:
+            return saved
+        agent_selected = {
+            normalize_paper_id(item)
+            for item in snapshot.agent_included_paper_ids
+            if normalize_paper_id(item) in candidate_ids
+        }
+        return agent_selected or candidate_ids
+
+    def _selection_state(
+        self,
+        project_id: str,
+        snapshot: CandidateSetSnapshot,
+    ) -> dict[str, bool]:
+        candidate_ids = {_candidate_id(candidate) for candidate in snapshot.candidates}
+        selections = self.service.repository.list_search_review_selections(project_id)
+        if selections and candidate_ids.issubset(selections):
+            return {paper_id: selections[paper_id] for paper_id in candidate_ids}
+        selected_ids = self._default_selected_ids(snapshot)
+        normalized = {
+            paper_id: selections.get(paper_id, paper_id in selected_ids)
+            for paper_id in candidate_ids
+        }
+        self.service.repository.replace_search_review_selections(
+            project_id,
+            normalized,
+        )
+        return normalized
+
+    @staticmethod
+    def _page(items: Sequence[Any], page: int, page_size: int) -> tuple[list[Any], dict[str, int]]:
+        safe_size = max(1, min(int(page_size), 50))
+        total = len(items)
+        total_pages = max(1, (total + safe_size - 1) // safe_size)
+        safe_page = max(1, min(int(page), total_pages))
+        start = (safe_page - 1) * safe_size
+        return list(items[start : start + safe_size]), {
+            "page": safe_page,
+            "page_size": safe_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
+
+    @staticmethod
+    def _candidate_preview(
+        candidate: PaperCandidate,
+        *,
+        selected: bool,
+        decision: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        payload = candidate.model_dump(mode="json")
+        abstract = str(payload.get("abstract", ""))
+        payload["abstract"] = abstract[:700]
+        payload["abstract_truncated"] = len(abstract) > 700
+        payload["selected"] = selected
+        payload["agent_decision"] = decision
+        payload["agent_reason"] = reason
+        return payload
 
     def _resolve_limits(
         self,
         snapshot: CandidateSetSnapshot | None = None,
         feedback: SearchFeedback | None = None,
     ) -> tuple[int, int, int]:
-        min_papers = (
-            feedback.min_papers
-            if feedback is not None and feedback.min_papers is not None
-            else snapshot.min_papers
-            if snapshot is not None
-            else self.min_papers
-        )
-        max_papers = (
-            feedback.max_papers
-            if feedback is not None and feedback.max_papers is not None
-            else snapshot.max_papers
-            if snapshot is not None
-            else self.max_papers
-        )
         max_rounds = (
-            snapshot.max_search_rounds
+            feedback.max_search_rounds
+            if feedback is not None and feedback.max_search_rounds is not None
+            else snapshot.max_search_rounds
             if snapshot is not None
             else self.max_rounds
         )
-        if min_papers > max_papers:
-            raise WorkflowPrerequisiteError(
-                "min_papers cannot be greater than max_papers"
-            )
-        return min_papers, max_papers, max_rounds
+        return 1, self.max_papers, max_rounds
 
     @staticmethod
     def _query_rounds_from_report(report: Mapping[str, Any]) -> list[list[str]]:
@@ -165,24 +271,36 @@ class SearchReviewService:
             reason = normalized_reasons.get(candidate_id) or normalized_reasons.get(doi)
             if decision in {"include", "included", "accept", "selected", "pass"}:
                 included.append(candidate_id)
-                reason_map[candidate_id] = reason or "Agent marked this paper as relevant."
+                reason_map[candidate_id] = _candidate_reason(
+                    candidate,
+                    decision="include",
+                    supplied_reason=reason,
+                )
             elif decision in {"exclude", "excluded", "reject", "rejected", "fail"}:
                 excluded.append(candidate_id)
-                reason_map[candidate_id] = reason or "Agent marked this paper as out of scope."
+                reason_map[candidate_id] = _candidate_reason(
+                    candidate,
+                    decision="exclude",
+                    supplied_reason=reason,
+                )
             else:
                 uncertain.append(candidate_id)
-                reason_map[candidate_id] = reason or "Agent has not made a final screening decision."
+                reason_map[candidate_id] = _candidate_reason(
+                    candidate,
+                    decision="uncertain",
+                    supplied_reason=reason,
+                )
         approved = min_papers <= len(included) <= max_papers and not uncertain
         if approved:
             note = (
                 f"Agent screening approved {len(included)} papers within the "
-                f"{min_papers}-{max_papers} paper limit."
+                f"system deep-reading capacity of {max_papers}."
             )
         else:
             note = (
                 f"Agent screening has {len(included)} included, {len(uncertain)} "
-                f"uncertain, {len(excluded)} excluded papers; target is "
-                f"{min_papers}-{max_papers} included papers."
+                f"uncertain, {len(excluded)} excluded papers; the system can "
+                f"deep-read 1-{max_papers} papers in this run."
             )
         return {
             "agent_included_paper_ids": included,
@@ -261,8 +379,20 @@ class SearchReviewService:
                 "你可以从未达要求的论文中手动加入，补充 DOI，或调整检索条件。"
             )
         query_rounds = self._query_rounds_from_report(report)
+        agent_fields = self._agent_review_fields(
+            candidates,
+            decisions=report.get("screening_decisions", {}),
+            reasons=report.get("screening_reasons", {}),
+            min_papers=min_papers,
+            max_papers=max_papers,
+        )
+        selected_ids = {
+            normalize_paper_id(item)
+            for item in agent_fields["agent_included_paper_ids"]
+        } or {_candidate_id(candidate) for candidate in candidates}
         snapshot = CandidateSetSnapshot(
             candidates=candidates,
+            selected_paper_ids=sorted(selected_ids),
             filtered_candidates=filtered_candidates,
             filtered_candidate_reasons=filtered_candidate_reasons,
             blocked_reason=blocked_reason,
@@ -276,16 +406,10 @@ class SearchReviewService:
             year_to=resolved_year_to,
             quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
-            **self._agent_review_fields(
-                candidates,
-                decisions=report.get("screening_decisions", {}),
-                reasons=report.get("screening_reasons", {}),
-                min_papers=min_papers,
-                max_papers=max_papers,
-            ),
+            **agent_fields,
         )
         if candidates or not report.get("candidates"):
-            artifact, project = self.service.save_artifact_and_transition(
+            self.service.save_artifact_and_transition(
                 project_id,
                 "CandidateSetSnapshot",
                 snapshot.model_dump(mode="json"),
@@ -293,21 +417,33 @@ class SearchReviewService:
                 actor="human-search-review",
             )
         else:
-            artifact = self.service.save_artifact(
+            self.service.save_artifact(
                 project_id,
                 "CandidateSetSnapshot",
                 snapshot.model_dump(mode="json"),
             )
-            project = self.service.get_project(project_id)
-        return {
-            "project": project.model_dump(mode="json"),
-            "candidate_set": artifact.payload,
-            "awaiting_input": bool(candidates) or not report.get("candidates"),
-            "manual_recovery_allowed": not candidates,
-            "message": blocked_reason or "候选论文已准备好，等待人工审核。",
-        }
+        self.service.repository.replace_search_review_selections(
+            project_id,
+            {
+                _candidate_id(candidate): _candidate_id(candidate) in selected_ids
+                for candidate in candidates
+            },
+        )
+        result = self.get_review(project_id)
+        result["awaiting_input"] = bool(candidates) or not report.get("candidates")
+        result["manual_recovery_allowed"] = not candidates
+        result["message"] = blocked_reason or "候选论文已准备好，等待人工审核。"
+        return result
 
-    def get_review(self, project_id: str) -> dict[str, Any]:
+    def get_review(
+        self,
+        project_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        query: str = "",
+        filtered_page: int = 1,
+    ) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         snapshot = self._latest_snapshot(project_id)
         artifacts = self.service.repository.list_artifacts(project_id)
@@ -344,9 +480,112 @@ class SearchReviewService:
             len([item for item in artifacts if item.kind == "CandidateSetSnapshot"]) >= 2
             and reversible_stage is project.stage
         )
+        selections = self._selection_state(project_id, snapshot)
+        status = self._screening_status_from_snapshot(snapshot)
+        normalized_reasons = {
+            normalize_paper_id(key): value
+            for key, value in snapshot.agent_screening_reasons.items()
+        }
+        matching_candidates = [
+            candidate
+            for candidate in snapshot.candidates
+            if _candidate_matches(candidate, query)
+        ]
+        candidate_items, candidate_page = self._page(
+            matching_candidates,
+            page,
+            page_size,
+        )
+        filtered_items, filtered_pagination = self._page(
+            snapshot.filtered_candidates,
+            filtered_page,
+            page_size,
+        )
+        candidate_payloads = [
+            self._candidate_preview(
+                candidate,
+                selected=selections.get(_candidate_id(candidate), False),
+                decision=status.get(_candidate_id(candidate), "uncertain"),
+                reason=normalized_reasons.get(_candidate_id(candidate), ""),
+            )
+            for candidate in candidate_items
+        ]
+        filtered_payloads = [
+            self._candidate_preview(
+                candidate,
+                selected=False,
+                decision="exclude",
+                reason="；".join(
+                    snapshot.filtered_candidate_reasons.get(_candidate_id(candidate), [])
+                ),
+            )
+            for candidate in filtered_items
+        ]
+        compact_snapshot = snapshot.model_dump(
+            mode="json",
+            exclude={
+                "candidates",
+                "filtered_candidates",
+                "filtered_candidate_reasons",
+                "excluded_paper_ids",
+                "selected_paper_ids",
+                "agent_included_paper_ids",
+                "agent_excluded_paper_ids",
+                "agent_uncertain_paper_ids",
+                "agent_screening_reasons",
+            },
+        )
+        compact_snapshot.update(
+            {
+                "candidates": candidate_payloads,
+                "filtered_candidates": filtered_payloads,
+                "filtered_candidate_reasons": {
+                    _candidate_id(candidate): snapshot.filtered_candidate_reasons.get(
+                        _candidate_id(candidate),
+                        [],
+                    )
+                    for candidate in filtered_items
+                },
+                "agent_included_paper_ids": [
+                    _candidate_id(candidate)
+                    for candidate in candidate_items
+                    if status.get(_candidate_id(candidate)) == "include"
+                ],
+                "agent_excluded_paper_ids": [
+                    _candidate_id(candidate)
+                    for candidate in candidate_items
+                    if status.get(_candidate_id(candidate)) == "exclude"
+                ],
+                "agent_uncertain_paper_ids": [
+                    _candidate_id(candidate)
+                    for candidate in candidate_items
+                    if status.get(_candidate_id(candidate), "uncertain") == "uncertain"
+                ],
+                "agent_screening_reasons": {
+                    _candidate_id(candidate): normalized_reasons.get(
+                        _candidate_id(candidate),
+                        "",
+                    )
+                    for candidate in candidate_items
+                },
+                "candidate_total": len(snapshot.candidates),
+                "filtered_candidate_total": len(snapshot.filtered_candidates),
+            }
+        )
+        latest_snapshot_artifact = [
+            item for item in artifacts if item.kind == "CandidateSetSnapshot"
+        ][-1]
         return {
             "project": project.model_dump(mode="json"),
-            "candidate_set": snapshot.model_dump(mode="json"),
+            "candidate_set": compact_snapshot,
+            "candidate_page": candidate_page,
+            "filtered_candidate_page": filtered_pagination,
+            "selection": {
+                "selected_count": sum(selections.values()),
+                "total_count": len(selections),
+            },
+            "query": query,
+            "snapshot_version": latest_snapshot_artifact.artifact_id,
             "awaiting_input": (
                 project.stage is ResearchStage.SEARCH_REVIEW_PENDING
                 and bool(snapshot.candidates)
@@ -357,6 +596,48 @@ class SearchReviewService:
             "message": snapshot.blocked_reason or "候选论文已准备好，等待人工审核。",
             "can_undo": can_undo,
             "last_feedback_action": latest_action,
+        }
+
+    def update_selection(
+        self,
+        project_id: str,
+        paper_ids: Sequence[str],
+        *,
+        selected: bool,
+    ) -> dict[str, Any]:
+        project = self.service.get_project(project_id)
+        if project.stage not in {
+            ResearchStage.SEARCHED,
+            ResearchStage.SEARCH_REVIEW_PENDING,
+        }:
+            raise WorkflowPrerequisiteError(
+                "Candidate selection is only editable during search review"
+            )
+        snapshot = self._latest_snapshot(project_id)
+        valid_ids = {_candidate_id(candidate) for candidate in snapshot.candidates}
+        normalized_ids = {
+            normalize_paper_id(item) for item in paper_ids if str(item).strip()
+        }
+        invalid_ids = normalized_ids - valid_ids
+        if invalid_ids:
+            raise WorkflowPrerequisiteError(
+                f"Unknown candidate paper IDs: {', '.join(sorted(invalid_ids))}"
+            )
+        self._selection_state(project_id, snapshot)
+        self.service.repository.update_search_review_selections(
+            project_id,
+            sorted(normalized_ids),
+            selected=selected,
+        )
+        selections = self.service.repository.list_search_review_selections(project_id)
+        return {
+            "updated_paper_ids": sorted(normalized_ids),
+            "selected": selected,
+            "selected_count": sum(
+                bool(selections.get(paper_id)) for paper_id in valid_ids
+            ),
+            "total_count": len(valid_ids),
+            "max_papers": self.max_papers,
         }
 
     def undo_last_feedback(self, project_id: str) -> dict[str, Any]:
@@ -389,7 +670,9 @@ class SearchReviewService:
         if active_run is not None:
             raise WorkflowPrerequisiteError("Cannot undo while a continuation run is active")
 
-        restored = CandidateSetSnapshot.model_validate(snapshots[-2].payload)
+        restored = CandidateSetSnapshot.model_validate(snapshots[-2].payload).model_copy(
+            update={"min_papers": 1, "max_papers": self.max_papers}
+        )
         self.service.save_artifact(
             project_id,
             "SearchFeedback",
@@ -403,6 +686,15 @@ class SearchReviewService:
             "CandidateSetSnapshot",
             restored.model_dump(mode="json"),
         )
+        del restored_artifact
+        restored_selected_ids = self._default_selected_ids(restored)
+        self.service.repository.replace_search_review_selections(
+            project_id,
+            {
+                _candidate_id(candidate): _candidate_id(candidate) in restored_selected_ids
+                for candidate in restored.candidates
+            },
+        )
         if project.stage is not ResearchStage.SEARCH_REVIEW_PENDING:
             project = self.service.repository.reopen_interrupted_workflow(
                 project_id,
@@ -410,13 +702,9 @@ class SearchReviewService:
                 actor="human-search-review-undo",
             )
             self.service._export_snapshot(project_id)
-        return {
-            "project": project.model_dump(mode="json"),
-            "candidate_set": restored_artifact.payload,
-            "awaiting_input": True,
-            "can_undo": False,
-            "undone_action": latest_action,
-        }
+        result = self.get_review(project_id)
+        result.update({"can_undo": False, "undone_action": latest_action})
+        return result
 
     def _search_queries(
         self,
@@ -551,6 +839,10 @@ class SearchReviewService:
                 f"current stage is {project.stage.value}"
             )
         min_papers, max_papers, max_rounds = self._resolve_limits(snapshot, feedback)
+        selection_state = self._selection_state(project_id, snapshot)
+        selected_ids = {
+            paper_id for paper_id, selected in selection_state.items() if selected
+        }
         raw_queries = [item.strip() for item in feedback.suggested_queries if item.strip()]
         if raw_queries and feedback.action != "refine":
             raise WorkflowPrerequisiteError(
@@ -576,21 +868,31 @@ class SearchReviewService:
             self._resolve_manual_paper(item) for item in feedback.added_papers
         ]
         searched_candidates, failures = self._search_queries(new_queries, snapshot)
+        feedback_excluded_ids = {
+            normalize_paper_id(item)
+            for item in feedback.excluded_paper_ids
+            if item.strip()
+        }
+        selected_ids.difference_update(feedback_excluded_ids)
         excluded_ids = {
             *(normalize_paper_id(item) for item in snapshot.excluded_paper_ids),
+            *feedback_excluded_ids,
             *(
-                normalize_paper_id(item)
-                for item in feedback.excluded_paper_ids
-                if item.strip()
+                _candidate_id(candidate)
+                for candidate in snapshot.candidates
+                if _candidate_id(candidate) not in selected_ids
             ),
         }
-        for candidate in manual_candidates:
+        additions = [*searched_candidates, *manual_candidates]
+        for candidate in additions:
             excluded_ids.discard(_candidate_id(candidate))
+            selected_ids.add(_candidate_id(candidate))
         candidates = self._merge_candidates(
             snapshot.candidates,
-            [*searched_candidates, *manual_candidates],
+            additions,
             excluded_ids,
         )
+        selected_ids = {_candidate_id(candidate) for candidate in candidates}
         added_ids = {_candidate_id(item) for item in manual_candidates}
         filtered_candidates = [
             item
@@ -616,6 +918,7 @@ class SearchReviewService:
         )
         next_snapshot = CandidateSetSnapshot(
             candidates=candidates,
+            selected_paper_ids=sorted(selected_ids),
             filtered_candidates=filtered_candidates,
             filtered_candidate_reasons=filtered_candidate_reasons,
             blocked_reason=blocked_reason,
@@ -652,7 +955,7 @@ class SearchReviewService:
             min_papers <= len(candidates) <= max_papers
         ):
             raise WorkflowPrerequisiteError(
-                f"Accepted paper count must be between {min_papers} and {max_papers}; "
+                f"System deep-reading capacity is {max_papers} papers per run; "
                 f"current count is {len(candidates)}"
             )
 
@@ -678,6 +981,10 @@ class SearchReviewService:
             project_id,
             "CandidateSetSnapshot",
             next_snapshot.model_dump(mode="json"),
+        )
+        self.service.repository.replace_search_review_selections(
+            project_id,
+            {_candidate_id(candidate): True for candidate in candidates},
         )
 
         if recovering_filtered_empty and candidates:
@@ -733,13 +1040,13 @@ class SearchReviewService:
                 "awaiting_input": False,
             }
 
-        return {
-            "project": project.model_dump(mode="json"),
-            "candidate_set": snapshot_artifact.payload,
-            "feedback_artifact_id": feedback_artifact.artifact_id,
-            "awaiting_input": bool(candidates),
-            "manual_recovery_allowed": not candidates,
-            "message": blocked_reason or "候选集已更新，等待人工审核。",
-            "new_queries": new_queries,
-            "search_failures": failures,
-        }
+        result = self.get_review(project_id)
+        result.update(
+            {
+                "feedback_artifact_id": feedback_artifact.artifact_id,
+                "message": blocked_reason or "候选集已更新，等待人工审核。",
+                "new_queries": new_queries,
+                "search_failures": failures,
+            }
+        )
+        return result

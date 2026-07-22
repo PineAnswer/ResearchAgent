@@ -17,6 +17,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from research_agent.application.candidate_ranking import (
+    rank_candidates,
+    recent_citation_velocity,
+)
+
 
 @dataclass(frozen=True)
 class HttpRetryPolicy:
@@ -384,7 +389,9 @@ def build_literature_tools(
             "per-page": upstream_limit,
             "select": (
                 "id,title,authorships,publication_year,doi,primary_location,"
-                "best_oa_location,abstract_inverted_index"
+                "best_oa_location,abstract_inverted_index,type,cited_by_count,"
+                "fwci,citation_normalized_percentile,counts_by_year,is_retracted,"
+                "primary_topic"
             ),
         }
         filters: list[str] = []
@@ -408,6 +415,9 @@ def build_literature_tools(
             best_oa = item.get("best_oa_location") or {}
             primary = item.get("primary_location") or {}
             venue_source = primary.get("source") or best_oa.get("source") or {}
+            normalized_percentile = item.get("citation_normalized_percentile") or {}
+            primary_topic = item.get("primary_topic") or {}
+            recent_velocity = recent_citation_velocity(item.get("counts_by_year") or [])
             works.append(
                 {
                     "paper_id": item.get("id", ""),
@@ -429,6 +439,30 @@ def build_literature_tools(
                     "source": "OpenAlex",
                     "venue": venue_source.get("display_name", ""),
                     "venue_type": venue_source.get("type"),
+                    "publication_type": item.get("type") or "",
+                    "fields_of_study": [
+                        value
+                        for value in [
+                            primary_topic.get("subfield", {}).get("display_name"),
+                            primary_topic.get("field", {}).get("display_name"),
+                        ]
+                        if value
+                    ],
+                    "citation_counts": {
+                        "OpenAlex": max(0, int(item.get("cited_by_count") or 0))
+                    },
+                    "citation_percentiles": (
+                        {"OpenAlex": normalized_percentile.get("value")}
+                        if normalized_percentile.get("value") is not None
+                        else {}
+                    ),
+                    "recent_citation_velocities": (
+                        {"OpenAlex": recent_velocity}
+                        if recent_velocity is not None
+                        else {}
+                    ),
+                    "fwci": item.get("fwci"),
+                    "is_retracted": bool(item.get("is_retracted")),
                 }
             )
         return json.dumps(
@@ -506,6 +540,24 @@ def build_literature_tools(
                     "year": year,
                     "venue": (item.get("container-title") or [""])[0],
                     "venue_type": venue_type,
+                    "publication_type": item_type,
+                    "fields_of_study": [
+                        str(value) for value in item.get("subject") or [] if value
+                    ],
+                    "citation_counts": (
+                        {
+                            "Crossref": max(
+                                0, int(item.get("is-referenced-by-count") or 0)
+                            )
+                        }
+                        if "is-referenced-by-count" in item
+                        else {}
+                    ),
+                    "is_retracted": any(
+                        str(update.get("type") or "").casefold() == "retraction"
+                        for update in item.get("update-to") or []
+                        if isinstance(update, dict)
+                    ),
                 }
             )
         return json.dumps(
@@ -532,7 +584,8 @@ def build_literature_tools(
         upstream_limit = min(50, max(limit, limit * 4 if quality_venues_only else limit))
         fields = (
             "paperId,title,authors,year,abstract,externalIds,url,venue,"
-            "publicationTypes,openAccessPdf"
+            "publicationTypes,openAccessPdf,citationCount,influentialCitationCount,"
+            "fieldsOfStudy,s2FieldsOfStudy"
         )
         params = {
             "query": query,
@@ -567,9 +620,9 @@ def build_literature_tools(
             external_ids = item.get("externalIds") or {}
             doi = external_ids.get("DOI")
             arxiv_id = external_ids.get("ArXiv")
-            publication_types = {
+            publication_types = [
                 str(value).casefold() for value in item.get("publicationTypes") or []
-            }
+            ]
             venue_type = (
                 "conference"
                 if any("conference" in value for value in publication_types)
@@ -596,6 +649,30 @@ def build_literature_tools(
                     "source": "Semantic Scholar",
                     "venue": item.get("venue") or "",
                     "venue_type": venue_type,
+                    "publication_type": publication_types[0] if publication_types else "",
+                    "fields_of_study": [
+                        str(value)
+                        for value in item.get("fieldsOfStudy") or []
+                        if value
+                    ],
+                    "citation_counts": (
+                        {
+                            "Semantic Scholar": max(
+                                0, int(item.get("citationCount") or 0)
+                            )
+                        }
+                        if item.get("citationCount") is not None
+                        else {}
+                    ),
+                    "influential_citation_counts": (
+                        {
+                            "Semantic Scholar": max(
+                                0, int(item.get("influentialCitationCount") or 0)
+                            )
+                        }
+                        if item.get("influentialCitationCount") is not None
+                        else {}
+                    ),
                 }
             )
         return json.dumps(
@@ -685,6 +762,12 @@ def build_literature_tools(
                     "source": "arXiv",
                     "venue": "arXiv",
                     "venue_type": None,
+                    "publication_type": "preprint",
+                    "fields_of_study": [
+                        category.attrib.get("term", "")
+                        for category in entry.findall("atom:category", namespace)
+                        if category.attrib.get("term")
+                    ],
                 }
             )
         return json.dumps(
@@ -744,6 +827,8 @@ def build_literature_tools(
             "venue_rating_source_url",
             "venue_rating_source_label",
             "venue_match_confidence",
+            "publication_type",
+            "fwci",
         ):
             if not merged.get(field) and candidate.get(field):
                 merged[field] = candidate[field]
@@ -756,6 +841,24 @@ def build_literature_tools(
             if author and author not in authors:
                 authors.append(author)
         merged["authors"] = authors
+        for field in (
+            "citation_counts",
+            "citation_percentiles",
+            "influential_citation_counts",
+            "recent_citation_velocities",
+            "momentum_percentiles",
+        ):
+            combined = dict(merged.get(field) or {})
+            combined.update(candidate.get(field) or {})
+            merged[field] = combined
+        fields_of_study = list(merged.get("fields_of_study") or [])
+        for value in candidate.get("fields_of_study") or []:
+            if value and value not in fields_of_study:
+                fields_of_study.append(value)
+        merged["fields_of_study"] = fields_of_study
+        merged["is_retracted"] = bool(
+            merged.get("is_retracted") or candidate.get("is_retracted")
+        )
         merged["sources"] = sources
         merged["matched_queries"] = matched_queries
         merged["source"] = " + ".join(sources)
@@ -952,19 +1055,9 @@ def build_literature_tools(
                         source=source,
                         query=query,
                     )
-        candidates = list(merged_by_key.values())
-        for candidate in candidates:
-            candidate["relevance_score"] = candidate_relevance(
-                candidate,
-                normalized_queries,
-            )
-        candidates.sort(
-            key=lambda item: (
-                float(item.get("relevance_score") or 0),
-                len(item.get("sources") or []),
-                int(item.get("year") or 0),
-            ),
-            reverse=True,
+        candidates = rank_candidates(
+            list(merged_by_key.values()),
+            normalized_queries,
         )
         return json.dumps(
             {

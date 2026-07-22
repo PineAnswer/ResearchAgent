@@ -65,6 +65,24 @@ class PaperCandidate(BaseModel):
     sources: list[str] = Field(default_factory=list)
     matched_queries: list[str] = Field(default_factory=list)
     relevance_score: float | None = None
+    fields_of_study: list[str] = Field(default_factory=list)
+    publication_type: str = ""
+    citation_counts: dict[str, int] = Field(default_factory=dict)
+    citation_percentiles: dict[str, float] = Field(default_factory=dict)
+    fwci: float | None = None
+    influential_citation_counts: dict[str, int] = Field(default_factory=dict)
+    influential_citation_percentile: float | None = None
+    recent_citation_velocities: dict[str, float] = Field(default_factory=dict)
+    momentum_percentiles: dict[str, float] = Field(default_factory=dict)
+    impact_score: float | None = None
+    impact_confidence: float | None = None
+    authority_score: float | None = None
+    diversity_score: float | None = None
+    composite_score: float | None = None
+    is_retracted: bool = False
+    impact_explanation: list[str] = Field(default_factory=list)
+    authority_explanation: list[str] = Field(default_factory=list)
+    ranking_explanation: list[str] = Field(default_factory=list)
     library_id: str = ""
     venue: str = ""
     venue_type: Literal["journal", "conference"] | None = None
@@ -125,6 +143,7 @@ class SearchFeedback(BaseModel):
 
 class CandidateSetSnapshot(BaseModel):
     candidates: list[PaperCandidate]
+    selected_paper_ids: list[str] = Field(default_factory=list)
     filtered_candidates: list[PaperCandidate] = Field(default_factory=list)
     filtered_candidate_reasons: dict[str, list[str]] = Field(default_factory=dict)
     blocked_reason: str = ""
@@ -360,6 +379,21 @@ class LibraryNote(BaseModel):
     library_id: str
     content: str
     project_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ResearchNote(BaseModel):
+    """Persistent note, review annotation, or saved Q&A for one research project."""
+
+    note_id: str
+    project_id: str
+    kind: Literal["note", "annotation", "qa"] = "note"
+    selected_text: str = ""
+    content: str = ""
+    question: str = ""
+    answer: str = ""
+    citations: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

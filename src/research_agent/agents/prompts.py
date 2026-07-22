@@ -15,7 +15,7 @@ PI_PROMPT = """
 10. 委派 paper-reader 时传入 SearchReport 已有的完整元数据，包括真实paper_id、library_id、abstract、doi和url。
 11. library_id非空时paper-reader只调用一次retrieve_library_passages复用本地索引，参数必须是query、library_ids和limit；即使返回空结果也直接使用abstract生成有限PaperCard，禁止再调用fetch_paper_text或第二次检索。library_id为空时才调用fetch_paper_text尝试OpenAlex/arXiv开放全文。禁止Supervisor猜测PDF路径。
 12. 不要在 task description 中自行定义 PaperCard JSON；paper-reader 已由 response_format 绑定官方结构。
-13. 委派 literature-scout 时提供研究主题、研究问题和前端设置的检索审核限制（精读篇数下限/上限、系统检索-筛选迭代轮数上限）；SearchReport 的 candidates 字段由系统自动重建，literature-scout 只输出 candidate_ids、筛选决策和覆盖分析。candidate_ids 必须使用搜索工具返回的真实 paper_id 或 DOI，禁止使用 P001/P002 等临时编号。
+13. 委派 literature-scout 时提供研究主题、研究问题、系统单次精读容量和检索-筛选迭代轮数上限；精读容量属于后端资源约束，用户只负责判断论文相关性。SearchReport 的 candidates 字段由系统自动重建，literature-scout 只输出 candidate_ids、筛选决策和覆盖分析。candidate_ids 必须使用搜索工具返回的真实 paper_id 或 DOI，禁止使用 P001/P002 等临时编号。
 14. literature-scout 返回可恢复错误或已有部分结果时，禁止 Supervisor 自行检索；Supervisor没有文献检索权限。
 15. ScreeningDecision 的三个参数固定为 included_paper_ids、excluded_paper_ids、reasons；三者都是字符串列表。
 16. 委派 research-synthesizer 时必须复制 create_research_project 返回的原始 project_id，并提供研究主题与研究问题；不得复制论文列表、猜测项目ID或自行定义 SynthesisReport JSON。
@@ -80,7 +80,11 @@ coverage gap 时，才再调用一次互补查询组合：
 - exclude: 明确无关（如领域不匹配、非研究论文、主题偏差）
 - uncertain: 标题和摘要不足以判断，需要人工或全文确认
 
-每条筛除决策必须写一句简短理由（中文即可），填入 screening_reasons。
+每篇进入候选审核列表的论文都必须在 screening_reasons 中写一句简短说明（中文即可）：
+- include：说明它为何与研究问题直接相关；也可以概括文章核心内容
+- uncertain：说明当前缺少什么信息、为何需要人工或全文确认
+- exclude：说明领域、文献类型或主题等具体排除原因
+说明必须基于搜索工具返回的标题和摘要，不得猜测摘要未提供的实验结果。
 
 ## 检索迭代日志
 
@@ -99,7 +103,7 @@ coverage gap 时，才再调用一次互补查询组合：
 - query: 总体检索主题字符串
 - candidate_ids: 所有搜索命中的真实 paper_id 或 DOI 列表（include + uncertain）。禁止使用 P001、P002 这类临时编号。
 - screening_decisions: paper_id → "include" / "exclude" / "uncertain"
-- screening_reasons: paper_id → 排除或置为 uncertain 的一句话理由
+- screening_reasons: candidate_ids 中每个 paper_id → 入选理由或文章核心内容（一句话）；uncertain / exclude 写明判断依据
 - coverage_gaps: 覆盖盲区分析，字符串列表
 - search_iteration_log: 每轮检索记录，字典列表
 - selection_notes: 筛选依据、数据不足和失败情况的总体说明，字符串列表

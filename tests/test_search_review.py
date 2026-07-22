@@ -51,7 +51,12 @@ def fake_verify_doi(doi: str) -> str:
     )
 
 
-def _review_service(tmp_path, *, max_rounds: int = 3):
+def _review_service(
+    tmp_path,
+    *,
+    max_rounds: int = 3,
+    max_papers: int = 8,
+):
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     review = SearchReviewService(
         service,
@@ -61,6 +66,7 @@ def _review_service(tmp_path, *, max_rounds: int = 3):
         },
         max_rounds=max_rounds,
         max_queries_per_round=2,
+        max_papers=max_papers,
     )
     project = service.create_project("topic", "question")
     service.save_artifact_and_transition(
@@ -107,10 +113,47 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     assert result["project"]["stage"] == "SEARCH_REVIEW_PENDING"
     assert result["candidate_set"]["candidates"][0]["paper_id"] == "P1"
     assert result["candidate_set"]["query_rounds"] == [["initial query"]]
+    assert (
+        result["candidate_set"]["candidates"][0]["agent_reason"]
+        == "Matches the research question."
+    )
     assert result["candidate_set"]["agent_included_paper_ids"] == ["P1"]
     assert result["candidate_set"]["agent_approved"] is True
     assert service.get_snapshot(project_id)["artifacts"][-1]["kind"] == (
         "CandidateSetSnapshot"
+    )
+
+
+def test_candidate_without_agent_reason_uses_abstract_core_sentence(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "fallback.db"))
+    review = SearchReviewService(service, {}, max_papers=8)
+    project = service.create_project("topic", "question")
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["initial query"],
+            "candidates": [
+                {
+                    "paper_id": "P1",
+                    "title": "Relevant candidate",
+                    "abstract": "This paper introduces a grounded retrieval method. It is evaluated later.",
+                    "source": "OpenAlex",
+                }
+            ],
+            "screening_decisions": {"P1": "include"},
+            "screening_reasons": {},
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+
+    review.begin_review(project.project_id)
+    candidate = review.get_review(project.project_id)["candidate_set"]["candidates"][0]
+
+    assert candidate["agent_reason"] == (
+        "文章核心内容：This paper introduces a grounded retrieval method."
     )
 
 
@@ -399,14 +442,101 @@ def test_openalex_url_candidates_are_screened_as_bare_ids(tmp_path) -> None:
     assert result["screening"]["payload"]["included_paper_ids"] == ["W4409797280"]
 
 
-def test_feedback_controls_candidate_count_bounds(tmp_path) -> None:
+def test_feedback_cannot_override_system_deep_read_capacity(tmp_path) -> None:
     _service, review, project_id = _review_service(tmp_path)
 
-    with pytest.raises(WorkflowPrerequisiteError, match="between 2 and 3"):
+    result = review.apply_feedback(
+        project_id,
+        SearchFeedback(action="accept", min_papers=2, max_papers=3),
+    )
+
+    assert result["candidate_set"]["min_papers"] == 1
+    assert result["candidate_set"]["max_papers"] == 8
+    assert result["screening"]["payload"]["included_paper_ids"] == ["P1"]
+
+
+def test_system_deep_read_capacity_rejects_oversized_selection(tmp_path) -> None:
+    _service, review, project_id = _review_service(tmp_path, max_papers=1)
+
+    with pytest.raises(WorkflowPrerequisiteError, match="System deep-reading capacity is 1"):
         review.apply_feedback(
             project_id,
-            SearchFeedback(action="accept", min_papers=2, max_papers=3),
+            SearchFeedback(
+                action="accept",
+                added_papers=[{"doi": "10.1000/extra"}],
+            ),
         )
+
+
+def test_review_paginates_candidates_and_persists_cross_page_selection(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    review = SearchReviewService(
+        service,
+        {
+            "search_openalex": fake_search_openalex,
+            "verify_doi": fake_verify_doi,
+        },
+        max_papers=50,
+    )
+    project = service.create_project("topic", "question")
+    candidates = [
+        {
+            "paper_id": f"P{index:02d}",
+            "title": f"Candidate {index:02d}",
+            "authors": [f"Author {index}"],
+            "abstract": "x" * 900,
+            "source": "OpenAlex",
+        }
+        for index in range(1, 46)
+    ]
+    service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": candidates,
+            "screening_decisions": {"P25": "include"},
+            "screening_reasons": {"P25": "Most relevant."},
+        },
+        ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    review.begin_review(project.project_id)
+
+    second_page = review.get_review(project.project_id, page=2, page_size=10)
+    assert second_page["candidate_page"] == {
+        "page": 2,
+        "page_size": 10,
+        "total": 45,
+        "total_pages": 5,
+    }
+    assert len(second_page["candidate_set"]["candidates"]) == 10
+    assert all(
+        len(candidate["abstract"]) == 700
+        and candidate["abstract_truncated"] is True
+        for candidate in second_page["candidate_set"]["candidates"]
+    )
+
+    updated = review.update_selection(project.project_id, ["P25"], selected=False)
+    assert updated["selected_count"] == 0
+    review.update_selection(project.project_id, ["P31"], selected=True)
+
+    third_page = review.get_review(project.project_id, page=4, page_size=10)
+    selected = {
+        candidate["paper_id"]: candidate["selected"]
+        for candidate in third_page["candidate_set"]["candidates"]
+    }
+    assert selected["P31"] is True
+    assert third_page["selection"]["selected_count"] == 1
+
+
+def test_accept_uses_persisted_selection_across_pages(tmp_path) -> None:
+    service, review, project_id = _review_service(tmp_path)
+    review.update_selection(project_id, ["P1"], selected=False)
+
+    with pytest.raises(WorkflowPrerequisiteError, match="empty candidate set"):
+        review.apply_feedback(project_id, SearchFeedback(action="accept"))
 
 
 def test_stop_can_be_undone_after_review(tmp_path) -> None:

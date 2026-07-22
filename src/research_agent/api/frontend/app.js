@@ -167,6 +167,12 @@ const state = {
   candidates: [],
   manualCandidates: new Map(),
   selectedIds: new Set(),
+  reviewPage: 1,
+  reviewPageSize: 20,
+  reviewQuery: "",
+  reviewFilteredPage: 1,
+  reviewSelectionDirty: false,
+  reviewSearchTimer: null,
   busy: false,
   agentAvailable: false,
   toastTimer: null,
@@ -197,6 +203,13 @@ const state = {
   paperCurrentPage: null,
   paperProgressTimer: null,
   paperLastAnswer: null,
+  researchSelection: "",
+  researchNotes: [],
+  researchNotesProjectId: null,
+  researchLastAnswer: null,
+  researchChatHistory: [],
+  researchWorkspaceTab: "ask",
+  researchWorkspaceWidth: 430,
   paperRenderSession: 0,
   runStartedAt: null,
   runClockTimer: null,
@@ -210,6 +223,8 @@ const state = {
   runPhase: "thinking",
   runSessionId: 0,
   projectLoadSession: 0,
+  projectLoadController: null,
+  completedProjectCache: new Map(),
   openConversationMenuId: null,
   projectListRenderSignature: "",
 };
@@ -307,8 +322,6 @@ const elements = {
   refreshProjects: byId("refreshProjects"),
   projectLookupForm: byId("projectLookupForm"),
   projectIdInput: byId("projectIdInput"),
-  initialMinPapers: byId("initialMinPapers"),
-  initialMaxPapers: byId("initialMaxPapers"),
   initialMaxSearchRounds: byId("initialMaxSearchRounds"),
   initialYearFrom: byId("initialYearFrom"),
   initialYearTo: byId("initialYearTo"),
@@ -349,15 +362,22 @@ const elements = {
   reviewNotice: byId("reviewNotice"),
   candidateFilter: byId("candidateFilter"),
   candidateGrid: byId("candidateGrid"),
+  candidatePagination: byId("candidatePagination"),
+  candidatePrevPage: byId("candidatePrevPage"),
+  candidateNextPage: byId("candidateNextPage"),
+  candidatePageStatus: byId("candidatePageStatus"),
+  candidatePageSize: byId("candidatePageSize"),
   filteredCandidatesPanel: byId("filteredCandidatesPanel"),
   filteredCandidateCount: byId("filteredCandidateCount"),
   filteredCandidateGrid: byId("filteredCandidateGrid"),
+  filteredCandidatePagination: byId("filteredCandidatePagination"),
+  filteredCandidatePrevPage: byId("filteredCandidatePrevPage"),
+  filteredCandidateNextPage: byId("filteredCandidateNextPage"),
+  filteredCandidatePageStatus: byId("filteredCandidatePageStatus"),
   selectAll: byId("selectAll"),
   clearAll: byId("clearAll"),
-  minPapers: byId("minPapers"),
-  maxPapers: byId("maxPapers"),
+  paperCapacity: byId("paperCapacity"),
   manualDois: byId("manualDois"),
-  feedbackComment: byId("feedbackComment"),
   refineReview: byId("refineReview"),
   undoReview: byId("undoReview"),
   acceptReview: byId("acceptReview"),
@@ -1109,12 +1129,15 @@ function libraryEntryForCandidate(candidate) {
     .find(Boolean) || null;
 }
 
-async function loadProjectLibrary(projectId) {
+async function loadProjectLibrary(projectId, signal = undefined) {
   if (!projectId) {
     indexProjectLibrary([]);
     return [];
   }
-  const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/library`);
+  const payload = await api(
+    `/api/projects/${encodeURIComponent(projectId)}/library`,
+    { signal },
+  );
   const items = payload.data || [];
   indexProjectLibrary(items);
   return items;
@@ -3285,6 +3308,7 @@ async function deleteSelectedProjectRecords() {
     try {
       await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
       deletedIds.push(projectId);
+      state.completedProjectCache.delete(projectId);
     } catch {
       failedIds.push(projectId);
     }
@@ -3494,6 +3518,8 @@ async function loadProjects(options = {}) {
 
 function clearProjectView() {
   state.projectLoadSession += 1;
+  state.projectLoadController?.abort();
+  state.projectLoadController = null;
   stopRunTimers();
   state.projectId = null;
   state.project = null;
@@ -3504,6 +3530,11 @@ function clearProjectView() {
   state.review = null;
   state.candidates = [];
   state.selectedIds = new Set();
+  state.researchSelection = "";
+  state.researchNotes = [];
+  state.researchNotesProjectId = null;
+  state.researchLastAnswer = null;
+  state.researchChatHistory = [];
   closeInspector({ restoreFocus: false });
   closeMenus();
   showWorkspace("empty");
@@ -3525,6 +3556,7 @@ async function deleteCurrentProject() {
   setBusy(true);
   try {
     await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    state.completedProjectCache.delete(projectId);
     state.projects = state.projects.filter((project) => project.project_id !== projectId);
     clearProjectView();
     await loadProjects();
@@ -3665,6 +3697,13 @@ function renderStageBadge(project) {
 }
 
 function renderProjectHeader(project, events = state.snapshot?.events || []) {
+  if (state.projectId && state.projectId !== project.project_id) {
+    state.researchSelection = "";
+    state.researchLastAnswer = null;
+    state.researchChatHistory = [];
+    state.researchNotes = [];
+    state.researchNotesProjectId = null;
+  }
   state.project = project;
   state.projectId = project.project_id;
   showWorkspace("project");
@@ -3706,13 +3745,15 @@ function renderSearchReportHTML(payload) {
     ]));
   }
   const candidates = payload.candidates || [];
-  parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'候选论文'), h('span',{cls:'aw-badge'},`${candidates.length} 篇`)]));
+  const candidateCount = payload.candidate_count ?? candidates.length;
+  parts.push(h('div',{cls:'aw-row'}, [h('span',{cls:'aw-label'},'候选论文'), h('span',{cls:'aw-badge'},`${candidateCount} 篇`)]));
   const decisions = payload.screening_decisions || {};
   const dk = Object.keys(decisions);
-  if (dk.length) {
-    const inc = dk.filter(k => decisions[k]==='include').length;
-    const exc = dk.filter(k => decisions[k]==='exclude').length;
-    const unc = dk.filter(k => decisions[k]==='uncertain').length;
+  const summary = payload.screening_summary || {};
+  if (dk.length || Object.values(summary).some(Boolean)) {
+    const inc = summary.include ?? dk.filter(k => decisions[k]==='include').length;
+    const exc = summary.exclude ?? dk.filter(k => decisions[k]==='exclude').length;
+    const unc = summary.uncertain ?? dk.filter(k => decisions[k]==='uncertain').length;
     parts.push(h('div',{cls:'aw-row'}, [
       h('span',{cls:'aw-label'},'初筛结果'),
       h('div',{cls:'aw-inline'}, [
@@ -3901,10 +3942,11 @@ function renderScreeningDecisionHTML(payload) {
 function renderCandidateSetSnapshotHTML(payload) {
   const parts = [];
   const candidates = payload.candidates || [];
+  const candidateCount = payload.candidate_count ?? candidates.length;
   parts.push(h('div',{cls:'aw-row'}, [
     h('span',{cls:'aw-label'},'候选集'),
     h('div',{cls:'aw-inline'}, [
-      h('span',{cls:'aw-badge'},`${candidates.length} 篇候选`),
+      h('span',{cls:'aw-badge'},`${candidateCount} 篇候选`),
       h('span',{cls:'aw-badge'},`${(payload.excluded_paper_ids||[]).length} 篇已排除`),
     ])
   ]));
@@ -4481,6 +4523,381 @@ function metricCard(label, value, hint = "") {
   ]);
 }
 
+function renderResearchCitations(citations = []) {
+  if (!citations.length) return null;
+  return h("div", { cls: "research-answer-sources" }, [
+    h("h5", {}, `引用来源（${citations.length}）`),
+    ...citations.map((citation) => h("article", {}, [
+      h("strong", {}, `${citation.citation || ""} ${citation.title || "研究材料"}${citation.page ? ` · 第 ${citation.page} 页` : ""}`),
+      h("blockquote", {}, citation.quote || ""),
+    ])),
+  ]);
+}
+
+function researchNoteLabel(kind) {
+  return { note: "笔记", annotation: "批注", qa: "问答" }[kind] || "记录";
+}
+
+function renderResearchNotesList(container) {
+  container.replaceChildren();
+  if (!state.researchNotes.length) {
+    container.append(h("p", { cls: "muted small" }, "还没有笔记或批注。"));
+    return;
+  }
+  state.researchNotes.forEach((note) => {
+    const body = note.kind === "qa"
+      ? [
+          h("p", { cls: "research-note-question" }, note.question || ""),
+          renderMarkdown(note.answer || "", "aw-markdown"),
+        ]
+      : [h("p", {}, note.content || "")];
+    container.append(h("article", { cls: `research-note research-note-${note.kind}` }, [
+      h("header", {}, [
+        h("span", {}, researchNoteLabel(note.kind)),
+        h("button", {
+          cls: "icon-button",
+          type: "button",
+          title: "删除记录",
+          onClick: () => deleteResearchNote(note.note_id),
+        }, iconNode("trash-2")),
+      ]),
+      note.selected_text ? h("blockquote", {}, note.selected_text) : null,
+      ...body,
+      h("small", { cls: "muted" }, formatDate(note.updated_at)),
+    ]));
+  });
+  refreshIcons();
+}
+
+async function loadResearchNotes(projectId = state.projectId) {
+  if (!projectId) return;
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/notes`);
+    if (projectId !== state.projectId) return;
+    state.researchNotes = payload.data || [];
+    state.researchNotesProjectId = projectId;
+    const list = elements.primaryOutcome.querySelector(".research-notes-list");
+    if (list) renderResearchNotesList(list);
+  } catch (error) {
+    notify(`研究笔记载入失败：${error.message}`, true);
+  }
+}
+
+async function deleteResearchNote(noteId) {
+  try {
+    await api(`/api/projects/${encodeURIComponent(state.projectId)}/notes/${encodeURIComponent(noteId)}`, {
+      method: "DELETE",
+    });
+    state.researchNotes = state.researchNotes.filter((note) => note.note_id !== noteId);
+    const list = elements.primaryOutcome.querySelector(".research-notes-list");
+    if (list) renderResearchNotesList(list);
+    notify("记录已删除");
+  } catch (error) {
+    notify(`删除失败：${error.message}`, true);
+  }
+}
+
+async function saveResearchRecord(record, button = null) {
+  try {
+    if (button) button.disabled = true;
+    const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}/notes`, {
+      method: "POST",
+      body: JSON.stringify(record),
+    });
+    state.researchNotes = [payload.data, ...state.researchNotes];
+    const list = elements.primaryOutcome.querySelector(".research-notes-list");
+    if (list) renderResearchNotesList(list);
+    notify(record.kind === "qa" ? "问答已保存" : record.kind === "annotation" ? "批注已保存" : "笔记已保存");
+    return true;
+  } catch (error) {
+    notify(`保存失败：${error.message}`, true);
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function toggleResearchFavorite(button) {
+  const conversation = state.conversation || state.snapshot?.conversation;
+  if (!conversation?.conversation_id) {
+    notify("该研究缺少可收藏的会话记录", true);
+    return;
+  }
+  try {
+    button.disabled = true;
+    const payload = await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: !conversation.pinned }),
+    });
+    const updated = payload.data;
+    state.conversation = updated;
+    if (state.snapshot) state.snapshot.conversation = updated;
+    button.classList.toggle("is-active", updated.pinned);
+    button.replaceChildren(iconNode(updated.pinned ? "bookmark-check" : "bookmark"), document.createTextNode(updated.pinned ? " 已收藏" : " 收藏研究"));
+    await loadProjects();
+    refreshIcons();
+    notify(updated.pinned ? "研究已收藏并置顶" : "已取消收藏");
+  } catch (error) {
+    notify(`收藏操作失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderResearchWorkspace(narrative, reviewElement) {
+  const conversation = state.conversation || state.snapshot?.conversation;
+  const panel = h("aside", { cls: "research-workspace", "aria-label": "综述问答与笔记" });
+  const favorite = h("button", {
+    cls: `research-favorite${conversation?.pinned ? " is-active" : ""}`,
+    type: "button",
+    onClick: (event) => toggleResearchFavorite(event.currentTarget),
+  }, [iconNode(conversation?.pinned ? "bookmark-check" : "bookmark"), ` ${conversation?.pinned ? "已收藏" : "收藏研究"}`]);
+  const askTab = h("button", { type: "button", cls: state.researchWorkspaceTab === "ask" ? "is-active" : "" }, "聊天");
+  const notesTab = h("button", { type: "button", cls: state.researchWorkspaceTab === "notes" ? "is-active" : "" }, "批注 / 笔记");
+  const askPane = h("section", { cls: "research-workspace-pane" });
+  const notesPane = h("section", { cls: "research-workspace-pane" });
+  const switchTab = (tab) => {
+    state.researchWorkspaceTab = tab;
+    askTab.classList.toggle("is-active", tab === "ask");
+    notesTab.classList.toggle("is-active", tab === "notes");
+    askPane.hidden = tab !== "ask";
+    notesPane.hidden = tab !== "notes";
+  };
+  askTab.addEventListener("click", () => switchTab("ask"));
+  notesTab.addEventListener("click", () => switchTab("notes"));
+
+  let noteSelection = null;
+  let noteSave = null;
+  const selectionContext = h("div", { cls: "research-selection-context", "aria-live": "polite" });
+  const renderSelectionContext = () => {
+    selectionContext.replaceChildren();
+    selectionContext.classList.toggle("has-selection", Boolean(state.researchSelection));
+    if (!state.researchSelection) {
+      selectionContext.append(
+        h("div", { cls: "research-selection-empty" }, [
+          iconNode("mouse-pointer-2"),
+          h("div", {}, [
+            h("strong", {}, "引用综述原文"),
+            h("small", {}, "在左侧划选文字，聊天时会自动带入"),
+          ]),
+        ]),
+      );
+      refreshIcons();
+      return;
+    }
+    const clearSelection = h("button", {
+      cls: "icon-button research-selection-clear",
+      type: "button",
+      title: "移除引用上下文",
+      "aria-label": "移除引用上下文",
+      onClick: () => {
+        state.researchSelection = "";
+        window.getSelection()?.removeAllRanges();
+        if (noteSelection) noteSelection.textContent = "未选择综述原文，将保存为普通笔记。";
+        if (noteSave) noteSave.textContent = "保存笔记";
+        renderSelectionContext();
+      },
+    }, iconNode("x"));
+    selectionContext.append(
+      h("div", { cls: "research-selection-card" }, [
+        h("div", { cls: "research-selection-card-head" }, [
+          h("span", { cls: "research-selection-label" }, [iconNode("quote"), " 已引用选段"]),
+          h("span", { cls: "research-selection-count" }, `${state.researchSelection.length} 字`),
+          clearSelection,
+        ]),
+        h("p", { cls: "research-selection-preview" }, state.researchSelection),
+      ]),
+    );
+    refreshIcons();
+  };
+  renderSelectionContext();
+  const question = h("textarea", { rows: "3", maxlength: "4000", placeholder: state.researchChatHistory.length ? "继续追问…" : "输入问题…", "aria-label": "研究问题" });
+  const submit = h("button", { type: "submit", cls: "primary" }, "发送");
+  const chatThread = h("div", { cls: "research-chat-thread", "aria-live": "polite" });
+  const appendChatBubble = (message, { streaming = false } = {}) => {
+    const body = h("div", { cls: "research-chat-bubble-body" });
+    if (streaming && !message.content) {
+      body.append(h("p", { cls: "research-answer-working" }, [iconNode("loader-circle"), " 正在回答…"]));
+    } else if (message.role === "assistant") {
+      body.append(renderMarkdown(message.content || "", "aw-markdown"));
+    } else {
+      body.textContent = message.content || "";
+    }
+    const bubble = h("article", { cls: `research-chat-bubble is-${message.role}` }, [body]);
+    chatThread.append(bubble);
+    chatThread.scrollTop = chatThread.scrollHeight;
+    return { bubble, body };
+  };
+  state.researchChatHistory.forEach((message) => appendChatBubble(message));
+  const form = h("form", { cls: "research-question-form" }, [question, submit]);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const cleanQuestion = question.value.trim();
+    if (!cleanQuestion) return;
+    const requestHistory = state.researchChatHistory.filter((message) => !message.failed).slice(-40);
+    const userMessage = { role: "user", content: cleanQuestion };
+    const assistantMessage = { role: "assistant", content: "" };
+    state.researchChatHistory.push(userMessage, assistantMessage);
+    appendChatBubble(userMessage);
+    const assistantBubble = appendChatBubble(assistantMessage, { streaming: true });
+    question.value = "";
+    try {
+      submit.disabled = true;
+      refreshIcons();
+      const response = await fetch(`/api/projects/${encodeURIComponent(state.projectId)}/assistant/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: "project",
+          question: cleanQuestion,
+          selected_text: state.researchSelection,
+          history: requestHistory,
+        }),
+      });
+      if (!response.ok) {
+        let payload = null;
+        try { payload = await response.json(); } catch { payload = null; }
+        throw new Error(errorMessage(payload, `请求失败（HTTP ${response.status}）`));
+      }
+      if (!response.body) throw new Error("浏览器无法读取流式回答");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamError = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+          let eventName = "message";
+          const dataLines = [];
+          block.split(/\r?\n/).forEach((line) => {
+            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          });
+          let payload = {};
+          try { payload = JSON.parse(dataLines.join("\n") || "{}"); }
+          catch { payload = { message: dataLines.join("\n") }; }
+          if (eventName === "delta") {
+            assistantMessage.content += payload.text || "";
+            assistantBubble.body.replaceChildren(
+              renderMarkdown(assistantMessage.content, "aw-markdown"),
+            );
+            chatThread.scrollTop = chatThread.scrollHeight;
+          } else if (eventName === "error") {
+            streamError = payload.message || "模型回答失败";
+          }
+        }
+        if (done) break;
+      }
+      if (streamError) throw new Error(streamError);
+      if (!assistantMessage.content.trim()) throw new Error("模型没有返回内容");
+      state.researchChatHistory = state.researchChatHistory.slice(-40);
+      const save = h("button", { type: "button", cls: "secondary research-save-answer" }, "保存这组问答");
+      save.addEventListener("click", () => saveResearchRecord({
+        kind: "qa",
+        selected_text: state.researchSelection,
+        question: cleanQuestion,
+        answer: assistantMessage.content,
+        citations: [],
+      }, save));
+      assistantBubble.bubble.append(save);
+      question.placeholder = "继续追问…";
+    } catch (error) {
+      assistantMessage.content = `回答失败：${error.message}`;
+      assistantMessage.failed = true;
+      assistantBubble.body.replaceChildren(h("p", { cls: "error-text" }, assistantMessage.content));
+    } finally {
+      submit.disabled = false;
+      question.focus();
+    }
+  });
+  askPane.append(selectionContext, chatThread, form);
+
+  noteSelection = h("blockquote", { cls: "research-note-selection" }, state.researchSelection || "未选择综述原文，将保存为普通笔记。" );
+  const noteInput = h("textarea", { rows: "4", maxlength: "20000", placeholder: "记录判断、疑问或后续线索…", "aria-label": "研究笔记" });
+  noteSave = h("button", { type: "button", cls: "primary" }, state.researchSelection ? "保存批注" : "保存笔记");
+  noteSave.addEventListener("click", async () => {
+    const content = noteInput.value.trim();
+    if (!content) return;
+    const annotatedText = state.researchSelection;
+    const saved = await saveResearchRecord({
+      kind: annotatedText ? "annotation" : "note",
+      selected_text: annotatedText,
+      content,
+    }, noteSave);
+    if (saved) noteInput.value = "";
+  });
+  const list = h("div", { cls: "research-notes-list" });
+  renderResearchNotesList(list);
+  notesPane.append(noteSelection, noteInput, noteSave, list);
+  switchTab(state.researchWorkspaceTab);
+
+  reviewElement.addEventListener("mouseup", () => {
+    const selected = window.getSelection();
+    const text = selected?.toString().trim().slice(0, 12000) || "";
+    if (!text || !selected?.anchorNode || !reviewElement.contains(selected.anchorNode)) return;
+    state.researchSelection = text;
+    renderSelectionContext();
+    noteSelection.textContent = text;
+    noteSave.textContent = "保存批注";
+  });
+  panel.append(
+    h("header", {}, [h("div", {}, [h("strong", {}, "研究工作台"), h("small", {}, "多轮聊天、批注与笔记")]), favorite]),
+    h("nav", { cls: "research-workspace-tabs" }, [askTab, notesTab]),
+    askPane,
+    notesPane,
+  );
+  return panel;
+}
+
+function createResearchWorkspaceResizer(layout) {
+  const handle = h("div", {
+    cls: "research-workspace-resizer",
+    role: "separator",
+    tabindex: "0",
+    "aria-label": "调整综述与研究工作台宽度",
+    "aria-orientation": "vertical",
+    "aria-valuemin": "380",
+    "aria-valuenow": String(state.researchWorkspaceWidth),
+  }, h("span", { "aria-hidden": "true" }));
+  const applyWidth = (width) => {
+    const rect = elements.projectView.getBoundingClientRect();
+    const maximum = Math.max(380, rect.width - 372);
+    const next = Math.round(Math.min(maximum, Math.max(380, width)));
+    state.researchWorkspaceWidth = next;
+    layout.style.setProperty("--research-workspace-width", `${next}px`);
+    elements.projectView.style.setProperty("--research-workspace-width", `${next}px`);
+    handle.setAttribute("aria-valuenow", String(next));
+  };
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.classList.add("is-dragging");
+    handle.setPointerCapture?.(event.pointerId);
+    const onMove = (moveEvent) => {
+      applyWidth(window.innerWidth - 40 - moveEvent.clientX - 16);
+    };
+    const onUp = () => {
+      handle.classList.remove("is-dragging");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    applyWidth(state.researchWorkspaceWidth + (event.key === 'ArrowLeft' ? 24 : -24));
+  });
+  handle.addEventListener("dblclick", () => applyWidth(430));
+  layout.style.setProperty("--research-workspace-width", `${state.researchWorkspaceWidth}px`);
+  elements.projectView.style.setProperty("--research-workspace-width", `${state.researchWorkspaceWidth}px`);
+  return handle;
+}
+
 function renderOutcome(snapshot) {
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
   const review = latestArtifact(snapshot, "ReviewResult")?.payload;
@@ -4492,6 +4909,7 @@ function renderOutcome(snapshot) {
   const savedDrafts = currentSectionDrafts(snapshot);
   elements.primaryOutcome.replaceChildren();
   elements.projectSummary.classList.remove("has-outcome");
+  elements.projectView.classList.toggle("has-research-workspace", Boolean(narrative));
 
   if (narrative) {
     elements.primaryOutcome.hidden = false;
@@ -4512,7 +4930,19 @@ function renderOutcome(snapshot) {
         ? h("p", { cls: "outcome-abstract" }, narrative.abstract)
         : h("p", { cls: "outcome-abstract muted" }, "综述已生成，摘要暂未填写。"),
     );
-    elements.primaryOutcome.append(renderNarrativeReviewHTML(narrative));
+    const reviewElement = renderNarrativeReviewHTML(narrative);
+    const researchLayout = h("div", { cls: "research-review-layout" });
+    const workspace = renderResearchWorkspace(narrative, reviewElement);
+    researchLayout.append(
+      reviewElement,
+      createResearchWorkspaceResizer(researchLayout),
+      workspace,
+    );
+    elements.primaryOutcome.append(researchLayout);
+    if (state.researchNotesProjectId !== state.projectId) {
+      state.researchNotes = [];
+      loadResearchNotes(state.projectId);
+    }
     return;
   }
 
@@ -4648,7 +5078,7 @@ function renderProjectSummary(snapshot) {
     "COMPLETED",
   ].includes(project.stage);
   const metrics = [
-    ["候选论文", latestSearch?.candidates?.length ?? 0, "首次检索去重结果"],
+    ["候选论文", latestSearch?.candidate_count ?? latestSearch?.candidates?.length ?? 0, "首次检索去重结果"],
     ["入选精读", latestScreening?.included_paper_ids?.length || 0, "已确认的论文"],
     ["证据摘录", countFindings(snapshot), "可追踪的研究证据"],
     ["综述章节", narrative?.sections?.length || 0, "最终正文"],
@@ -4942,6 +5372,8 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
 async function loadProject(projectId, quiet = false, force = false) {
   if (!projectId) return;
   const loadSession = ++state.projectLoadSession;
+  state.projectLoadController?.abort();
+  state.projectLoadController = null;
   if (projectId !== state.projectId) {
     stopRunTimers();
     state.runSessionId += 1;
@@ -4950,13 +5382,32 @@ async function loadProject(projectId, quiet = false, force = false) {
     state.activeRunId = null;
     setBusy(false);
   }
+  const cachedSnapshot = !force ? state.completedProjectCache.get(projectId) : null;
+  if (cachedSnapshot) {
+    indexProjectLibrary(cachedSnapshot.project_library || []);
+    applyProjectSnapshot(cachedSnapshot);
+    elements.projectIdInput.value = projectId;
+    return;
+  }
+  const loadController = new AbortController();
+  state.projectLoadController = loadController;
   try {
-    const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
+    const payload = await api(
+      `/api/projects/${encodeURIComponent(projectId)}`,
+      { signal: loadController.signal },
+    );
     if (loadSession !== state.projectLoadSession) return;
     const snapshot = payload.data;
-    await loadProjectLibrary(projectId);
+    if (Array.isArray(snapshot.project_library)) {
+      indexProjectLibrary(snapshot.project_library);
+    } else {
+      await loadProjectLibrary(projectId, loadController.signal);
+    }
     if (loadSession !== state.projectLoadSession) return;
     applyProjectSnapshot(snapshot);
+    if (snapshot.project?.stage === "COMPLETED") {
+      state.completedProjectCache.set(projectId, snapshot);
+    }
     const hasCandidateSnapshot = (snapshot.artifacts || []).some(
       (artifact) => artifact.kind === "CandidateSetSnapshot",
     );
@@ -4966,6 +5417,7 @@ async function loadProject(projectId, quiet = false, force = false) {
     ) {
       const reviewPayload = await api(
         `/api/projects/${encodeURIComponent(projectId)}/search-review`,
+        { signal: loadController.signal },
       );
       if (loadSession !== state.projectLoadSession) return;
       if (
@@ -4982,26 +5434,13 @@ async function loadProject(projectId, quiet = false, force = false) {
     if (!quiet) notify("项目状态已载入");
   } catch (error) {
     if (loadSession !== state.projectLoadSession) return;
+    if (error.name === "AbortError") return;
     notify(`无法打开项目：${error.message}`, true);
+  } finally {
+    if (state.projectLoadController === loadController) {
+      state.projectLoadController = null;
+    }
   }
-}
-
-function candidateMatches(candidate, query) {
-  if (!query) return true;
-  const haystack = [
-    candidate.title,
-    candidate.doi,
-    candidate.paper_id,
-    candidate.venue,
-    candidate.venue_acronym,
-    candidate.ccf_rank,
-    candidate.sci_quartile,
-    ...(candidate.authors || []),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLocaleLowerCase();
-  return haystack.includes(query.toLocaleLowerCase());
 }
 
 async function saveCandidateToLibrary(candidate) {
@@ -5026,23 +5465,22 @@ async function saveCandidateToLibrary(candidate) {
 }
 
 function renderCandidateCards() {
-  const filter = elements.candidateFilter.value.trim();
   elements.candidateGrid.replaceChildren();
-  const visible = state.candidates.filter((candidate) => candidateMatches(candidate, filter));
+  const visible = state.candidates;
 
   if (!visible.length) {
     const empty = document.createElement("div");
     empty.className = "empty-list";
-    empty.textContent = filter ? "没有匹配的候选论文" : "当前候选集为空";
+    empty.textContent = state.reviewQuery ? "没有匹配的候选论文" : "当前候选集为空";
     elements.candidateGrid.append(empty);
   }
 
   visible.forEach((candidate) => {
     const id = candidateId(candidate);
     const snapshot = state.review?.candidate_set;
-    const agentDecision = agentDecisionFor(snapshot, id);
-    const agentReason = snapshot?.agent_screening_reasons?.[id];
-    const selected = state.selectedIds.has(id);
+    const agentDecision = candidate.agent_decision || agentDecisionFor(snapshot, id);
+    const agentReason = candidate.agent_reason || snapshot?.agent_screening_reasons?.[id];
+    const selected = candidate.selected ?? state.selectedIds.has(id);
     const card = document.createElement("article");
     card.className = "candidate-card";
     card.classList.toggle("is-excluded", !selected);
@@ -5054,11 +5492,33 @@ function renderCandidateCards() {
     checkbox.className = "candidate-toggle";
     checkbox.checked = selected;
     checkbox.setAttribute("aria-label", `保留论文：${candidate.title || "未命名论文"}`);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.selectedIds.add(id);
+    checkbox.addEventListener("change", async () => {
+      const nextSelected = checkbox.checked;
+      checkbox.disabled = true;
+      candidate.selected = nextSelected;
+      card.classList.toggle("is-excluded", !nextSelected);
+      if (nextSelected) state.selectedIds.add(id);
       else state.selectedIds.delete(id);
-      renderCandidateCards();
-      updateReviewStats();
+      if (state.manualCandidates.has(id)) {
+        state.reviewSelectionDirty = true;
+        updateReviewStats();
+        checkbox.disabled = false;
+        return;
+      }
+      updateReviewStats(nextSelected ? 1 : -1);
+      try {
+        await persistReviewSelection([id], nextSelected);
+      } catch (error) {
+        candidate.selected = !nextSelected;
+        checkbox.checked = !nextSelected;
+        card.classList.toggle("is-excluded", nextSelected);
+        if (nextSelected) state.selectedIds.delete(id);
+        else state.selectedIds.add(id);
+        updateReviewStats(nextSelected ? -1 : 1);
+        notify(`选择状态保存失败：${error.message}`, true);
+      } finally {
+        checkbox.disabled = false;
+      }
     });
     const title = document.createElement("h4");
     title.className = "candidate-title";
@@ -5159,15 +5619,38 @@ function renderCandidateCards() {
     authorsLabel.textContent = "作者";
     authorsRow.append(authorsLabel, authors);
 
+    const ranking = document.createElement("div");
+    ranking.className = "candidate-ranking";
+    const addRankingItem = (label, value, title = "") => {
+      if (value == null || !Number.isFinite(Number(value))) return;
+      const item = document.createElement("span");
+      item.className = "candidate-ranking-item";
+      item.textContent = `${label} ${Math.round(Number(value))}`;
+      if (title) item.title = title;
+      ranking.append(item);
+    };
+    addRankingItem("综合", candidate.composite_score, (candidate.ranking_explanation || []).join("；"));
+    addRankingItem(
+      "影响",
+      candidate.impact_score,
+      `${(candidate.impact_explanation || []).join("；")}；数据置信度 ${Math.round(Number(candidate.impact_confidence || 0))}`,
+    );
+    addRankingItem("相关", candidate.relevance_score);
+    addRankingItem("场馆", candidate.authority_score, (candidate.authority_explanation || []).join("；"));
+    if (candidate.is_retracted) {
+      const warning = document.createElement("span");
+      warning.className = "candidate-ranking-item is-danger";
+      warning.textContent = "撤稿风险";
+      ranking.append(warning);
+    }
+
     const reason = document.createElement("div");
     reason.className = "candidate-reason";
-    if (agentReason) {
-      const reasonLabel = document.createElement("strong");
-      reasonLabel.textContent = "筛选依据";
-      const reasonText = document.createElement("span");
-      reasonText.textContent = agentReason;
-      reason.append(reasonLabel, reasonText);
-    }
+    const reasonLabel = document.createElement("strong");
+    reasonLabel.textContent = "筛选依据 / 核心内容";
+    const reasonText = document.createElement("span");
+    reasonText.textContent = agentReason || "当前说明缺失，请结合标题和摘要人工判断。";
+    reason.append(reasonLabel, reasonText);
 
     const abstract = document.createElement("p");
     abstract.className = "candidate-abstract";
@@ -5223,8 +5706,8 @@ function renderCandidateCards() {
 
     const body = document.createElement("div");
     body.className = "candidate-body";
-    body.append(authorsRow, venue);
-    if (agentReason) body.append(reason);
+    if (ranking.childElementCount) body.append(ranking);
+    body.append(authorsRow, venue, reason);
     body.append(abstractSection);
     card.append(head, body, identifiers);
     elements.candidateGrid.append(card);
@@ -5232,24 +5715,14 @@ function renderCandidateCards() {
   refreshIcons();
 }
 
-function acceptedPaperCount(selectedIds, addedPapers) {
-  const acceptedIds = new Set([...selectedIds].map(normalizePaperId));
-  addedPapers.forEach((paper) => {
-    // Match the backend's _candidate_id precedence so a paper carrying both
-    // paper_id and DOI is counted once.
-    const id = paper.paper_id || paper.doi;
-    if (id) acceptedIds.add(normalizePaperId(id));
-  });
-  return acceptedIds.size;
-}
-
 function renderFilteredCandidateCards() {
   const snapshot = state.review?.candidate_set || {};
   const filtered = (snapshot.filtered_candidates || []).filter(
     (candidate) => !state.manualCandidates.has(candidateId(candidate)),
   );
-  elements.filteredCandidateCount.textContent = String(filtered.length);
-  elements.filteredCandidatesPanel.hidden = !(snapshot.filtered_candidates || []).length;
+  const filteredTotal = Number(snapshot.filtered_candidate_total ?? filtered.length);
+  elements.filteredCandidateCount.textContent = String(filteredTotal);
+  elements.filteredCandidatesPanel.hidden = filteredTotal === 0;
   elements.filteredCandidateGrid.replaceChildren();
 
   filtered.forEach((candidate) => {
@@ -5259,7 +5732,9 @@ function renderFilteredCandidateCards() {
     const title = document.createElement("h4");
     title.textContent = candidate.title || "未命名论文";
     const reasons = document.createElement("p");
-    const reasonList = snapshot.filtered_candidate_reasons?.[id] || [];
+    const reasonList = candidate.agent_reason
+      ? [candidate.agent_reason]
+      : snapshot.filtered_candidate_reasons?.[id] || [];
     reasons.textContent = [
       candidate.year ? `年份 ${candidate.year}` : "年份未知",
       ...reasonList,
@@ -5297,11 +5772,105 @@ function renderFilteredCandidateCards() {
     empty.textContent = "所有未达要求的论文均已手动加入";
     elements.filteredCandidateGrid.append(empty);
   }
+  renderReviewPagination();
 }
 
-function updateReviewStats() {
-  elements.candidateCount.textContent = String(state.candidates.length);
-  elements.selectedCount.textContent = String(state.selectedIds.size);
+function updateReviewStats(delta = 0) {
+  const candidateTotal = Number(
+    state.review?.candidate_set?.candidate_total
+      ?? state.review?.candidate_page?.total
+      ?? state.candidates.length,
+  );
+  elements.candidateCount.textContent = String(candidateTotal);
+  if (delta && state.review?.selection) {
+    state.review.selection.selected_count = Math.max(
+      0,
+      Number(state.review.selection.selected_count || 0) + delta,
+    );
+  }
+  const persistedSelected = Number(state.review?.selection?.selected_count || 0);
+  const manualSelected = [...state.manualCandidates.keys()].filter((id) => (
+    state.selectedIds.has(id)
+  )).length;
+  const selectedCount = persistedSelected + manualSelected;
+  elements.selectedCount.textContent = String(selectedCount);
+  const systemLimit = state.review?.candidate_set?.max_papers ?? 8;
+  elements.paperCapacity.textContent = `已选 ${selectedCount} 篇 / 系统最多 ${systemLimit} 篇`;
+}
+
+function renderReviewPagination() {
+  const page = state.review?.candidate_page || { page: 1, total_pages: 1, total: 0 };
+  elements.candidatePageStatus.textContent = state.reviewQuery
+    ? `第 ${page.page} / ${page.total_pages} 页 · 匹配 ${page.total} 篇`
+    : `第 ${page.page} / ${page.total_pages} 页`;
+  elements.candidatePrevPage.disabled = page.page <= 1;
+  elements.candidateNextPage.disabled = page.page >= page.total_pages;
+  elements.candidatePagination.hidden = page.total_pages <= 1 && !state.reviewQuery;
+
+  const filteredPage = state.review?.filtered_candidate_page
+    || { page: 1, total_pages: 1 };
+  elements.filteredCandidatePageStatus.textContent = `第 ${filteredPage.page} / ${filteredPage.total_pages} 页`;
+  elements.filteredCandidatePrevPage.disabled = filteredPage.page <= 1;
+  elements.filteredCandidateNextPage.disabled = filteredPage.page >= filteredPage.total_pages;
+  elements.filteredCandidatePagination.hidden = filteredPage.total_pages <= 1;
+}
+
+async function persistReviewSelection(paperIds, selected) {
+  const payload = await api(
+    `/api/projects/${encodeURIComponent(state.projectId)}/search-review/selection`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ paper_ids: paperIds, selected }),
+    },
+  );
+  if (state.review?.selection) {
+    state.review.selection.selected_count = payload.data.selected_count;
+    state.review.selection.total_count = payload.data.total_count;
+  }
+  state.reviewSelectionDirty = true;
+  updateReviewStats();
+  return payload.data;
+}
+
+async function setCurrentReviewPageSelection(selected) {
+  const paperIds = state.candidates
+    .map(candidateId)
+    .filter((id) => id && !state.manualCandidates.has(id));
+  const manualIds = state.candidates
+    .map(candidateId)
+    .filter((id) => id && state.manualCandidates.has(id));
+  if ((!paperIds.length && !manualIds.length) || state.busy) return;
+  setBusy(true);
+  try {
+    if (paperIds.length) await persistReviewSelection(paperIds, selected);
+    state.candidates.forEach((candidate) => {
+      candidate.selected = selected;
+      const id = candidateId(candidate);
+      if (selected) state.selectedIds.add(id);
+      else state.selectedIds.delete(id);
+    });
+    if (manualIds.length) state.reviewSelectionDirty = true;
+    renderCandidateCards();
+    updateReviewStats();
+  } catch (error) {
+    notify(`批量更新选择失败：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadReviewPage({ page = state.reviewPage, filteredPage = state.reviewFilteredPage } = {}) {
+  if (!state.projectId) return;
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(state.reviewPageSize),
+    filtered_page: String(filteredPage),
+  });
+  if (state.reviewQuery) params.set("q", state.reviewQuery);
+  const payload = await api(
+    `/api/projects/${encodeURIComponent(state.projectId)}/search-review?${params}`,
+  );
+  renderReview(payload.data, { preserveManual: true });
 }
 
 function normalizeQueryRounds(snapshot) {
@@ -5345,23 +5914,24 @@ function renderReviewQueryRounds(snapshot) {
   });
 }
 
-function renderReview(review) {
+function renderReview(review, { preserveManual = false } = {}) {
   state.review = review;
-  state.manualCandidates = new Map();
+  if (!preserveManual) {
+    state.manualCandidates = new Map();
+    state.reviewSelectionDirty = false;
+    state.reviewQuery = review.query || "";
+    elements.candidateFilter.value = state.reviewQuery;
+  }
   state.candidates = review.candidate_set?.candidates || [];
   const snapshot = review.candidate_set || {};
-  const agentIncluded = new Set(
-    (snapshot.agent_included_paper_ids || []).map(normalizePaperId),
-  );
-  state.selectedIds = agentIncluded.size
-    ? new Set(
-        state.candidates
-          .map(candidateId)
-          .filter((id) => agentIncluded.has(normalizePaperId(id))),
-      )
-    : new Set(state.candidates.map(candidateId));
-  elements.minPapers.value = snapshot.min_papers ?? 1;
-  elements.maxPapers.value = snapshot.max_papers ?? 8;
+  state.reviewPage = review.candidate_page?.page || 1;
+  state.reviewFilteredPage = review.filtered_candidate_page?.page || 1;
+  state.reviewPageSize = review.candidate_page?.page_size || state.reviewPageSize;
+  elements.candidatePageSize.value = String(state.reviewPageSize);
+  state.selectedIds = new Set([
+    ...state.candidates.filter((candidate) => candidate.selected).map(candidateId),
+    ...[...state.manualCandidates.keys()],
+  ]);
   const yearConstraint = snapshot.year_from != null && snapshot.year_to != null
     ? `年份 ${snapshot.year_from}-${snapshot.year_to}`
     : snapshot.year_from != null
@@ -5402,11 +5972,10 @@ function renderReview(review) {
 }
 
 function feedbackBody(action) {
-  const exclusions = state.candidates
-    .map(candidateId)
-    .filter((id) => !state.selectedIds.has(id));
   const dois = parseList(elements.manualDois.value, true);
-  const manualCandidates = [...state.manualCandidates.values()];
+  const manualCandidates = [...state.manualCandidates.entries()]
+    .filter(([id]) => state.selectedIds.has(id))
+    .map(([, candidate]) => candidate);
   const knownManualIds = new Set(
     manualCandidates.flatMap((paper) => [paper.doi, paper.paper_id].filter(Boolean).map(normalizePaperId)),
   );
@@ -5421,53 +5990,33 @@ function feedbackBody(action) {
         .filter((doi) => !knownManualIds.has(normalizePaperId(doi)))
         .map((doi) => ({ doi })),
     ],
-    excluded_paper_ids: exclusions,
-    comment: elements.feedbackComment.value.trim(),
-    min_papers: numberInputValue(elements.minPapers, 1),
-    max_papers: numberInputValue(elements.maxPapers, 8),
   };
 }
 
 async function submitFeedback(action) {
   if (!state.projectId || state.busy) return;
   const body = feedbackBody(action);
-  if (body.min_papers > body.max_papers) {
-    notify("精读篇数下限不能大于上限", true);
-    return;
-  }
   if (action === "refine") {
-    const snapshot = state.review?.candidate_set || {};
-    const controlsChanged =
-      body.min_papers !== (snapshot.min_papers ?? 1) ||
-      body.max_papers !== (snapshot.max_papers ?? 8);
     const hasChange =
       body.suggested_queries.length ||
       body.added_papers.length ||
-      body.excluded_paper_ids.length ||
-      controlsChanged ||
-      body.comment;
+      state.reviewSelectionDirty;
     if (!hasChange) {
-      notify("请先填写补充检索词、DOI、排除论文或审核说明", true);
-      return;
-    }
-    if (
-      body.excluded_paper_ids.length &&
-      !window.confirm(
-        `将从候选集中移除 ${body.excluded_paper_ids.length} 篇论文。提交后可使用“撤销上一步”恢复，是否继续？`,
-      )
-    ) {
+      notify("请先填写补充检索词、DOI，或调整候选论文", true);
       return;
     }
   }
 
   if (action === "accept") {
-    const acceptedCount = acceptedPaperCount(state.selectedIds, body.added_papers);
+    const acceptedCount = Number(state.review?.selection?.selected_count || 0)
+      + body.added_papers.length;
+    const systemLimit = state.review?.candidate_set?.max_papers ?? 8;
     if (!acceptedCount) {
       notify("至少保留或加入一篇论文后才能确认", true);
       return;
     }
-    if (acceptedCount < body.min_papers || acceptedCount > body.max_papers) {
-      notify(`当前保留 ${acceptedCount} 篇，需位于 ${body.min_papers}-${body.max_papers} 篇之间`, true);
+    if (acceptedCount > systemLimit) {
+      notify(`当前选择 ${acceptedCount} 篇，系统单次最多精读 ${systemLimit} 篇，请缩小候选集`, true);
       return;
     }
     if (
@@ -5496,9 +6045,9 @@ async function submitFeedback(action) {
     const result = payload.data;
     elements.supplementalQueries.value = "";
     elements.manualDois.value = "";
-    elements.feedbackComment.value = "";
     if (action === "refine") {
       renderReview(result);
+      state.reviewSelectionDirty = false;
       const failures = result.search_failures || [];
       notify(
         failures.length
@@ -6456,18 +7005,12 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
   const question = byId("questionInput").value.trim();
   if (!topic || !question) return;
   const reviewLimits = {
-    min_papers: numberInputValue(elements.initialMinPapers, 2),
-    max_papers: numberInputValue(elements.initialMaxPapers, 6),
     max_search_rounds: numberInputValue(elements.initialMaxSearchRounds, 3),
     year_from: numberInputValue(elements.initialYearFrom, 2024),
     year_to: numberInputValue(elements.initialYearTo, 2026),
     quality_venues_only: elements.initialQualityVenuesOnly.checked,
     prefer_library_search: elements.initialPreferLibrarySearch.checked,
   };
-  if (reviewLimits.min_papers > reviewLimits.max_papers) {
-    notify("精读篇数下限不能大于上限", true);
-    return;
-  }
   if (
     reviewLimits.year_from < 2000
     || reviewLimits.year_to > 2026
@@ -6493,7 +7036,7 @@ elements.projectLookupForm.addEventListener("submit", (event) => {
   closeMenus();
   loadProject(projectId);
 });
-elements.reloadProject.addEventListener("click", () => loadProject(state.projectId));
+elements.reloadProject.addEventListener("click", () => loadProject(state.projectId, false, true));
 elements.deleteProject.addEventListener("click", deleteCurrentProject);
 elements.copyProjectId.addEventListener("click", async () => {
   if (!state.projectId) return;
@@ -6504,16 +7047,54 @@ elements.copyProjectId.addEventListener("click", async () => {
     notify("复制失败，请手动选择项目 ID", true);
   }
 });
-elements.candidateFilter.addEventListener("input", renderCandidateCards);
-elements.selectAll.addEventListener("click", () => {
-  state.selectedIds = new Set(state.candidates.map(candidateId));
-  renderCandidateCards();
-  updateReviewStats();
+elements.candidateFilter.addEventListener("input", () => {
+  window.clearTimeout(state.reviewSearchTimer);
+  state.reviewSearchTimer = window.setTimeout(async () => {
+    state.reviewQuery = elements.candidateFilter.value.trim();
+    try {
+      await loadReviewPage({ page: 1 });
+    } catch (error) {
+      notify(`候选论文搜索失败：${error.message}`, true);
+    }
+  }, 220);
 });
-elements.clearAll.addEventListener("click", () => {
-  state.selectedIds.clear();
-  renderCandidateCards();
-  updateReviewStats();
+elements.selectAll.addEventListener("click", () => setCurrentReviewPageSelection(true));
+elements.clearAll.addEventListener("click", () => setCurrentReviewPageSelection(false));
+elements.candidatePrevPage.addEventListener("click", async () => {
+  try {
+    await loadReviewPage({ page: Math.max(1, state.reviewPage - 1) });
+  } catch (error) {
+    notify(`上一页加载失败：${error.message}`, true);
+  }
+});
+elements.candidateNextPage.addEventListener("click", async () => {
+  try {
+    await loadReviewPage({ page: state.reviewPage + 1 });
+  } catch (error) {
+    notify(`下一页加载失败：${error.message}`, true);
+  }
+});
+elements.candidatePageSize.addEventListener("change", async () => {
+  state.reviewPageSize = Number(elements.candidatePageSize.value || 20);
+  try {
+    await loadReviewPage({ page: 1, filteredPage: 1 });
+  } catch (error) {
+    notify(`分页设置更新失败：${error.message}`, true);
+  }
+});
+elements.filteredCandidatePrevPage.addEventListener("click", async () => {
+  try {
+    await loadReviewPage({ filteredPage: Math.max(1, state.reviewFilteredPage - 1) });
+  } catch (error) {
+    notify(`上一页加载失败：${error.message}`, true);
+  }
+});
+elements.filteredCandidateNextPage.addEventListener("click", async () => {
+  try {
+    await loadReviewPage({ filteredPage: state.reviewFilteredPage + 1 });
+  } catch (error) {
+    notify(`下一页加载失败：${error.message}`, true);
+  }
 });
 elements.refineReview.addEventListener("click", () => submitFeedback("refine"));
 elements.undoReview.addEventListener("click", undoSearchFeedback);

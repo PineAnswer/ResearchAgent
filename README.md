@@ -224,10 +224,7 @@ GET /api/projects/RP-.../search-review
   "suggested_queries": ["few-shot remote sensing augmentation limitations"],
   "added_papers": [{"doi": "10.1000/example"}],
   "excluded_paper_ids": ["https://openalex.org/W123"],
-  "min_papers": 2,
-  "max_papers": 6,
-  "max_search_rounds": 3,
-  "comment": "补充小样本场景，排除只讨论目标检测的论文。"
+  "max_search_rounds": 3
 }
 ```
 
@@ -235,11 +232,7 @@ GET /api/projects/RP-.../search-review
 
 ```json
 {
-  "action": "accept",
-  "min_papers": 2,
-  "max_papers": 6,
-  "max_search_rounds": 3,
-  "comment": "确认当前候选论文，继续精读。"
+  "action": "accept"
 }
 ```
 

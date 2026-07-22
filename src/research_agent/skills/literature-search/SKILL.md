@@ -17,6 +17,8 @@ OpenAlex、Crossref、Semantic Scholar 和 arXiv，再按 DOI 或规范化标题
    限制使用独立参数，不要拼入查询文本。
 5. 使用工具已经合并的 `sources`、`matched_queries` 和 `relevance_score`，
    再结合标题、摘要进行 include / exclude / uncertain 初筛。
+   `candidate_ids` 中的每篇论文都要写一句 `screening_reasons`：include 说明入选理由
+   或概括文章核心内容，uncertain / exclude 说明相应判断依据。内容只能来自标题和摘要。
 6. 若出现明确覆盖盲区，可以再设计一组真正互补的短查询；不要只换词序重复搜索。
 7. 分析覆盖盲区，填入 `coverage_gaps`，并输出符合 response_format 的 SearchReport。
 
@@ -39,7 +41,7 @@ OpenAlex、Crossref、Semantic Scholar 和 arXiv，再按 DOI 或规范化标题
 - `query`: 总体检索主题字符串。
 - `candidate_ids`: 所有搜索命中的真实 paper_id 或 DOI 列表（include + uncertain 的论文）。禁止使用 P001/P002 等临时编号。
 - `screening_decisions`: paper_id → "include" / "exclude" / "uncertain"。
-- `screening_reasons`: paper_id → 筛除或 uncertain 的一句话理由。
+- `screening_reasons`: `candidate_ids` 中每个 paper_id → 入选理由或文章核心内容（一句话）；uncertain / exclude 写明判断依据。
 - `coverage_gaps`: 覆盖盲区分析，字符串列表。
 - `search_iteration_log`: 每轮检索记录 `[{query, count, new_count, rationale}, ...]`。
 - `selection_notes`: 字符串列表，说明筛选依据、数据不足和失败情况。

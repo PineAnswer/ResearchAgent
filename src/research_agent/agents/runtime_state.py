@@ -12,6 +12,7 @@ from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+from research_agent.application.candidate_ranking import rank_candidates
 from research_agent.application.paper_ids import normalize_paper_id
 
 
@@ -274,17 +275,51 @@ def _candidate_identity(candidate: dict[str, Any]) -> str:
 
 
 def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
-    seen: set[str] = set()
-    deduped: list[dict] = []
+    merged_by_identity: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
         identity = _candidate_identity(candidate)
         if not identity:
             identity = f"title:{str(candidate.get('title', '')).casefold().strip()}"
-        if identity in seen:
+        if identity not in merged_by_identity:
+            merged_by_identity[identity] = deepcopy(candidate)
             continue
-        seen.add(identity)
-        deduped.append(candidate)
-    return deduped
+        merged = merged_by_identity[identity]
+        for field, value in candidate.items():
+            if field in {
+                "sources",
+                "matched_queries",
+                "authors",
+                "fields_of_study",
+                "impact_explanation",
+                "authority_explanation",
+                "ranking_explanation",
+            }:
+                combined = list(merged.get(field) or [])
+                for item in value or []:
+                    if item not in combined:
+                        combined.append(item)
+                merged[field] = combined
+            elif field in {
+                "citation_counts",
+                "citation_percentiles",
+                "influential_citation_counts",
+                "recent_citation_velocities",
+                "momentum_percentiles",
+            }:
+                combined = dict(merged.get(field) or {})
+                combined.update(value or {})
+                merged[field] = combined
+            elif field == "abstract":
+                if len(str(value or "")) > len(str(merged.get(field) or "")):
+                    merged[field] = value
+            elif field == "is_retracted":
+                merged[field] = bool(merged.get(field) or value)
+            elif not merged.get(field) and value is not None:
+                merged[field] = value
+        sources = list(merged.get("sources") or [])
+        if sources:
+            merged["source"] = " + ".join(sources)
+    return list(merged_by_identity.values())
 
 
 def _temporary_candidate_ids(candidate_ids: list[Any]) -> bool:
@@ -503,6 +538,36 @@ class ResearchRuntimeState:
                     "sources": source_names,
                     "matched_queries": matched_queries,
                     "relevance_score": item.get("relevance_score"),
+                    "fields_of_study": list(item.get("fields_of_study") or []),
+                    "publication_type": str(item.get("publication_type") or ""),
+                    "citation_counts": dict(item.get("citation_counts") or {}),
+                    "citation_percentiles": dict(
+                        item.get("citation_percentiles") or {}
+                    ),
+                    "fwci": item.get("fwci"),
+                    "influential_citation_counts": dict(
+                        item.get("influential_citation_counts") or {}
+                    ),
+                    "influential_citation_percentile": item.get(
+                        "influential_citation_percentile"
+                    ),
+                    "recent_citation_velocities": dict(
+                        item.get("recent_citation_velocities") or {}
+                    ),
+                    "momentum_percentiles": dict(
+                        item.get("momentum_percentiles") or {}
+                    ),
+                    "impact_score": item.get("impact_score"),
+                    "impact_confidence": item.get("impact_confidence"),
+                    "authority_score": item.get("authority_score"),
+                    "diversity_score": item.get("diversity_score"),
+                    "composite_score": item.get("composite_score"),
+                    "is_retracted": bool(item.get("is_retracted")),
+                    "impact_explanation": list(item.get("impact_explanation") or []),
+                    "authority_explanation": list(
+                        item.get("authority_explanation") or []
+                    ),
+                    "ranking_explanation": list(item.get("ranking_explanation") or []),
                     "library_id": str(item.get("library_id", "")),
                     "venue": str(item.get("venue", "")),
                     "venue_type": _normalized_candidate_venue_type(
@@ -906,7 +971,18 @@ def recording_runnable(
                 if _candidate_identity(candidate) in candidate_ids
             ]
             if candidate_ids and matched:
-                payload["candidates"] = matched
+                decisions = {
+                    normalize_paper_id(key): value
+                    for key, value in (payload.get("screening_decisions") or {}).items()
+                }
+                for candidate in matched:
+                    candidate["agent_decision"] = decisions.get(
+                        _candidate_identity(candidate), "uncertain"
+                    )
+                payload["candidates"] = rank_candidates(
+                    matched,
+                    search_terms,
+                )
             elif raw_results and _temporary_candidate_ids(submitted_ids):
                 selected = raw_results[: len(submitted_ids)]
                 id_map = {
@@ -922,9 +998,9 @@ def recording_runnable(
                 payload["screening_reasons"] = _remap_screening_dict(
                     payload.get("screening_reasons"), id_map
                 )
-                payload["candidates"] = selected
+                payload["candidates"] = rank_candidates(selected, search_terms)
             elif raw_results:
-                payload["candidates"] = raw_results
+                payload["candidates"] = rank_candidates(raw_results, search_terms)
         elif subagent_type == "paper-reader":
             if expected_id := _expected_paper_id(inputs):
                 payload["paper_id"] = expected_id
