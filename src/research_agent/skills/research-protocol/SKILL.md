@@ -72,12 +72,14 @@ description: 证据驱动科研项目的总流程与状态推进规范
 
 ## 第八步：综述提纲 → OUTLINED
 
+- 综述采用中文撰写。ReviewOutline 的标题、叙事线、章节标题和核心论点均使用中文；论文原始标题、模型名、数据集名、缩写及必要专业术语可以保留英文。
 - 在 REVIEWED 且审查为 PASS 时委派 `research-outliner`。
 - 调用 `commit_subagent_result(project_id, "research-outliner")` 原样提交 ReviewOutline 并进入 OUTLINED。
 - ReviewOutline 的每个 `section_id` 必须唯一，并明确分配论文、Evidence、核心论点和目标字数。
 
 ## 第九步：分节写作与总编整合 → COMPLETED
 
+- SectionDraft 与最终 NarrativeReview 的摘要、引言、章节正文、过渡语和结论必须使用中文；参考文献原始题名和 BibTeX 保持原始语言。
 - 按 ReviewOutline 顺序逐节委派 `narrative-writer`，每次任务只指定一个 `section_id`。
 - 每节完成后立即调用 `commit_subagent_result(project_id, "narrative-writer")` 保存 SectionDraft，再处理下一节。
 - 已保存的 SectionDraft 不得重复生成；恢复执行时只补写缺失章节。

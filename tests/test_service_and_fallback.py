@@ -677,7 +677,7 @@ def test_paper_card_normalizes_simple_evidence_ids_before_synthesis(tmp_path) ->
     assert artifact.payload["consensus"][0]["evidence_ids"] == ["P1:E1", "P2:E1"]
 
 
-def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) -> None:
+def test_synthesis_downgrades_unsupported_numeric_hypothesis(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = service.create_project("topic", "question")
     _, project = service.save_artifact_and_transition(
@@ -734,14 +734,18 @@ def test_synthesis_rejects_unknown_evidence_and_unsupported_numbers(tmp_path) ->
         ],
     }
 
-    with pytest.raises(WorkflowPrerequisiteError, match="unsupported numeric"):
-        service.save_artifact_and_transition(
-            project.project_id,
-            "SynthesisReport",
-            payload,
-            ResearchStage.SYNTHESIZED,
-            actor="synthesizer",
-        )
+    artifact, synthesized = service.save_artifact_and_transition(
+        project.project_id,
+        "SynthesisReport",
+        payload,
+        ResearchStage.SYNTHESIZED,
+        actor="synthesizer",
+    )
+
+    assert synthesized.stage is ResearchStage.SYNTHESIZED
+    hypothesis = artifact.payload["gaps"][0]["proposed_hypothesis"]
+    assert "3x" not in hypothesis
+    assert "新增证据" in hypothesis
 
 
 def test_narrative_review_completes_project_without_post_processing(tmp_path) -> None:

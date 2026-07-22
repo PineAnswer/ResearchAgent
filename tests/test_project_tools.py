@@ -277,8 +277,8 @@ def test_empty_local_search_report_requires_external_search_before_commit(tmp_pa
     assert service.get_project(project_id).stage is ResearchStage.CREATED
     assert service.get_snapshot(project_id)["artifacts"] == []
 
-    state.mark_search_source("thread-a", "search_openalex")
-    state.store_search_results("thread-a", "[]", source="search_openalex")
+    state.mark_search_source("thread-a", "search_multi_source")
+    state.store_search_results("thread-a", "[]", source="search_multi_source")
     state.record_result("thread-a", "literature-scout", empty_report)
     committed = json.loads(
         tools["commit_subagent_result"].func(

@@ -229,6 +229,70 @@ def test_fetch_paper_text_downloads_arxiv_pdf(tmp_path: Path, monkeypatch) -> No
     assert len(result["pages"]) == 1
 
 
+def test_fetch_paper_text_automatically_covers_a_35_page_paper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    for _ in range(35):
+        writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    monkeypatch.setattr(
+        literature_module,
+        "urlopen",
+        lambda _request, timeout: FakeBinaryResponse(buffer.getvalue()),
+    )
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["fetch_paper_text"].invoke(
+            {
+                "paper_id": "arXiv:2406.11213v4",
+                "doi": "10.48550/arXiv.2406.11213v4",
+                "url": "https://arxiv.org/pdf/2406.11213v4",
+                "max_pages": 30,
+            }
+        )
+    )
+
+    assert result["total_pages"] == 35
+    assert result["extracted_page_count"] == 35
+    assert result["covered_ranges"] == [[1, 35]]
+    assert result["missing_ranges"] == []
+    assert result["truncated"] is False
+
+
+def test_fetch_paper_text_reports_uncovered_pages_above_full_read_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    for _ in range(105):
+        writer.add_blank_page(width=72, height=72)
+    writer.write(buffer)
+    monkeypatch.setattr(
+        literature_module,
+        "urlopen",
+        lambda _request, timeout: FakeBinaryResponse(buffer.getvalue()),
+    )
+    tools = {item.name: item for item in build_literature_tools(tmp_path)}
+
+    result = json.loads(
+        tools["fetch_paper_text"].invoke(
+            {
+                "paper_id": "arXiv:2406.11213v4",
+                "doi": "10.48550/arXiv.2406.11213v4",
+                "url": "https://arxiv.org/pdf/2406.11213v4",
+                "max_pages": 30,
+            }
+        )
+    )
+
+    assert result["extracted_page_count"] == 100
+    assert result["missing_ranges"] == [[101, 105]]
+    assert result["truncated"] is True
+
+
 def test_fetch_paper_text_accepts_trusted_arxiv_pdf_path_without_doi(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -612,15 +676,18 @@ def test_multi_source_search_retries_timeout_then_returns_empty_source(
     arxiv_status = next(
         item for item in result["source_status"] if item["source"] == "arXiv"
     )
-    assert arxiv_calls == 2
+    assert arxiv_calls == 4
+    assert len(
+        [item for item in result["source_status"] if item["source"] == "arXiv"]
+    ) == 2
     assert arxiv_status["ok"] is False
     assert arxiv_status["error_code"] == "timeout"
     assert arxiv_status["attempts"] == 2
-    skipped_arxiv_status = [
+    second_arxiv_status = [
         item for item in result["source_status"] if item["source"] == "arXiv"
     ][1]
-    assert skipped_arxiv_status["error_code"] == "source_unavailable"
-    assert skipped_arxiv_status["attempts"] == 0
+    assert second_arxiv_status["error_code"] == "timeout"
+    assert second_arxiv_status["attempts"] == 2
     assert result["candidates"] == []
 
 

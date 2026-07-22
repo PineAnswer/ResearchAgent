@@ -91,7 +91,6 @@ class ConversationRunManager:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> ConversationRun:
         return await self._start(
@@ -104,7 +103,6 @@ class ConversationRunManager:
                 "max_search_rounds": max_search_rounds,
                 "year_from": year_from,
                 "year_to": year_to,
-                "quality_venues_only": quality_venues_only,
                 "prefer_library_search": prefer_library_search,
             },
         )
@@ -196,8 +194,8 @@ class ConversationRunManager:
                     status = "inconclusive"
                     message = "本轮研究已停止，可查看已保存产物"
                 else:
-                    status = "completed"
-                    message = f"本轮运行结束，项目停在 {project.stage.value}"
+                    status = "interrupted"
+                    message = f"本轮运行中断，项目停在 {project.stage.value}，可从已保存进度恢复"
                 self.repository.update_conversation_run(
                     run_id,
                     status=status,

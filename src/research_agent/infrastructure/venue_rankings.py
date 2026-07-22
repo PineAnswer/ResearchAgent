@@ -363,16 +363,6 @@ class VenueRankingIndex:
         return result
 
     @staticmethod
-    def qualifies_for_quality_filter(ranking: dict[str, Any] | None) -> bool:
-        if not ranking:
-            return False
-        return bool(
-            ranking.get("ccf_rank") == "A"
-            or ranking.get("sci_quartile") == "Q1"
-            or ranking.get("nature_portfolio")
-        )
-
-    @staticmethod
     def _explanation(ranking: dict[str, Any]) -> str:
         labels: list[str] = []
         if ranking.get("ccf_rank"):

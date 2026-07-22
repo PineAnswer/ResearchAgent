@@ -1377,6 +1377,10 @@ class SqliteResearchRepository:
         canonical_key = self._scoped_canonical_key(canonical_key)
         payload = paper.model_dump_json()
         with self._connect() as connection:
+            # Serialize the canonical-key lookup and insert.  A deferred SQLite
+            # transaction lets two requests both observe a missing key before
+            # either insert runs, causing the second insert to violate UNIQUE.
+            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT library_id FROM library_papers WHERE canonical_key = ?",
                 (canonical_key,),

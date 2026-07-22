@@ -11,6 +11,7 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langgraph.config import get_config
 
 from research_agent.application.candidate_ranking import rank_candidates
 from research_agent.application.paper_ids import normalize_paper_id
@@ -19,6 +20,17 @@ from research_agent.application.paper_ids import normalize_paper_id
 def thread_id_from_config(config: RunnableConfig | dict[str, Any] | None) -> str:
     configurable = (config or {}).get("configurable", {})
     return str(configurable.get("thread_id") or "unscoped")
+
+
+def thread_id_from_runtime(runtime: Any) -> str:
+    """Read RunnableConfig from tool runtimes or the active model-call context."""
+    config = getattr(runtime, "config", None)
+    if config is None:
+        try:
+            config = get_config()
+        except RuntimeError:
+            config = None
+    return thread_id_from_config(config)
 
 
 def _json_payload(value: Any) -> dict[str, Any]:
@@ -64,14 +76,19 @@ def _task_text(inputs: Any) -> str:
 
 
 def _expected_paper_id(inputs: Any) -> str | None:
-    text = _task_text(inputs)
     patterns = (
         r"paper_id[^:\n]*:\s*[\"']([^\"']+)[\"']",
         r"paper_id[^:\n]*:\s*([^\s,;]+)",
     )
-    for pattern in patterns:
-        if match := re.search(pattern, text, flags=re.IGNORECASE):
-            return match.group(1).strip()
+    if not isinstance(inputs, dict):
+        return None
+    for message in reversed(inputs.get("messages", [])):
+        text = _message_content(message)
+        if not isinstance(text, str):
+            continue
+        for pattern in patterns:
+            if match := re.search(pattern, text, flags=re.IGNORECASE):
+                return match.group(1).strip()
     return None
 
 
@@ -261,9 +278,30 @@ def _query_key(query: str) -> str:
     return " ".join(sorted(normalized))
 
 
+def _paper_identities(*values: str) -> set[str]:
+    identities: set[str] = set()
+    for value in values:
+        normalized = normalize_paper_id(value)
+        if normalized:
+            identities.add(normalized.casefold())
+        arxiv_match = re.search(
+            r"(?:arxiv[:./])?(\d{4}\.\d{4,5}(?:v\d+)?)",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if arxiv_match:
+            identities.add(f"arxiv:{arxiv_match.group(1).casefold()}")
+    return identities
+
+
 def _paper_key(paper_id: str, doi: str) -> str:
     if match := re.search(r"\bW\d+\b", paper_id, flags=re.IGNORECASE):
         return match.group(0).upper()
+    arxiv_identities = sorted(
+        item for item in _paper_identities(paper_id, doi) if item.startswith("arxiv:")
+    )
+    if arxiv_identities:
+        return arxiv_identities[0]
     normalized_doi = doi.casefold().removeprefix("https://doi.org/").strip()
     if normalized_doi:
         return f"doi:{normalized_doi}"
@@ -369,6 +407,8 @@ class ResearchRuntimeState:
         self._conversation_ids: dict[str, str] = {}
         self._search_terms: dict[str, list[str]] = {}
         self._search_keys: dict[str, set[str]] = {}
+        self._search_query_rounds: dict[str, list[list[str]]] = {}
+        self._max_search_rounds: dict[str, int] = {}
         self._search_sources: dict[str, set[str]] = {}
         self._search_result_counts: dict[str, dict[str, int]] = {}
         self._raw_search_results: dict[str, list[dict]] = {}
@@ -377,6 +417,7 @@ class ResearchRuntimeState:
         self._results: dict[tuple[str, str], RecordedSubagentResult] = {}
         self._rejections: dict[tuple[str, str, str], int] = {}
         self._paper_fetches: dict[tuple[str, str], set[str]] = {}
+        self._paper_fetch_attempts: set[tuple[str, str]] = set()
 
     def register_project(
         self,
@@ -394,6 +435,7 @@ class ResearchRuntimeState:
                 self._conversation_ids[thread_id] = conversation_id
             self._search_terms[thread_id] = []
             self._search_keys[thread_id] = set()
+            self._search_query_rounds[thread_id] = []
             self._search_sources[thread_id] = set()
             self._search_result_counts[thread_id] = {}
             self._raw_search_results[thread_id] = []
@@ -405,6 +447,9 @@ class ResearchRuntimeState:
                 del self._rejections[key]
             for key in [item for item in self._paper_fetches if item[0] == thread_id]:
                 del self._paper_fetches[key]
+            self._paper_fetch_attempts = {
+                item for item in self._paper_fetch_attempts if item[0] != thread_id
+            }
 
     def project_id(self, thread_id: str) -> str | None:
         with self._lock:
@@ -424,15 +469,15 @@ class ResearchRuntimeState:
         *,
         year_from: int,
         year_to: int,
-        quality_venues_only: bool,
+        max_search_rounds: int,
         prefer_library_search: bool = False,
     ) -> None:
         with self._lock:
             self._search_constraints[thread_id] = {
                 "year_from": int(year_from),
                 "year_to": int(year_to),
-                "quality_venues_only": bool(quality_venues_only),
             }
+            self._max_search_rounds[thread_id] = max(1, int(max_search_rounds))
             self._prefer_library_search[thread_id] = bool(prefer_library_search)
 
     def search_constraints(self, thread_id: str) -> dict[str, Any]:
@@ -460,6 +505,39 @@ class ResearchRuntimeState:
     def search_terms(self, thread_id: str) -> list[str]:
         with self._lock:
             return list(self._search_terms.get(thread_id, []))
+
+    def reserve_search_round(
+        self, thread_id: str, queries: list[str]
+    ) -> tuple[list[str], str | None]:
+        """Atomically reserve one executed multi-source query-design round."""
+        normalized = [" ".join(str(query).split()) for query in queries]
+        with self._lock:
+            known = self._search_keys.setdefault(thread_id, set())
+            unique: list[str] = []
+            unique_keys: set[str] = set()
+            for query in normalized:
+                key = _query_key(query)
+                if query and key and key not in known and key not in unique_keys:
+                    unique.append(query)
+                    unique_keys.add(key)
+            if not unique:
+                return [], "duplicate_search_query"
+            rounds = self._search_query_rounds.setdefault(thread_id, [])
+            limit = self._max_search_rounds.get(thread_id, 1)
+            if len(rounds) >= limit:
+                return [], "search_round_limit_reached"
+            known.update(unique_keys)
+            self._search_terms.setdefault(thread_id, []).extend(unique)
+            rounds.append(unique)
+            return unique, None
+
+    def search_query_rounds(self, thread_id: str) -> list[list[str]]:
+        with self._lock:
+            return [list(round_queries) for round_queries in self._search_query_rounds.get(thread_id, [])]
+
+    def max_search_rounds(self, thread_id: str) -> int:
+        with self._lock:
+            return self._max_search_rounds.get(thread_id, 1)
 
     def mark_search_source(self, thread_id: str, source: str) -> None:
         with self._lock:
@@ -668,6 +746,8 @@ class ResearchRuntimeState:
         """Reserve a distinct fetch request or return a structured error code."""
         with self._lock:
             key = (thread_id, _paper_key(paper_id, doi))
+            for paper_identity in _paper_identities(paper_id, doi):
+                self._paper_fetch_attempts.add((thread_id, paper_identity))
             signatures = self._paper_fetches.setdefault(key, set())
             signature = "|".join(
                 [
@@ -683,10 +763,40 @@ class ResearchRuntimeState:
             signatures.add(signature)
             return None
 
+    def has_paper_fetch_attempt(self, thread_id: str, paper_id: str) -> bool:
+        """Return whether the current paper-reader already attempted full-text access."""
+        identities = _paper_identities(paper_id)
+        if not identities:
+            return False
+        with self._lock:
+            return any(
+                (thread_id, identity) in self._paper_fetch_attempts
+                for identity in identities
+            )
+
     def reset_paper_fetch(self, thread_id: str, paper_id: str, doi: str = "") -> None:
         """Allow a fresh subagent attempt while the download tool reuses its disk cache."""
         with self._lock:
-            self._paper_fetches.pop((thread_id, _paper_key(paper_id, doi)), None)
+            identities = _paper_identities(paper_id, doi)
+            for key, signatures in list(self._paper_fetches.items()):
+                if key[0] != thread_id:
+                    continue
+                signature_identities: set[str] = set()
+                for signature in signatures:
+                    request_paper_id, request_doi, _ = signature.split("|", maxsplit=2)
+                    signature_identities.update(
+                        _paper_identities(request_paper_id, request_doi)
+                    )
+                if identities & signature_identities or key == (
+                    thread_id,
+                    _paper_key(paper_id, doi),
+                ):
+                    del self._paper_fetches[key]
+            self._paper_fetch_attempts = {
+                item
+                for item in self._paper_fetch_attempts
+                if item[0] != thread_id or item[1] not in identities
+            }
 
 
 class ExecutedSearchTrackingMiddleware(AgentMiddleware):
@@ -744,7 +854,7 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
             name == "search_library"
             and self.state.has_search_source(thread_id, "search_library")
             and self.state.search_result_count(thread_id, "search_library") == 0
-            and not self.state.has_search_source(thread_id, "search_openalex")
+            and not self.state.has_search_source(thread_id, "search_multi_source")
         ):
             return ToolMessage(
                 content=json.dumps(
@@ -753,7 +863,7 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
                         "error_code": "local_library_empty_use_external",
                         "instruction": (
                             "本地文献库检索已执行且结果为空；下一次必须调用"
-                            "search_openalex检索外部学术来源，禁止继续调用search_library。"
+                            "search_multi_source检索外部学术来源，禁止继续调用search_library。"
                         ),
                     },
                     ensure_ascii=False,
@@ -774,15 +884,32 @@ class ExecutedSearchTrackingMiddleware(AgentMiddleware):
                 )
             )
         if name == "search_multi_source" and isinstance(args, dict):
-            unique_queries = []
-            for value in args.get("queries", []):
-                query = " ".join(str(value).split())
-                if query and self.state.record_search(thread_id, query):
-                    unique_queries.append(query)
+            unique_queries, error_code = self.state.reserve_search_round(
+                thread_id, list(args.get("queries", []))
+            )
             if unique_queries:
                 args["queries"] = unique_queries
                 return None
             query = " | ".join(str(value) for value in args.get("queries", []))
+            if error_code == "search_round_limit_reached":
+                limit = self.state.max_search_rounds(thread_id)
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "ok": False,
+                            "error_code": error_code,
+                            "query": query,
+                            "instruction": (
+                                f"已完成用户允许的 {limit} 轮检索词设计。"
+                                "请使用已有结果完成筛选并提交 SearchReport。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=str(request.tool_call.get("id", "search-round-limit")),
+                    name=name,
+                    status="error",
+                )
         else:
             query = str(args.get("query", ""))
         if self.state.record_search(thread_id, query):
@@ -879,6 +1006,44 @@ class PaperFetchGuardMiddleware(AgentMiddleware):
             status="error",
         )
 
+    def _without_fetch_tool(self, request: Any) -> Any:
+        paper_id = _expected_paper_id(request.state)
+        thread_id = thread_id_from_runtime(request.runtime)
+        if not paper_id or not self.state.has_paper_fetch_attempt(thread_id, paper_id):
+            return request
+
+        def tool_name(tool: Any) -> str:
+            if isinstance(tool, dict):
+                function = tool.get("function")
+                if isinstance(function, dict):
+                    return str(function.get("name", ""))
+                return str(tool.get("name", ""))
+            return str(getattr(tool, "name", ""))
+
+        tools = [tool for tool in request.tools if tool_name(tool) != "fetch_paper_text"]
+        system_content = ""
+        if request.system_message is not None:
+            system_content = str(request.system_message.content)
+        system_content += (
+            "\n\n系统已完成本篇论文唯一一次全文获取尝试，fetch_paper_text现已关闭。"
+            "必须立即使用已经返回的全部带页码文本；若获取失败则使用任务摘要，"
+            "并直接输出符合Schema的PaperCard。禁止请求任何其他全文路径。"
+        )
+        return request.override(
+            tools=tools,
+            system_message=SystemMessage(content=system_content.strip()),
+        )
+
+    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(self._without_fetch_tool(request))
+
+    async def awrap_model_call(
+        self,
+        request: Any,
+        handler: Callable[[Any], Awaitable[Any]],
+    ) -> Any:
+        return await handler(self._without_fetch_tool(request))
+
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -960,6 +1125,23 @@ def recording_runnable(
         if subagent_type == "literature-scout":
             search_terms = state.search_terms(thread_id)
             payload["search_terms"] = search_terms
+            supplied_log = payload.get("search_iteration_log") or []
+            actual_log = []
+            for index, queries in enumerate(state.search_query_rounds(thread_id)):
+                supplied = (
+                    supplied_log[index]
+                    if index < len(supplied_log) and isinstance(supplied_log[index], dict)
+                    else {}
+                )
+                actual_log.append(
+                    {
+                        **supplied,
+                        "round": index + 1,
+                        "queries": queries,
+                        "query": " | ".join(queries),
+                    }
+                )
+            payload["search_iteration_log"] = actual_log
             if not str(payload.get("query", "")).strip():
                 payload["query"] = " | ".join(search_terms) if search_terms else "literature search"
             raw_results = _dedupe_candidates(state.get_search_results(thread_id))

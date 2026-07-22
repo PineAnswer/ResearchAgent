@@ -13,7 +13,7 @@ class ResearchRequest(SearchConstraints):
     thread_id: str | None = None
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
-    max_search_rounds: int | None = Field(default=None, ge=0)
+    max_search_rounds: int | None = Field(default=None, ge=1, le=10)
 
 
 class CreateConversationRequest(SearchConstraints):
@@ -21,7 +21,7 @@ class CreateConversationRequest(SearchConstraints):
     research_question: str = Field(min_length=1)
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
-    max_search_rounds: int | None = Field(default=None, ge=0)
+    max_search_rounds: int | None = Field(default=None, ge=1, le=10)
 
 
 class ConversationUpdateRequest(BaseModel):

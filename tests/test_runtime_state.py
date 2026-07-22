@@ -1,8 +1,10 @@
 import json
 from types import SimpleNamespace
 
+import research_agent.agents.runtime_state as runtime_state_module
 from langchain.agents.middleware import ToolCallRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.runtime import Runtime
 
 from research_agent.agents.runtime_state import (
     ExecutedSearchTrackingMiddleware,
@@ -274,26 +276,26 @@ def test_search_middleware_blocks_external_search_until_library_was_queried() ->
         "thread-a",
         year_from=2024,
         year_to=2026,
-        quality_venues_only=False,
+        max_search_rounds=3,
         prefer_library_search=True,
     )
     middleware = ExecutedSearchTrackingMiddleware(state)
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
 
-    def request(name: str, query: str, call_id: str) -> ToolCallRequest:
+    def request(name: str, args: dict, call_id: str) -> ToolCallRequest:
         return ToolCallRequest(
-            tool_call={"name": name, "args": {"query": query}, "id": call_id},
+            tool_call={"name": name, "args": args, "id": call_id},
             tool=None,
             state={},
             runtime=runtime,
         )
 
     blocked = middleware.wrap_tool_call(
-        request("search_openalex", "external gap", "call-1"),
+        request("search_multi_source", {"queries": ["external gap"]}, "call-1"),
         lambda _request: "should not execute",
     )
     local = middleware.wrap_tool_call(
-        request("search_library", "local topic", "call-2"),
+        request("search_library", {"query": "local topic"}, "call-2"),
         lambda _request: ToolMessage(
             content="[]",
             tool_call_id="call-2",
@@ -301,7 +303,11 @@ def test_search_middleware_blocks_external_search_until_library_was_queried() ->
         ),
     )
     external = middleware.wrap_tool_call(
-        request("search_openalex", "specific uncovered direction", "call-3"),
+        request(
+            "search_multi_source",
+            {"queries": ["specific uncovered direction"]},
+            "call-3",
+        ),
         lambda _request: ToolMessage(
             content="[]",
             tool_call_id="call-3",
@@ -321,7 +327,7 @@ def test_search_middleware_skips_library_when_user_disables_priority() -> None:
         "thread-a",
         year_from=2024,
         year_to=2026,
-        quality_venues_only=False,
+        max_search_rounds=3,
         prefer_library_search=False,
     )
     middleware = ExecutedSearchTrackingMiddleware(state)
@@ -360,8 +366,54 @@ def test_search_middleware_skips_library_when_user_disables_priority() -> None:
         "queries": ["visual geolocation benchmark"],
         "year_from": 2024,
         "year_to": 2026,
-        "quality_venues_only": False,
     }
+
+
+def test_search_middleware_enforces_user_query_design_round_limit() -> None:
+    state = ResearchRuntimeState()
+    state.set_search_constraints(
+        "thread-a",
+        year_from=2020,
+        year_to=2026,
+        max_search_rounds=2,
+        prefer_library_search=False,
+    )
+    middleware = ExecutedSearchTrackingMiddleware(state)
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "thread-a"}})
+
+    def run(call_id: str, queries: list[str]):
+        request = ToolCallRequest(
+            tool_call={
+                "name": "search_multi_source",
+                "args": {"queries": queries},
+                "id": call_id,
+            },
+            tool=None,
+            state={},
+            runtime=runtime,
+        )
+        return middleware.wrap_tool_call(
+            request,
+            lambda _request: ToolMessage(
+                content='{"candidates": []}',
+                tool_call_id=call_id,
+                name="search_multi_source",
+            ),
+        )
+
+    first = run("round-1", ["initial task", "initial benchmark"])
+    second = run("round-2", ["uncovered failure mode"])
+    blocked = run("round-3", ["third redesign"])
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert blocked.status == "error"
+    assert "search_round_limit_reached" in blocked.content
+    assert state.search_query_rounds("thread-a") == [
+        ["initial task", "initial benchmark"],
+        ["uncovered failure mode"],
+    ]
+    assert "third redesign" not in state.search_terms("thread-a")
 
 
 def test_multi_source_search_tracks_each_query_and_captures_merged_candidates() -> None:
@@ -703,3 +755,62 @@ def test_paper_fetch_attempts_can_reset_for_a_fresh_subagent() -> None:
     assert state.reserve_paper_fetch(*args) == "duplicate_paper_fetch"
     state.reset_paper_fetch("thread-a", "https://openalex.org/W9")
     assert state.reserve_paper_fetch(*args) is None
+
+
+def test_paper_fetch_reset_matches_paper_id_when_original_key_used_doi() -> None:
+    state = ResearchRuntimeState()
+    args = (
+        "thread-a",
+        "arXiv:2406.11213v4",
+        "10.48550/arXiv.2406.11213v4",
+        "https://arxiv.org/pdf/2406.11213v4",
+        2,
+    )
+
+    assert state.reserve_paper_fetch(*args) is None
+    assert state.has_paper_fetch_attempt("thread-a", "arXiv:2406.11213v4") is True
+    state.reset_paper_fetch("thread-a", "arXiv:2406.11213v4")
+
+    assert state.has_paper_fetch_attempt("thread-a", "arXiv:2406.11213v4") is False
+    assert state.reserve_paper_fetch(*args) is None
+
+
+def test_paper_fetch_guard_removes_fetch_tool_after_first_attempt(monkeypatch) -> None:
+    state = ResearchRuntimeState()
+    guard = PaperFetchGuardMiddleware(state, max_attempts_per_paper=2)
+    state.reserve_paper_fetch(
+        "thread-a",
+        "arXiv:2406.11213v4",
+        "10.48550/arXiv.2406.11213v4",
+        "https://arxiv.org/pdf/2406.11213v4",
+        2,
+    )
+
+    class FakeRequest(SimpleNamespace):
+        def override(self, **changes):
+            return FakeRequest(**{**vars(self), **changes})
+
+    request = FakeRequest(
+        state={
+            "messages": [
+                HumanMessage(content="paper_id: arXiv:2406.11213v4"),
+                ToolMessage(
+                    content='{"available": true, "total_pages": 35}',
+                    tool_call_id="fetch-1",
+                ),
+            ]
+        },
+        runtime=Runtime(),
+        tools=[SimpleNamespace(name="fetch_paper_text"), SimpleNamespace(name="PaperCard")],
+        system_message=SystemMessage(content="reader"),
+    )
+    monkeypatch.setattr(
+        runtime_state_module,
+        "get_config",
+        lambda: {"configurable": {"thread_id": "thread-a"}},
+    )
+
+    captured = guard.wrap_model_call(request, lambda updated: updated)
+
+    assert [tool.name for tool in captured.tools] == ["PaperCard"]
+    assert "必须立即" in captured.system_message.content

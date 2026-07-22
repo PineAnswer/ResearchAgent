@@ -180,7 +180,7 @@ JsonArtifactExporter 刷新对应 JSON 镜像
 不同子 Agent 的提交效果为：
 
 - Scout：搜索中间件捕获原始论文元数据，`recording_runnable` 再用 `candidate_ids` 筛选并重建 `candidates`。Scout 在一次子任务内按前端限制自动完成多轮检索、标题摘要级筛选、覆盖盲区分析和检索词调整；随后保存最终 `SearchReport`。非空候选集会同时创建 `CandidateSetSnapshot`，项目经 `SEARCHED` 进入 `SEARCH_REVIEW_PENDING` 并等待用户最终手筛。
-- 检索审核：保存 `SearchFeedback`、可选的 `SupplementalSearchReport` 和新版 `CandidateSetSnapshot`；用户确认后保存 `ScreeningDecision` 并进入 `SCREENED`。后续运行开始前可追加补偿事件撤销到上一版候选集；点击继续后进入精读。
+- 检索审核：保存 `SearchFeedback`、可选的 `SupplementalSearchReport` 和新版 `CandidateSetSnapshot`；用户确认后保存 `ScreeningDecision`、进入 `SCREENED`，并立即创建后续研究任务开始精读。
 - Reader：保存单篇 `PaperCard`，阶段暂不变化；全部入选论文处理完后由主 Agent推进 `SCREENED → EXTRACTED`。
 - Synthesizer：保存 `SynthesisReport`，`EXTRACTED → SYNTHESIZED`。
 - Reviewer：保存 `ReviewResult`，`REVIEW_PENDING → REVIEWED`。PASS 在同一运行内继续写作；首次 REVISE 自动回到 `EXTRACTED` 修订并复审一次，第二次仍需修订时保存 `RuntimeIssue` 并停止。

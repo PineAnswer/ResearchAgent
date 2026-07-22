@@ -213,20 +213,23 @@ class SearchReviewService:
         snapshot: CandidateSetSnapshot | None = None,
         feedback: SearchFeedback | None = None,
     ) -> tuple[int, int, int]:
-        max_rounds = (
-            feedback.max_search_rounds
-            if feedback is not None and feedback.max_search_rounds is not None
-            else snapshot.max_search_rounds
-            if snapshot is not None
-            else self.max_rounds
-        )
-        return 1, self.max_papers, max_rounds
+        return 1, self.max_papers, self.max_rounds
 
     @staticmethod
     def _query_rounds_from_report(report: Mapping[str, Any]) -> list[list[str]]:
         rounds: list[list[str]] = []
         for entry in report.get("search_iteration_log", []) or []:
-            query = str(entry.get("query", "") if isinstance(entry, Mapping) else "").strip()
+            if not isinstance(entry, Mapping):
+                continue
+            queries = [
+                str(query).strip()
+                for query in entry.get("queries", []) or []
+                if str(query).strip()
+            ]
+            if queries:
+                rounds.append(queries)
+                continue
+            query = str(entry.get("query", "")).strip()
             if query:
                 rounds.append([query])
         if rounds:
@@ -325,7 +328,6 @@ class SearchReviewService:
         max_search_rounds: int | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -341,9 +343,9 @@ class SearchReviewService:
             action="refine",
             min_papers=min_papers,
             max_papers=max_papers,
-            max_search_rounds=max_search_rounds,
         )
-        min_papers, max_papers, max_rounds = self._resolve_limits(feedback=config)
+        min_papers, max_papers, _ = self._resolve_limits(feedback=config)
+        max_rounds = max_search_rounds or self.max_rounds
         resolved_year_from = 2000 if year_from is None else year_from
         resolved_year_to = 2026 if year_to is None else year_to
         enforce_year_range = year_from is not None or year_to is not None
@@ -367,11 +369,6 @@ class SearchReviewService:
                     f"发表年份 {candidate.year} 不在 "
                     f"{resolved_year_from}-{resolved_year_to} 范围内"
                 )
-            if quality_venues_only and (
-                self.venue_index is None
-                or not self.venue_index.qualifies_for_quality_filter(payload)
-            ):
-                reasons.append("未确认属于 CCF-A、JCR Q1 或 Nature Portfolio")
             if reasons:
                 filtered_candidates.append(candidate)
                 filtered_candidate_reasons[_candidate_id(candidate)] = reasons
@@ -405,11 +402,11 @@ class SearchReviewService:
             query_rounds=query_rounds,
             search_round=len(query_rounds),
             max_search_rounds=max_rounds,
+            max_manual_search_rounds=self.max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
             year_from=resolved_year_from,
             year_to=resolved_year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
             **agent_fields,
         )
@@ -726,7 +723,6 @@ class SearchReviewService:
                     "limit_per_source": min(self.search_limit, 10),
                     "year_from": snapshot.year_from,
                     "year_to": snapshot.year_to,
-                    "quality_venues_only": snapshot.quality_venues_only,
                 }
             )
             parsed = json.loads(raw)
@@ -756,7 +752,6 @@ class SearchReviewService:
                     "limit": self.search_limit,
                     "year_from": snapshot.year_from,
                     "year_to": snapshot.year_to,
-                    "quality_venues_only": snapshot.quality_venues_only,
                 }
             )
             parsed = json.loads(raw)
@@ -814,6 +809,75 @@ class SearchReviewService:
         )
 
     @staticmethod
+    def _merge_candidate_pair(
+        current: PaperCandidate, addition: PaperCandidate
+    ) -> PaperCandidate:
+        """Merge duplicate metadata without replacing a richer stored record."""
+        merged = current.model_dump(mode="json")
+        incoming = addition.model_dump(mode="json")
+        for field in ("title", "abstract"):
+            if len(str(incoming.get(field) or "")) > len(str(merged.get(field) or "")):
+                merged[field] = incoming[field]
+        for field in (
+            "paper_id",
+            "year",
+            "doi",
+            "url",
+            "venue",
+            "venue_type",
+            "venue_acronym",
+            "publication_type",
+            "ccf_rank",
+            "ccf_category",
+            "ccf_year",
+            "sci_quartile",
+            "index_name",
+            "impact_factor",
+            "impact_factor_year",
+            "venue_rating_explanation",
+            "venue_rating_source_url",
+            "venue_rating_source_label",
+            "venue_match_confidence",
+        ):
+            if merged.get(field) in (None, "") and incoming.get(field) not in (None, ""):
+                merged[field] = incoming[field]
+        for field in ("authors", "sources", "matched_queries", "fields_of_study"):
+            merged[field] = list(
+                dict.fromkeys([*(merged.get(field) or []), *(incoming.get(field) or [])])
+            )
+        for field in (
+            "citation_counts",
+            "citation_percentiles",
+            "influential_citation_counts",
+            "recent_citation_velocities",
+            "momentum_percentiles",
+        ):
+            values = dict(merged.get(field) or {})
+            for source, value in (incoming.get(field) or {}).items():
+                if source not in values or value > values[source]:
+                    values[source] = value
+            merged[field] = values
+        merged["nature_portfolio"] = bool(
+            merged.get("nature_portfolio") or incoming.get("nature_portfolio")
+        )
+        merged["is_retracted"] = bool(
+            merged.get("is_retracted") or incoming.get("is_retracted")
+        )
+        sources = merged.get("sources") or []
+        if not sources:
+            sources = list(
+                dict.fromkeys(
+                    source
+                    for source in (merged.get("source"), incoming.get("source"))
+                    if source
+                )
+            )
+            merged["sources"] = sources
+        if sources:
+            merged["source"] = " + ".join(sources)
+        return PaperCandidate.model_validate(merged)
+
+    @staticmethod
     def _merge_candidates(
         current: Sequence[PaperCandidate],
         additions: Sequence[PaperCandidate],
@@ -824,7 +888,13 @@ class SearchReviewService:
             candidate_id = _candidate_id(candidate)
             if candidate_id in excluded_ids:
                 continue
-            merged[_candidate_key(candidate)] = candidate
+            key = _candidate_key(candidate)
+            if key in merged:
+                merged[key] = SearchReviewService._merge_candidate_pair(
+                    merged[key], candidate
+                )
+            else:
+                merged[key] = candidate
         return list(merged.values())
 
     def apply_feedback(self, project_id: str, feedback: SearchFeedback) -> dict[str, Any]:
@@ -864,7 +934,7 @@ class SearchReviewService:
             if key and key not in seen_queries:
                 seen_queries.add(key)
                 new_queries.append(query)
-        if new_queries and snapshot.search_round >= max_rounds:
+        if new_queries and snapshot.manual_search_round >= max_rounds:
             raise WorkflowPrerequisiteError(
                 f"Search review round limit reached: {max_rounds}"
             )
@@ -929,17 +999,19 @@ class SearchReviewService:
             blocked_reason=blocked_reason,
             excluded_paper_ids=sorted(excluded_ids),
             executed_queries=[*snapshot.executed_queries, *new_queries],
-            query_rounds=[
-                *prior_query_rounds,
+            query_rounds=prior_query_rounds,
+            search_round=snapshot.search_round,
+            max_search_rounds=snapshot.max_search_rounds,
+            manual_query_rounds=[
+                *snapshot.manual_query_rounds,
                 *([new_queries] if new_queries else []),
             ],
-            search_round=snapshot.search_round + (1 if new_queries else 0),
-            max_search_rounds=max_rounds,
+            manual_search_round=snapshot.manual_search_round + (1 if new_queries else 0),
+            max_manual_search_rounds=max_rounds,
             min_papers=min_papers,
             max_papers=max_papers,
             year_from=snapshot.year_from,
             year_to=snapshot.year_to,
-            quality_venues_only=snapshot.quality_venues_only,
             prefer_library_search=snapshot.prefer_library_search,
             **self._agent_review_fields(
                 candidates,

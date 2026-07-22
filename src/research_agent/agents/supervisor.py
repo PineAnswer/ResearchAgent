@@ -291,7 +291,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> dict[str, Any]:
         # Deep-reading bounds protect system workload and completion reliability.
@@ -303,7 +302,6 @@ class ResearchSupervisor:
             "max_papers": self.search_review.max_papers,
             "year_from": year_from,
             "year_to": year_to,
-            "quality_venues_only": quality_venues_only,
             "prefer_library_search": prefer_library_search,
         }
         if max_search_rounds is not None:
@@ -318,7 +316,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> None:
         options = self._search_review_options(
@@ -327,7 +324,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         self._search_review_options_by_thread[thread_id] = dict(options)
@@ -335,7 +331,9 @@ class ResearchSupervisor:
             thread_id,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
+            max_search_rounds=int(
+                options.get("max_search_rounds", self.search_review.max_rounds)
+            ),
             prefer_library_search=prefer_library_search,
         )
 
@@ -357,8 +355,6 @@ class ResearchSupervisor:
             self.runtime_assets.skill_contents,
             model=model,
             runtime_state=self.runtime_state,
-            max_openalex_searches=self.settings.max_openalex_searches,
-            max_crossref_searches=self.settings.max_crossref_searches,
             max_paper_fetches_per_paper=self.settings.max_paper_fetches_per_paper,
             memory_provider=self.service.build_agent_memory,
         )
@@ -421,7 +417,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> str:
         limits: list[str] = [
@@ -430,10 +425,9 @@ class ResearchSupervisor:
         if max_papers is not None:
             limits.append(f"- 系统单次精读容量：最多 {max_papers} 篇；至少选择 1 篇")
         if max_search_rounds is not None:
-            limits.append(f"- 系统检索-筛选迭代轮数上限：{max_search_rounds}")
-        if quality_venues_only:
             limits.append(
-                "- 出版物质量：仅 CCF-A、JCR Q1 或 Nature Portfolio 期刊（后端强制过滤）"
+                f"- Agent 检索词设计最多 {max_search_rounds} 轮；"
+                "首次检索计为第 1 轮，每轮可包含多条检索词"
             )
         limits.append(
             "- 文献库优先检索："
@@ -495,7 +489,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> str:
         base = cls.build_prompt(
@@ -506,7 +499,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         return (
@@ -629,7 +621,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> dict:
         active_thread_id = thread_id or uuid.uuid4().hex
@@ -639,7 +630,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
@@ -679,7 +669,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> dict:
         if self.graph is None:
@@ -693,7 +682,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)
@@ -815,7 +803,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
@@ -835,7 +822,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(thread_id, **options)
@@ -901,7 +887,6 @@ class ResearchSupervisor:
         max_search_rounds: int | None = None,
         year_from: int = 2024,
         year_to: int = 2026,
-        quality_venues_only: bool = False,
         prefer_library_search: bool = False,
     ) -> AsyncIterator[dict]:
         if self.graph is None:
@@ -915,7 +900,6 @@ class ResearchSupervisor:
             max_search_rounds=max_search_rounds,
             year_from=year_from,
             year_to=year_to,
-            quality_venues_only=quality_venues_only,
             prefer_library_search=prefer_library_search,
         )
         self._register_search_review_options(active_thread_id, **search_review_options)

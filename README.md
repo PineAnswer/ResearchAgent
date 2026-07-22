@@ -90,7 +90,7 @@ research-agent serve --host 127.0.0.1 --port 8000
 1. 填写研究主题、研究问题和检索偏好后发起研究。
 2. `literature-scout` 默认直接进行外部检索；启用“优先检索本地文献库”后才会先复用本地论文。它会把长问题拆成多条互补短查询，同时检索 OpenAlex、Crossref、Semantic Scholar 和 arXiv。系统按 DOI/标题合并重复论文，保留每篇论文命中的来源和查询轨迹，再进行标题摘要级筛选；候选数量或单个来源失败不会阻止系统提交已有真实结果。
 3. 在候选论文区查看 Agent 初筛意见，进行最终手筛，也可以补充检索词、手动加入 DOI 或排除论文。
-4. 确认候选集后，可以先撤销确认或点击“继续研究”进入精读模式。系统从 SQLite 恢复项目，依次完成论文精读、综合、证据审查、综述提纲、分节写作和总编整合；完整综述生成后项目结束。
+4. 确认候选集后，系统立即进入精读模式，依次完成论文精读、综合、证据审查、综述提纲、分节写作和总编整合；完整综述生成后项目结束。
 5. 在项目详情中查看状态事件和产物。产物默认以结构化 HTML 展示，也可切换到 JSON 原文。
 
 每个子 Agent 开始工作前都会收到由已提交产物生成的共享记忆账本：任务账本说明当前
@@ -236,7 +236,7 @@ GET /api/projects/RP-.../search-review
 }
 ```
 
-确认后，前端会显示撤销与继续入口；点击继续后调用继续接口。外部集成或打开旧的 `SCREENED` 项目时，也可以手动调用：
+确认后，筛选反馈接口会直接创建后续研究任务，前端无需再次确认。外部集成、旧的 `SCREENED` 项目或中断恢复仍可以手动调用：
 
 ```text
 POST /api/projects/RP-.../continue
@@ -371,8 +371,6 @@ src/research_agent/
 默认预算：
 
 ```dotenv
-RESEARCH_AGENT_MAX_OPENALEX_SEARCHES=3
-RESEARCH_AGENT_MAX_CROSSREF_SEARCHES=1
 RESEARCH_AGENT_MAX_PAPER_FETCHES_PER_PAPER=2
 RESEARCH_AGENT_SEARCH_MAX_RETRIES=3
 RESEARCH_AGENT_SEARCH_BACKOFF_SECONDS=1.0
@@ -389,14 +387,15 @@ RESEARCH_AGENT_MAX_SUGGESTED_QUERIES_PER_ROUND=3
 - 全文不可用但摘要存在时，Reader 可以生成标明 `section="abstract"`、`page=null` 的摘要级 Evidence。
 - 全文与摘要都不可用时，`findings` 为空，并在 `limitations` 中说明证据缺失。
 
-## 年份、期刊与会议筛选
+## 年份与期刊、会议信息
 
-网页端在开始调研前提供两个硬筛选条件：
+网页端在开始调研前提供发表年份硬筛选，允许选择 `2000-2026`，默认
+`2024-2026`。年份范围会传给多源检索适配器，并在本地再次校验。
 
-- 发表年份允许选择 `2000-2026`，默认 `2024-2026`。年份范围会传给多源检索适配器，并在本地再次校验。
-- “仅 CCF-A、一区和 Nature 子刊”默认不勾选。勾选后采用并集规则，只保留 `CCF-A`、`JCR Q1` 或 `Nature Portfolio` 中至少命中一项的论文；不勾选时不限制来源级别。
-
-候选论文卡片会显示期刊或会议名称、CCF 评级、JCR 分区、影响因子及其数据年份。未可靠命中的来源会明确显示“暂无可靠评级数据”，不会根据名称猜测。也可以通过 `GET /api/venues/lookup?q=TPAMI&venue_type=journal` 单独查询本地评级库。
+候选论文不会按场馆等级硬过滤。卡片仍会显示期刊或会议名称、CCF 评级、JCR
+分区、影响因子及其数据年份，用于排序参考和人工判断。未可靠命中的来源会明确显示
+“暂无可靠评级数据”。也可以通过 `GET /api/venues/lookup?q=TPAMI&venue_type=journal`
+单独查询本地评级库。
 
 评级数据在启动时导入同一个 SQLite 数据库，并通过规范化别名、精确匹配和全文候选重排完成快速检索。当前种子数据包括 CCF 2026 第七版全部 A 类会议和期刊、IEEE 官方 2026 title list 中的 Q1/Q2 期刊，以及 Nature Portfolio 官方 2025 指标页中的期刊：
 

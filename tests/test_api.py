@@ -380,6 +380,8 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "欢迎使用论文研读工作台" in index.text
     assert "今天想研究什么？" in index.text
     assert "继续上次研究" not in index.text
+    assert "候选集已经确认" not in index.text
+    assert 'id="undoDecision"' not in index.text
     assert 'id="projectSearch"' in index.text
     assert 'id="toggleProjectSelection"' in index.text
     assert 'id="projectBulkBar"' in index.text
@@ -749,3 +751,68 @@ def test_search_review_api_can_show_accept_and_continue_project(
     assert "screened_context" in prompt
     assert '"included_paper_ids": [\n    "P1"\n  ]' in prompt
     assert "不要为了寻找 ScreeningDecision 去读取或 grep 完整大快照" in prompt
+
+
+def test_accepting_conversation_candidates_starts_research_immediately(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    settings = Settings(
+        model="openai:gpt-4.1-mini",
+        data_dir=tmp_path,
+        database_path=tmp_path / "agent.db",
+        filesystem_root=tmp_path / "filesystem",
+    )
+    app = create_app(settings)
+    supervisor = app.state.supervisor
+    conversation, project = supervisor.service.create_conversation("topic", "question")
+    supervisor.service.save_artifact_and_transition(
+        project.project_id,
+        "SearchReport",
+        {
+            "query": "question",
+            "search_terms": ["query"],
+            "candidates": [
+                {"paper_id": "P1", "title": "Paper", "source": "OpenAlex"}
+            ],
+        },
+        target=ResearchStage.SEARCHED,
+        actor="literature-scout",
+    )
+    supervisor.search_review.begin_review(project.project_id)
+    started = {}
+
+    class FakeRun:
+        def model_dump(self, mode="json"):
+            del mode
+            return {
+                "run_id": "RUN-followup",
+                "conversation_id": conversation.conversation_id,
+                "project_id": project.project_id,
+                "thread_id": conversation.thread_id,
+                "kind": "continue",
+                "status": "queued",
+                "phase": "reading",
+                "message": "queued",
+            }
+
+    async def fake_start_continue(conversation_id, user_id):
+        started.update(conversation_id=conversation_id, user_id=user_id)
+        return FakeRun()
+
+    app.state.run_manager.start_continue = fake_start_continue
+
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                f"/api/projects/{project.project_id}/search-feedback",
+                json={"action": "accept"},
+            )
+
+    response = asyncio.run(exercise_api())
+
+    assert response.status_code == 200
+    assert response.json()["data"]["research_started"] is True
+    assert response.json()["data"]["run"]["run_id"] == "RUN-followup"
+    assert started["conversation_id"] == conversation.conversation_id

@@ -54,8 +54,6 @@ def build_subagent_registry(
     skill_contents: Mapping[str, str],
     model: str | BaseChatModel,
     runtime_state: ResearchRuntimeState | None = None,
-    max_openalex_searches: int = 3,
-    max_crossref_searches: int = 1,
     max_paper_fetches_per_paper: int = 2,
     memory_provider: Callable[[str, str, str], dict[str, Any]] | None = None,
 ) -> Sequence[dict]:
@@ -74,18 +72,12 @@ def build_subagent_registry(
         tools_by_name["search_library"],
         tools_by_name["search_multi_source"],
     ]
-    scout_model_limit = max(6, max_openalex_searches + 5)
     scout_middleware = [
         SerialToolExecutionMiddleware(),
-        ModelCallLimitMiddleware(run_limit=scout_model_limit, exit_behavior="end"),
+        ModelCallLimitMiddleware(run_limit=16, exit_behavior="end"),
         ToolCallLimitMiddleware(
             tool_name="search_library",
             run_limit=2,
-            exit_behavior="end",
-        ),
-        ToolCallLimitMiddleware(
-            tool_name="search_multi_source",
-            run_limit=max(1, max_openalex_searches),
             exit_behavior="end",
         ),
     ]
@@ -100,10 +92,9 @@ def build_subagent_registry(
                 + (
                     "\n\n## 本次任务的真实工具预算\n"
                     "- search_library：可选，最多2次；仅在任务要求文献库优先或确有复用需要时调用。"
-                    "首次返回空数组后禁止再次调用，下一次必须调用search_openalex。\n"
-                    f"- search_openalex：最多{max_openalex_searches}次。\n"
-                    f"- search_crossref：最多{max_crossref_searches}次。\n"
-                    "- 检索迭代轮数与单个工具调用上限是不同概念，禁止混用。\n"
+                    "首次返回空数组后禁止再次调用，下一次必须调用search_multi_source。\n"
+                    "- search_multi_source：每次调用算一轮检索词设计；"
+                    "实际轮数由用户创建研究时填写的上限控制。\n"
                 ),
                 "literature-search",
                 skill_contents["literature-search"],

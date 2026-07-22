@@ -240,8 +240,9 @@
             <fieldset class="brief-settings">
               <legend>研究范围</legend>
               <label class="field" for="initialMaxSearchRounds">
-                <span>自动检索轮次</span>
-                <input id="initialMaxSearchRounds" type="number" min="1" value="3" />
+                <span>Agent 检索词迭代轮次</span>
+                <input id="initialMaxSearchRounds" type="number" min="1" max="10" value="3" />
+                <small>首轮计入；每轮可生成多条检索词，查看结果并分析覆盖盲区后再设计下一轮。</small>
               </label>
               <label class="field" for="initialYearFrom">
                 <span>起始年份</span>
@@ -252,13 +253,6 @@
                 <input id="initialYearTo" type="number" min="2000" max="2026" value="2026" />
               </label>
               <div class="research-option-grid">
-                <label class="quality-filter-option" for="initialQualityVenuesOnly">
-                  <input id="initialQualityVenuesOnly" type="checkbox" />
-                  <span>
-                    <strong>仅 CCF-A、一区和 Nature 子刊</strong>
-                    <small>勾选后只保留 CCF-A、JCR Q1 或 Nature Portfolio 论文；不勾选则不限制出版物等级。</small>
-                  </span>
-                </label>
                 <label class="quality-filter-option" for="initialPreferLibrarySearch">
                   <input id="initialPreferLibrarySearch" type="checkbox" />
                   <span>
@@ -719,7 +713,7 @@
                 <div>
                   <button id="undoReview" class="secondary" type="button" hidden>撤销上一步</button>
                   <button id="refineReview" class="secondary" type="button">更新候选集</button>
-                  <button id="acceptReview" class="primary" type="button">确认当前选择</button>
+                  <button id="acceptReview" class="primary" type="button">确认并开始研究</button>
                 </div>
               </div>
             </section>
@@ -727,14 +721,13 @@
 
           <section id="continuePanel" class="continue-panel" hidden>
             <div>
-              <p id="continueEyebrow" class="eyebrow">筛选已完成</p>
-              <h3 id="continueTitle">候选集已经确认</h3>
-              <p id="continueText">继续后将读取论文、整理研究结果并生成综述。</p>
+              <p id="continueEyebrow" class="eyebrow">恢复研究</p>
+              <h3 id="continueTitle">继续未完成的研究</h3>
+              <p id="continueText">系统将从已保存的进度继续执行。</p>
             </div>
             <div class="continue-actions">
-              <button id="undoDecision" class="secondary" type="button" hidden>撤销审核操作</button>
               <button id="continueResearch" class="primary" type="button">
-                <span id="continueButtonLabel">继续研究</span>
+                <span id="continueButtonLabel">恢复研究</span>
                 <i data-lucide="arrow-right" aria-hidden="true"></i>
               </button>
             </div>
@@ -816,7 +809,7 @@
         </li>
         <li>
           <i data-lucide="play" aria-hidden="true"></i>
-          <div><strong>继续研究</strong><span>确认候选后，让智能体完成论文精读、结果整理和综述写作。</span></div>
+          <div><strong>自动研究</strong><span>确认候选后，智能体会立即开始论文精读、结果整理和综述写作。</span></div>
         </li>
         <li>
           <i data-lucide="file-check-2" aria-hidden="true"></i>

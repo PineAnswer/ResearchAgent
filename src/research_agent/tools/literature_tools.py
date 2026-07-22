@@ -125,18 +125,48 @@ def _safe_public_url(value: str) -> bool:
     return not (address.is_private or address.is_loopback or address.is_link_local)
 
 
-def extract_pdf_pages(path: str | Path, max_pages: int = 30) -> list[dict[str, str | int]]:
-    """Extract page-numbered text for both workspace tools and library ingestion."""
+DEFAULT_PAPER_MAX_PAGES = 100
+HARD_PAPER_MAX_PAGES = 200
+
+
+def _extract_pdf_payload(
+    path: str | Path,
+    max_pages: int = DEFAULT_PAPER_MAX_PAGES,
+) -> dict[str, object]:
+    """Extract a bounded document and report whether every PDF page was covered."""
     from pypdf import PdfReader
 
     reader = PdfReader(Path(path))
+    total_pages = len(reader.pages)
+    page_limit = max(1, min(int(max_pages), HARD_PAPER_MAX_PAGES))
+    extracted_count = min(total_pages, page_limit)
     pages: list[dict[str, str | int]] = []
     for index, page in enumerate(
-        reader.pages[: max(1, min(int(max_pages), 100))],
+        reader.pages[:extracted_count],
         start=1,
     ):
         pages.append({"page": index, "text": page.extract_text() or ""})
-    return pages
+    missing_ranges = (
+        [[extracted_count + 1, total_pages]]
+        if extracted_count < total_pages
+        else []
+    )
+    return {
+        "pages": pages,
+        "total_pages": total_pages,
+        "extracted_page_count": extracted_count,
+        "covered_ranges": [[1, extracted_count]] if extracted_count else [],
+        "missing_ranges": missing_ranges,
+        "truncated": bool(missing_ranges),
+    }
+
+
+def extract_pdf_pages(
+    path: str | Path,
+    max_pages: int = DEFAULT_PAPER_MAX_PAGES,
+) -> list[dict[str, str | int]]:
+    """Extract page-numbered text for both workspace tools and library ingestion."""
+    return list(_extract_pdf_payload(path, max_pages)["pages"])
 
 
 def _arxiv_id(value: str) -> str:
@@ -349,7 +379,6 @@ def build_literature_tools(
         limit: int,
         year_from: int | None,
         year_to: int | None,
-        quality_venues_only: bool,
     ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -363,11 +392,6 @@ def build_literature_tools(
                 if venue_index is not None
                 else dict(candidate)
             )
-            if quality_venues_only and (
-                venue_index is None
-                or not venue_index.qualifies_for_quality_filter(enriched)
-            ):
-                continue
             prepared.append(enriched)
             if len(prepared) >= limit:
                 break
@@ -379,11 +403,10 @@ def build_literature_tools(
         limit: int = 5,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
     ) -> str:
-        """Search OpenAlex with enforced year and venue-quality constraints."""
+        """Search OpenAlex with enforced year constraints."""
         limit = max(1, min(limit, 20))
-        upstream_limit = min(50, max(limit, limit * 5 if quality_venues_only else limit))
+        upstream_limit = limit
         params = {
             "search": query,
             "per-page": upstream_limit,
@@ -471,7 +494,6 @@ def build_literature_tools(
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
-                quality_venues_only=quality_venues_only,
             ),
             ensure_ascii=False,
         )
@@ -482,11 +504,10 @@ def build_literature_tools(
         limit: int = 5,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
     ) -> str:
-        """Search Crossref with enforced year and venue-quality constraints."""
+        """Search Crossref with enforced year constraints."""
         limit = max(1, min(limit, 20))
-        upstream_limit = min(50, max(limit, limit * 5 if quality_venues_only else limit))
+        upstream_limit = limit
         params = {"query": query, "rows": upstream_limit}
         filters: list[str] = []
         if year_from is not None:
@@ -566,7 +587,6 @@ def build_literature_tools(
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
-                quality_venues_only=quality_venues_only,
             ),
             ensure_ascii=False,
         )
@@ -577,11 +597,10 @@ def build_literature_tools(
         limit: int = 5,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
     ) -> str:
         """Search Semantic Scholar and return normalized paper metadata."""
         limit = max(1, min(limit, 20))
-        upstream_limit = min(50, max(limit, limit * 4 if quality_venues_only else limit))
+        upstream_limit = limit
         fields = (
             "paperId,title,authors,year,abstract,externalIds,url,venue,"
             "publicationTypes,openAccessPdf,citationCount,influentialCitationCount,"
@@ -681,7 +700,6 @@ def build_literature_tools(
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
-                quality_venues_only=quality_venues_only,
             ),
             ensure_ascii=False,
         )
@@ -692,7 +710,6 @@ def build_literature_tools(
         limit: int = 5,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
     ) -> str:
         """Search arXiv and return normalized preprint metadata."""
         limit = max(1, min(limit, 20))
@@ -776,7 +793,6 @@ def build_literature_tools(
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
-                quality_venues_only=quality_venues_only,
             ),
             ensure_ascii=False,
         )
@@ -863,48 +879,12 @@ def build_literature_tools(
         merged["matched_queries"] = matched_queries
         merged["source"] = " + ".join(sources)
 
-    def candidate_relevance(
-        candidate: dict[str, Any],
-        queries: list[str],
-    ) -> float:
-        title_tokens = set(
-            re.findall(
-                r"[\w]+",
-                str(candidate.get("title") or "").casefold(),
-                flags=re.UNICODE,
-            )
-        )
-        abstract_tokens = set(
-            re.findall(
-                r"[\w]+",
-                str(candidate.get("abstract") or "").casefold(),
-                flags=re.UNICODE,
-            )
-        )
-        score = 0.0
-        for query in queries:
-            query_tokens = set(
-                re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
-            )
-            if not query_tokens:
-                continue
-            score += 3.0 * len(query_tokens & title_tokens) / len(query_tokens)
-            score += 1.0 * len(query_tokens & abstract_tokens) / len(query_tokens)
-        score += 1.5 * len(candidate.get("sources") or [])
-        score += 0.75 * len(candidate.get("matched_queries") or [])
-        if candidate.get("abstract"):
-            score += 0.5
-        if candidate.get("doi"):
-            score += 0.25
-        return round(score, 4)
-
     @tool
     def search_multi_source(
         queries: list[str],
         limit_per_source: int = 5,
         year_from: int | None = None,
         year_to: int | None = None,
-        quality_venues_only: bool = False,
     ) -> str:
         """Run a portfolio of short queries against four scholarly sources.
 
@@ -943,27 +923,12 @@ def build_literature_tools(
         ]
         def search_one_source(source: str, source_tool: Any) -> list[dict[str, Any]]:
             results = []
-            source_failure: dict[str, Any] | None = None
             for query in normalized_queries:
-                if source_failure is not None:
-                    results.append(
-                        {
-                            "query": query,
-                            "parsed": {
-                                "ok": False,
-                                "error_code": "source_unavailable",
-                                "error": source_failure.get("error", ""),
-                                "attempts": 0,
-                            },
-                        }
-                    )
-                    continue
                 inputs = {
                     "query": query,
                     "limit": limit_per_source,
                     "year_from": year_from,
                     "year_to": year_to,
-                    "quality_venues_only": quality_venues_only,
                 }
                 raw: Any = None
                 invocation_error: Exception | None = None
@@ -993,8 +958,6 @@ def build_literature_tools(
                             "error": f"{source} returned an invalid response",
                             "attempts": 1,
                         }
-                if isinstance(parsed, dict):
-                    source_failure = parsed
                 results.append({"query": query, "parsed": parsed})
             return results
 
@@ -1202,7 +1165,7 @@ def build_literature_tools(
         paper_id: str,
         doi: str = "",
         url: str = "",
-        max_pages: int = 30,
+        max_pages: int = DEFAULT_PAPER_MAX_PAGES,
     ) -> str:
         """Fetch an openly available paper PDF and return page-numbered text.
 
@@ -1221,19 +1184,20 @@ def build_literature_tools(
             )
         papers_dir = allowed_root / "papers"
         papers_dir.mkdir(parents=True, exist_ok=True)
+        extraction_limit = max(DEFAULT_PAPER_MAX_PAGES, int(max_pages))
         digest = hashlib.sha256(
             _paper_cache_key(paper_id, doi, url).encode()
         ).hexdigest()[:20]
         path = papers_dir / f"{digest}.pdf"
         if path.exists():
             try:
-                pages = extract_pdf_pages(path, max_pages)
+                extracted = _extract_pdf_payload(path, extraction_limit)
                 return json.dumps(
                     {
                         "available": True,
                         "source_url": None,
                         "local_pdf_path": f"/papers/{path.name}",
-                        "pages": pages,
+                        **extracted,
                         "cached": True,
                     },
                     ensure_ascii=False,
@@ -1288,13 +1252,13 @@ def build_literature_tools(
                     errors.append({"url": candidate, "error": "response_is_not_pdf"})
                     continue
                 path.write_bytes(content)
-                pages = extract_pdf_pages(path, max_pages)
+                extracted = _extract_pdf_payload(path, extraction_limit)
                 return json.dumps(
                     {
                         "available": True,
                         "source_url": candidate,
                         "local_pdf_path": f"/papers/{path.name}",
-                        "pages": pages,
+                        **extracted,
                         "cached": False,
                     },
                     ensure_ascii=False,
@@ -1313,7 +1277,10 @@ def build_literature_tools(
         )
 
     @tool
-    def extract_pdf_text(pdf_path: str, max_pages: int = 30) -> str:
+    def extract_pdf_text(
+        pdf_path: str,
+        max_pages: int = DEFAULT_PAPER_MAX_PAGES,
+    ) -> str:
         """Extract page-numbered text from an existing workspace PDF.
 
         Deep Agents virtual paths such as /papers/example.pdf are resolved from
@@ -1346,7 +1313,10 @@ def build_literature_tools(
                 ensure_ascii=False,
             )
         try:
-            pages = extract_pdf_pages(path, max_pages)
+            extracted = _extract_pdf_payload(
+                path,
+                max(DEFAULT_PAPER_MAX_PAGES, int(max_pages)),
+            )
         except Exception as exc:  # PDF parser errors must remain recoverable tool results.
             return json.dumps(
                 {
@@ -1358,7 +1328,7 @@ def build_literature_tools(
                 },
                 ensure_ascii=False,
             )
-        return json.dumps(pages, ensure_ascii=False)
+        return json.dumps({"available": True, **extracted}, ensure_ascii=False)
 
     @tool
     def verify_doi(doi: str) -> str:

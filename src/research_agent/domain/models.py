@@ -43,7 +43,6 @@ class EvidenceConfidence(StrEnum):
 class SearchConstraints(BaseModel):
     year_from: int = Field(default=2024, ge=2000, le=2026)
     year_to: int = Field(default=2026, ge=2000, le=2026)
-    quality_venues_only: bool = False
     prefer_library_search: bool = False
 
     @model_validator(mode="after")
@@ -138,7 +137,6 @@ class SearchFeedback(BaseModel):
     comment: str = ""
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
-    max_search_rounds: int | None = Field(default=None, ge=0)
 
 
 class CandidateSetSnapshot(BaseModel):
@@ -151,7 +149,10 @@ class CandidateSetSnapshot(BaseModel):
     executed_queries: list[str] = Field(default_factory=list)
     query_rounds: list[list[str]] = Field(default_factory=list)
     search_round: int = Field(default=0, ge=0)
-    max_search_rounds: int = Field(default=3, ge=0)
+    max_search_rounds: int = Field(default=3, ge=1, le=10)
+    manual_query_rounds: list[list[str]] = Field(default_factory=list)
+    manual_search_round: int = Field(default=0, ge=0)
+    max_manual_search_rounds: int = Field(default=3, ge=0)
     min_papers: int = Field(default=1, ge=1)
     max_papers: int = Field(default=8, ge=1)
     agent_included_paper_ids: list[str] = Field(default_factory=list)
@@ -166,7 +167,6 @@ class CandidateSetSnapshot(BaseModel):
     # their range unknown instead of relabelling preserved results as 2024-2026.
     year_from: int | None = Field(default=None, ge=2000, le=2026)
     year_to: int | None = Field(default=None, ge=2000, le=2026)
-    quality_venues_only: bool = False
     prefer_library_search: bool = False
 
     @model_validator(mode="after")

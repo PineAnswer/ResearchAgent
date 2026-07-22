@@ -219,7 +219,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_search_rounds=request.max_search_rounds,
                 year_from=request.year_from,
                 year_to=request.year_to,
-                quality_venues_only=request.quality_venues_only,
                 prefer_library_search=request.prefer_library_search,
             )
         except ActiveConversationRunError as exc:
@@ -351,7 +350,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_search_rounds=request.max_search_rounds,
                 year_from=request.year_from,
                 year_to=request.year_to,
-                quality_venues_only=request.quality_venues_only,
                 prefer_library_search=request.prefer_library_search,
             )
             return ApiEnvelope(data=_json_safe(result))
@@ -379,7 +377,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     max_search_rounds=request.max_search_rounds,
                     year_from=request.year_from,
                     year_to=request.year_to,
-                    quality_venues_only=request.quality_venues_only,
                     prefer_library_search=request.prefer_library_search,
                 ):
                     payload = json.dumps(_json_safe(event), ensure_ascii=False)
@@ -1294,18 +1291,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def submit_search_feedback(
         project_id: str,
-        request: SearchFeedbackRequest,
+        feedback: SearchFeedbackRequest,
+        raw_request: Request,
     ) -> ApiEnvelope:
         try:
             result = await asyncio.to_thread(
                 supervisor.search_review.apply_feedback,
                 project_id,
-                request,
+                feedback,
             )
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
         except WorkflowPrerequisiteError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if feedback.action == "accept" and result.get("ready_to_continue"):
+            project = supervisor.service.get_project(project_id)
+            if project.conversation_id:
+                try:
+                    run = await run_manager.start_continue(
+                        project.conversation_id,
+                        raw_request.state.user_id,
+                    )
+                except ActiveConversationRunError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="conversation_already_running",
+                    ) from exc
+                result = {
+                    **result,
+                    "research_started": True,
+                    "run": run.model_dump(mode="json"),
+                }
+            else:
+                result = {**result, "research_started": False, "run": None}
         return ApiEnvelope(data=_json_safe(result))
 
     @app.post(

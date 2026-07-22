@@ -10,7 +10,7 @@ from research_agent.application.research_service import (
     WorkflowPrerequisiteError,
 )
 from research_agent.application.search_review import SearchReviewService
-from research_agent.domain.models import ResearchStage, SearchFeedback
+from research_agent.domain.models import PaperCandidate, ResearchStage, SearchFeedback
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
 from research_agent.tools.project_tools import build_project_tools
 
@@ -21,10 +21,9 @@ def fake_search_openalex(
     limit: int = 5,
     year_from: int | None = None,
     year_to: int | None = None,
-    quality_venues_only: bool = False,
 ) -> str:
     """Return deterministic candidates for human-review tests."""
-    del limit, year_from, year_to, quality_venues_only
+    del limit, year_from, year_to
     return json.dumps(
         [
             {
@@ -89,7 +88,7 @@ def _review_service(
     return service, review, project.project_id
 
 
-class _RejectingVenueIndex:
+class _UnrankedVenueIndex:
     def enrich_candidate(self, candidate):
         return {
             **candidate,
@@ -98,11 +97,6 @@ class _RejectingVenueIndex:
             "sci_quartile": None,
             "nature_portfolio": False,
         }
-
-    @staticmethod
-    def qualifies_for_quality_filter(candidate):
-        return False
-
 
 def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     service, review, project_id = _review_service(tmp_path)
@@ -193,7 +187,7 @@ def test_review_records_system_search_terms_by_iteration(tmp_path) -> None:
     assert result["candidate_set"]["search_round"] == 2
 
 
-def test_empty_filtered_result_stays_searched_and_supports_manual_recovery(
+def test_unranked_venue_remains_available_for_human_review(
     tmp_path,
 ) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
@@ -203,7 +197,7 @@ def test_empty_filtered_result_stays_searched_and_supports_manual_recovery(
             "search_openalex": fake_search_openalex,
             "verify_doi": fake_verify_doi,
         },
-        venue_index=_RejectingVenueIndex(),
+        venue_index=_UnrankedVenueIndex(),
     )
     project = service.create_project("topic", "question")
     service.save_artifact_and_transition(
@@ -225,37 +219,16 @@ def test_empty_filtered_result_stays_searched_and_supports_manual_recovery(
         actor="literature-scout",
     )
 
-    blocked = review.begin_review(
+    result = review.begin_review(
         project.project_id,
         year_from=2024,
         year_to=2026,
-        quality_venues_only=True,
     )
 
-    assert blocked["awaiting_input"] is False
-    assert blocked["manual_recovery_allowed"] is True
-    assert "没有论文满足" in blocked["message"]
-    assert blocked["candidate_set"]["candidates"] == []
-    assert blocked["candidate_set"]["filtered_candidates"][0]["paper_id"] == "P1"
-    assert service.get_project(project.project_id).stage is ResearchStage.SEARCHED
-
-    recovered = review.apply_feedback(
-        project.project_id,
-        SearchFeedback(
-            action="accept",
-            added_papers=[
-                {
-                    "paper_id": "P1",
-                    "title": "Relevant but unranked",
-                    "year": 2025,
-                }
-            ],
-        ),
-    )
-
-    assert recovered["ready_to_continue"] is True
-    assert recovered["project"]["stage"] == "SCREENED"
-    assert recovered["screening"]["payload"]["included_paper_ids"] == ["P1"]
+    assert result["awaiting_input"] is True
+    assert result["candidate_set"]["candidates"][0]["paper_id"] == "P1"
+    assert result["candidate_set"]["filtered_candidates"] == []
+    assert service.get_project(project.project_id).stage is ResearchStage.SEARCH_REVIEW_PENDING
 
 
 def test_legacy_empty_snapshot_exposes_original_results_for_manual_recovery(
@@ -286,7 +259,7 @@ def test_legacy_empty_snapshot_exposes_original_results_for_manual_recovery(
     service.save_artifact_and_transition(
         project.project_id,
         "CandidateSetSnapshot",
-        {"candidates": [], "quality_venues_only": True},
+        {"candidates": []},
         ResearchStage.SEARCH_REVIEW_PENDING,
         actor="human-search-review",
     )
@@ -348,11 +321,10 @@ def test_feedback_refine_can_trigger_bounded_supplemental_search(tmp_path) -> No
     )
 
     assert result["new_queries"] == ["supplemental query"]
-    assert result["candidate_set"]["search_round"] == 2
-    assert result["candidate_set"]["query_rounds"] == [
-        ["initial query"],
-        ["supplemental query"],
-    ]
+    assert result["candidate_set"]["search_round"] == 1
+    assert result["candidate_set"]["query_rounds"] == [["initial query"]]
+    assert result["candidate_set"]["manual_search_round"] == 1
+    assert result["candidate_set"]["manual_query_rounds"] == [["supplemental query"]]
     assert {item["paper_id"] for item in result["candidate_set"]["candidates"]} == {
         "P1",
         "P2",
@@ -464,6 +436,38 @@ def test_system_deep_read_capacity_rejects_oversized_selection(tmp_path) -> None
                 added_papers=[{"doi": "10.1000/extra"}],
             ),
         )
+
+
+def test_supplemental_duplicate_keeps_and_combines_rich_metadata() -> None:
+    current = PaperCandidate(
+        paper_id="P1",
+        title="A complete paper title",
+        authors=["Ada"],
+        abstract="A substantially richer abstract with methods and findings.",
+        doi="10.1000/example",
+        source="OpenAlex",
+        sources=["OpenAlex"],
+        citation_counts={"OpenAlex": 12},
+    )
+    addition = PaperCandidate(
+        paper_id="P1",
+        title="Short title",
+        authors=["Grace"],
+        abstract="Short.",
+        doi="10.1000/example",
+        source="Crossref",
+        sources=["Crossref"],
+        citation_counts={"Crossref": 9},
+    )
+
+    merged = SearchReviewService._merge_candidates([current], [addition], set())
+
+    assert len(merged) == 1
+    assert merged[0].title == "A complete paper title"
+    assert merged[0].abstract == current.abstract
+    assert merged[0].authors == ["Ada", "Grace"]
+    assert merged[0].sources == ["OpenAlex", "Crossref"]
+    assert merged[0].citation_counts == {"OpenAlex": 12, "Crossref": 9}
 
 
 def test_review_paginates_candidates_and_persists_cross_page_selection(tmp_path) -> None:

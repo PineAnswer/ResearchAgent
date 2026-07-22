@@ -262,16 +262,16 @@ CREATED
 
    两个检索函数都使用 `query` 表示本次实际检索词，`limit` 表示本次期望返回的记录数，工具内部会把它限制在 1～20。`search_library` 只读本地文献库；`search_multi_source` 同时访问 OpenAlex、Crossref、Semantic Scholar 和 arXiv，并保留来源与查询轨迹。
 
-4. 默认调用预算：
+4. 调用预算：
 
-   当前默认值主要服务于演示和测试速度，并非不可调整的理论最优值。实际部署时可根据 API 额度、研究范围和召回率要求配置。
+   用户创建研究时填写 Agent 检索词迭代轮数 n，取值 1～10。每次调用一次 `search_multi_source` 算一轮，每轮可携带多条互补检索词。
 
    | 工具 | 默认上限 | 达到上限后的行为 |
    |---|---:|---|
    | `search_library` | 1 | 默认不开启；启用本地优先时先复用本地论文 |
-   | `search_multi_source` | 3 | 使用已经取得的多源结果继续生成报告 |
+   | `search_multi_source` | 用户设置的 n | 使用已经取得的多源结果继续生成报告 |
 
-   对应环境变量分别为 `RESEARCH_AGENT_MAX_OPENALEX_SEARCHES` 和 `RESEARCH_AGENT_MAX_CROSSREF_SEARCHES`。Crossref 上限设置为 `0` 时，该工具不会注册给 Scout。外部请求的重试次数、初始退避秒数和最大等待时间分别由 `RESEARCH_AGENT_SEARCH_MAX_RETRIES`、`RESEARCH_AGENT_SEARCH_BACKOFF_SECONDS` 和 `RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS` 控制。
+   运行时按线程记录实际轮次并强制执行上限。外部请求的重试次数、初始退避秒数和最大等待时间分别由 `RESEARCH_AGENT_SEARCH_MAX_RETRIES`、`RESEARCH_AGENT_SEARCH_BACKOFF_SECONDS` 和 `RESEARCH_AGENT_SEARCH_MAX_RETRY_WAIT_SECONDS` 控制。
 
 5. `ExecutedSearchTrackingMiddleware`（已执行搜索追踪中间件）：
 
@@ -907,7 +907,7 @@ WorkflowGuard 将 Prompt 中的关键规则下沉为代码检查。Prompt 负责
 
 ### 8.1 可视化人工审核入口
 
-启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供推荐使用的本地前端，支持发起研究、浏览最近项目、候选论文查看与排除、补充检索词、手动加入 DOI、`accept/stop` 以及 `SCREENED` 后继续研究。项目产物默认渲染为结构化 HTML，也可切换到 JSON 原文；已支持 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft` 和 `NarrativeReview` 等专用视图。Swagger 保留在 `/docs`。
+启动 `research-agent serve` 后，`http://127.0.0.1:8000/` 提供推荐使用的本地前端，支持发起研究、浏览最近项目、候选论文查看与排除、补充检索词、手动加入 DOI 以及 `accept/stop`。确认候选后系统立即启动精读和后续研究，不再展示单独的继续确认页。项目产物默认渲染为结构化 HTML，也可切换到 JSON 原文；已支持 `SearchReport`、`PaperCard`、`SynthesisReport`、`ReviewResult`、`ReviewOutline`、`SectionDraft` 和 `NarrativeReview` 等专用视图。Swagger 保留在 `/docs`。
 
 排除、`accept` 和人工 `stop` 会追加候选快照；后续运行开始前可用补偿事件撤销，不会删除历史。多人同时修改同一项目仍应避免并发提交。
 

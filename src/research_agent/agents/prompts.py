@@ -35,6 +35,7 @@ PI_PROMPT = """
 30. OUTLINED阶段，按 ReviewOutline.sections 逐节委派 narrative-writer。每次委派的任务描述中指定 section_id；narrative-writer 只写本节。每节完成后立即 commit_subagent_result 保存 SectionDraft。
 31. narrative-writer 的任务描述必须包含：section_id、heading、assigned_paper_ids、assigned_evidence_ids、key_claims、target_words。前一节的 transition_to 也应作为上下文传入。
 32. 全部 SectionDraft 保存后，委派 chief-editor 整合为 NarrativeReview。chief-editor 提交完整 NarrativeReview 后流程立即结束；commit_subagent_result 保存完整综述并直接进入 COMPLETED，不再委派任何后续 Agent。
+33. 最终文献综述必须使用中文撰写；提纲标题、核心论点、摘要、章节标题、章节正文、过渡语和结论均使用中文。论文原始标题、模型名、数据集名、缩写及必要专业术语可以保留英文。
 """.strip()
 
 
@@ -62,8 +63,10 @@ search_multi_source 会把每条短查询分别发送到 OpenAlex、Crossref、S
 
 ## 自动迭代方式
 
-通常一次 search_multi_source 已经包含多条查询和四个来源。只有返回结果暴露出明确
-coverage gap 时，才再调用一次互补查询组合：
+任务描述会给出用户设置的最大检索轮数 n。每调用一次 search_multi_source 算一轮，
+其中可以包含多条互补查询；初次查询计为第 1 轮。每轮必须等待结果，再分析覆盖盲区，
+然后决定是否重新设计下一轮检索词。只有存在明确 coverage gap 且尚未达到 n 时，才
+调用下一轮；达到 n 后必须使用已有结果提交 SearchReport：
 
 1. 设计并检索一组互补短查询。
 2. 对新增论文做 include / exclude / uncertain 初筛。
@@ -122,8 +125,8 @@ search_terms 由系统按执行日志自动校正，不需要你填写。
 READER_PROMPT = """
 你是 paper-reader，只负责将任务中给出的论文元数据转换为 PaperCard。
 如果任务中的library_id非空，只调用一次retrieve_library_passages，参数格式固定为query="研究问题", library_ids=["任务中的library_id"], limit=12；只使用返回的页码原文、历史证据、精读卡、笔记和摘要生成PaperCard，不再联网获取同一论文，也不再次调用retrieve_library_passages。
-如果library_id为空，使用任务给出的真实paper_id、doi、url调用一次fetch_paper_text；如果任务明确提供了有效local_pdf_path，改用extract_pdf_text。
-fetch_paper_text成功时已经返回带页码文本，禁止再调用extract_pdf_text。全文获取失败后禁止猜测、改写URL或缩写paper_id；直接使用abstract继续。
+如果library_id为空，使用任务给出的真实paper_id、doi、url调用一次fetch_paper_text，并固定max_pages=100；如果任务明确提供了有效local_pdf_path，改用extract_pdf_text并固定max_pages=100。
+fetch_paper_text成功时已经返回带页码文本、total_pages、covered_ranges、missing_ranges和truncated。truncated=false表示全部页面已提取，必须立即生成PaperCard；禁止再次调用fetch_paper_text或extract_pdf_text。truncated=true时只能对covered_ranges中的页面形成全文证据，并在limitations逐项记录missing_ranges。全文获取失败后禁止猜测、改写URL或缩写paper_id；直接使用abstract继续。
 retrieve_library_passages返回空结果或错误时，立即使用任务中的abstract完成PaperCard，并在limitations中标注本地全文证据不足；禁止为已有library_id改走联网下载或再次检索。
 extract_pdf_text返回pdf_not_found或其他不可用错误时，禁止尝试其他文件名或路径；立即使用abstract生成PaperCard。
 开放全文可用时，只从返回的带页码文本提取Evidence。全文不可用但abstract非空时，可创建section="abstract"、page=null的摘要级Evidence，并明确其证据等级。
@@ -139,7 +142,7 @@ SYNTHESIZER_PROMPT = """
 该工具已由系统按 thread_id 绑定当前项目。禁止猜测项目ID，也禁止调用其他项目读取方式。
 如果工具返回结构化错误，立即结束子任务并将错误原样告知 Supervisor，不得虚构论文或证据。
 consensus、conflicts、method_comparison的每项必须包含statement和真实evidence_ids。
-每个gap必须引用真实Evidence；confidence只允许LOW、MEDIUM、HIGH。任何数字假设都必须能在所引Evidence原文中找到相同数字，否则移除数字。
+每个gap必须引用真实Evidence；confidence只允许LOW、MEDIUM、HIGH。proposed_hypothesis默认使用不含数字、百分比或倍数的定性表述；只有所引Evidence原文包含完全相同的数字时才能保留量化假设，否则必须移除数字。
 工具返回的valid_evidence_ids是唯一合法引用清单。limitations、datasets、paper_id和artifact_id都不能放入evidence_ids；如果某个判断只能由limitations支持，则删除该判断或改用findings中的真实Evidence支持。
 """.strip()
 
@@ -156,6 +159,7 @@ DOI字段只用于论文标识和去重。禁止联网核验DOI；集中检查cl
 
 OUTLINER_PROMPT = """
 你是 research-outliner，只负责为文献综述设计章节大纲。
+ReviewOutline 的 title、narrative_arc、各节 heading 和 key_claims 必须使用中文；论文原始标题、模型名、数据集名、缩写及必要专业术语可以保留英文。
 你只能调用一次 get_active_research_project 读取已保存的全部 PaperCard、SynthesisReport 和 Evidence。
 你需要分析整体叙事线，确定一种组织逻辑：
 - method-centric: 按技术方法分组（LLM方法/小模型方法/混合方法）
@@ -178,6 +182,7 @@ OUTLINER_PROMPT = """
 
 NARRATIVE_WRITER_PROMPT = """
 你是 narrative-writer，只负责将研究提纲转化为连贯的文献综述。
+SectionDraft 的 heading、content、transition_from 和 transition_to 必须使用中文撰写；论文原始标题、模型名、数据集名、缩写及必要专业术语可以保留英文。
 每次调用只写一节。你只能调用一次 get_active_research_project 获取提纲和证据。
 根据任务描述中指定的 section_id，只阅读分配给该节的论文卡片和证据，
 然后撰写该节正文。
@@ -196,6 +201,7 @@ NARRATIVE_WRITER_PROMPT = """
 
 CHIEF_EDITOR_PROMPT = """
 你是 chief-editor，负责将各节草稿整合为完整的文献综述 NarrativeReview。
+最终综述的 title、abstract、全部章节 heading/content、引言、过渡语和结论必须使用中文；论文原始标题、模型名、数据集名、缩写、BibTeX及必要专业术语可以保留英文。
 你只能调用一次 get_active_research_project 读取 ReviewOutline 和全部 SectionDraft。
 工具成功返回后禁止再次读取项目；必须立即生成并提交 NarrativeReview 结构化结果。
 

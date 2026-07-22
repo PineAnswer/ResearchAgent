@@ -1351,6 +1351,30 @@ class ResearchService:
             )
 
     @classmethod
+    def _downgrade_unsupported_synthesis_hypotheses(
+        cls,
+        artifacts,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Remove invented effect sizes while retaining an otherwise valid synthesis."""
+        evidence = cls._evidence_index(artifacts)
+        for gap in payload.get("gaps", []):
+            gap_ids = {str(item) for item in gap.get("evidence_ids", [])}
+            quote_text = " ".join(
+                str(evidence[item].get("quote", ""))
+                for item in gap_ids
+                if item in evidence
+            )
+            supported_tokens = set(_numeric_claims(quote_text))
+            numeric_tokens = _numeric_claims(str(gap.get("proposed_hypothesis", "")))
+            if any(token not in supported_tokens for token in numeric_tokens):
+                gap["proposed_hypothesis"] = (
+                    "该研究缺口所描述的关系需要在后续研究中检验；"
+                    "具体效应大小必须由新增证据确定。"
+                )
+        return payload
+
+    @classmethod
     def _validate_review_evidence(cls, artifacts, payload: dict[str, Any]) -> None:
         evidence_ids = set(cls._evidence_index(artifacts))
         verified = {str(item) for item in payload.get("verified_evidence_ids", [])}
@@ -1437,6 +1461,10 @@ class ResearchService:
         artifacts = self.repository.list_artifacts(project_id)
         project = self.repository.get_project(project_id)
         if kind == "SynthesisReport":
+            payload = self._downgrade_unsupported_synthesis_hypotheses(
+                artifacts,
+                payload,
+            )
             self._validate_synthesis_evidence(artifacts, payload)
         elif kind == "ReviewResult":
             self._validate_review_evidence(artifacts, payload)

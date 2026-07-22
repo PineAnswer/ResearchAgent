@@ -198,14 +198,14 @@ def build_project_tools(
             and not payload.get("candidates")
             and state.has_search_source(thread_id, "search_library")
             and state.search_result_count(thread_id, "search_library") == 0
-            and not state.has_search_source(thread_id, "search_openalex")
+            and not state.has_search_source(thread_id, "search_multi_source")
         ):
             rejection_count = state.reject_result(thread_id, subagent_type)
             retry_allowed = rejection_count < 2
             instruction = (
                 "本地文献库结果为空，但尚未执行外部学术检索。重新委派"
                 "literature-scout一次，并明确告知它本地检索已经完成；首次工具调用"
-                "必须是search_openalex，禁止再次调用search_library。"
+                "必须是search_multi_source，禁止再次调用search_library。"
                 if retry_allowed
                 else "外部检索仍未执行；停止重试并调用record_research_issue。"
             )
@@ -215,7 +215,7 @@ def build_project_tools(
                     "error_code": "external_search_required",
                     "message": (
                         "Empty local-library results cannot be committed before "
-                        "an OpenAlex search is attempted."
+                        "a multi-source external search is attempted."
                     ),
                     "rejection_count": rejection_count,
                     "retry_allowed": retry_allowed,

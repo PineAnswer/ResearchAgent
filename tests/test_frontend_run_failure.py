@@ -5,7 +5,7 @@ def test_frontend_exposes_failed_run_and_retry_state() -> None:
     script = Path("src/research_agent/api/frontend/app.js").read_text(encoding="utf-8")
 
     assert "function latestFailedRun(snapshot)" in script
-    assert 'latestRun?.status === "failed"' in script
+    assert '["failed", "interrupted"].includes(latestRun?.status)' in script
     assert 'title = "研究任务运行失败"' in script
     assert 'elements.stageBadge.textContent = "运行失败"' in script
     assert 'return "retry"' in script

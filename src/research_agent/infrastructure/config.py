@@ -50,8 +50,6 @@ class Settings:
     api_port: int = 8000
     openalex_api_key: str | None = None
     openalex_email: str | None = None
-    max_openalex_searches: int = 3
-    max_crossref_searches: int = 1
     max_paper_fetches_per_paper: int = 2
     search_max_retries: int = 3
     search_backoff_seconds: float = 1.0
@@ -135,12 +133,6 @@ class Settings:
             api_port=int(os.getenv("RESEARCH_AGENT_API_PORT", "8000")),
             openalex_api_key=os.getenv("OPENALEX_API_KEY") or None,
             openalex_email=os.getenv("OPENALEX_EMAIL") or None,
-            max_openalex_searches=max(
-                1, int(os.getenv("RESEARCH_AGENT_MAX_OPENALEX_SEARCHES", "3"))
-            ),
-            max_crossref_searches=max(
-                0, int(os.getenv("RESEARCH_AGENT_MAX_CROSSREF_SEARCHES", "1"))
-            ),
             max_paper_fetches_per_paper=max(
                 1, int(os.getenv("RESEARCH_AGENT_MAX_PAPER_FETCHES_PER_PAPER", "2"))
             ),

@@ -1,8 +1,35 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from research_agent.application.library_service import LibraryService
 from research_agent.domain.models import LibraryFinding, LibraryPaperAnalysis
 from research_agent.infrastructure.sqlite_repository import SqliteResearchRepository
+
+
+def test_library_concurrent_upserts_share_one_canonical_paper(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    service = LibraryService(repository)
+    worker_count = 12
+    start = Barrier(worker_count)
+
+    def save_copy(index: int):
+        start.wait()
+        return service.upsert_paper(
+            {
+                "paper_id": f"source-{index}",
+                "title": "Concurrent canonical paper",
+                "year": 2025,
+                "doi": "10.1000/concurrent",
+            }
+        )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        papers = list(executor.map(save_copy, range(worker_count)))
+
+    assert len({paper.library_id for paper in papers}) == 1
+    assert len(service.list_papers()) == 1
 
 
 def test_library_deduplicates_doi_and_keeps_project_status_separate(tmp_path) -> None:

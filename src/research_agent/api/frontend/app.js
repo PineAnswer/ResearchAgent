@@ -325,7 +325,6 @@ const elements = {
   initialMaxSearchRounds: byId("initialMaxSearchRounds"),
   initialYearFrom: byId("initialYearFrom"),
   initialYearTo: byId("initialYearTo"),
-  initialQualityVenuesOnly: byId("initialQualityVenuesOnly"),
   initialPreferLibrarySearch: byId("initialPreferLibrarySearch"),
   emptyState: byId("emptyState"),
   projectView: byId("projectView"),
@@ -388,7 +387,6 @@ const elements = {
   continueText: byId("continueText"),
   continueButtonLabel: byId("continueButtonLabel"),
   continueResearch: byId("continueResearch"),
-  undoDecision: byId("undoDecision"),
   projectInspector: byId("projectInspector"),
   inspectorBackdrop: byId("inspectorBackdrop"),
   closeInspector: byId("closeInspector"),
@@ -818,7 +816,6 @@ function setBusy(busy) {
     elements.undoReview,
     elements.acceptReview,
     elements.stopReview,
-    elements.undoDecision,
     elements.reloadProject,
     elements.deleteProject,
   ].forEach((button) => {
@@ -4391,7 +4388,7 @@ const USER_STAGE_GUIDANCE = {
   CREATED: ["准备检索", "研究助手正在分析研究问题并生成检索方案。"],
   SEARCHED: ["已找到候选论文", "系统已完成初步检索，正在生成可供你审核的候选集。"],
   SEARCH_REVIEW_PENDING: ["请审核候选论文", "勾选需要精读的论文；你也可以补充检索词或手动加入 DOI。"],
-  SCREENED: ["可以开始精读", "候选集已经确认，点击继续研究后将逐篇读取论文并提取证据。"],
+  SCREENED: ["正在启动精读", "系统将自动逐篇读取论文并提取证据。"],
   EXTRACTED: ["证据已提取", "论文精读已经完成，下一步会综合比较证据。"],
   SYNTHESIZED: ["综合完成", "系统已经形成共识、冲突和研究空白，等待独立审查。"],
   REVIEW_PENDING: ["等待证据审查", "系统将检查综合结论是否都有证据支撑。"],
@@ -4475,6 +4472,13 @@ function recoverableOperationalFailure(snapshot) {
 function continuationMode(snapshot) {
   const stage = snapshot?.project?.stage;
   const reviewVerdict = latestReviewVerdict(snapshot);
+  if (
+    latestFailedRun(snapshot)
+    && !snapshot?.active_run
+    && !["COMPLETED", "SEARCH_REVIEW_PENDING"].includes(stage)
+  ) {
+    return "retry";
+  }
   if (stage === "SCREENED") return "screening";
   if (
     reviewVerdict === "REVISE"
@@ -4495,13 +4499,6 @@ function continuationMode(snapshot) {
     return narrativeCompletion(snapshot).complete ? null : "recovery";
   }
   if (recoverableOperationalFailure(snapshot)) return "recovery";
-  if (
-    latestFailedRun(snapshot)
-    && !snapshot?.active_run
-    && !["COMPLETED", "SEARCH_REVIEW_PENDING"].includes(stage)
-  ) {
-    return "retry";
-  }
   return null;
 }
 
@@ -5223,20 +5220,11 @@ function switchArtifactView(mode) {
 
 function renderStagePanels(snapshot) {
   const mode = continuationMode(snapshot);
-  const canUndoDecision = Boolean(
-    state.review?.can_undo && snapshot?.project?.stage !== "SEARCH_REVIEW_PENDING",
-  );
   elements.reviewPanel.hidden = true;
-  const showContinuePanel = Boolean(mode);
+  const showContinuePanel = Boolean(mode && mode !== "screening");
   elements.continuePanel.hidden = !showContinuePanel;
-  elements.undoDecision.hidden = !canUndoDecision;
   elements.continueResearch.hidden = !showContinuePanel;
-  if (mode === "screening") {
-    elements.continueEyebrow.textContent = "Screening complete";
-    elements.continueTitle.textContent = "候选集已经确认";
-    elements.continueText.textContent = "继续后将读取论文、提取证据并完成综述。";
-    elements.continueButtonLabel.textContent = "继续研究";
-  } else if (mode === "retry") {
+  if (mode === "retry") {
     elements.continueEyebrow.textContent = "运行中断";
     elements.continueTitle.textContent = "从已保存进度重试";
     elements.continueText.textContent = "系统会从当前项目阶段重新执行；已经提交的研究产物将继续保留。";
@@ -5253,11 +5241,6 @@ function renderStagePanels(snapshot) {
         ? `系统将复用已保存的 ${savedDraftCount} 个章节草稿，从整合阶段继续，不会重新检索或重写章节。`
         : "系统将复用已保存的论文卡片和研究结果，从当前写作阶段继续，不会重新检索。";
     elements.continueButtonLabel.textContent = "继续生成综述";
-  } else if (canUndoDecision) {
-    const stopped = snapshot?.project?.stage === "INCONCLUSIVE";
-    elements.continueEyebrow.textContent = "可撤销操作";
-    elements.continueTitle.textContent = stopped ? "项目已按审核意见停止" : "候选集已经确认";
-    elements.continueText.textContent = "在后续研究尚未开始前，可以恢复到上一版候选集。";
   }
   if (mode && !state.agentAvailable) {
     elements.continueResearch.disabled = true;
@@ -5302,7 +5285,7 @@ function activeSnapshotRun(snapshot) {
 
 function latestFailedRun(snapshot) {
   const latestRun = snapshot?.runs?.[0] || null;
-  return latestRun?.status === "failed" ? latestRun : null;
+  return ["failed", "interrupted"].includes(latestRun?.status) ? latestRun : null;
 }
 
 function displayRunMessage(message, phaseName) {
@@ -5954,9 +5937,6 @@ function renderReview(review, { preserveManual = false } = {}) {
   elements.reviewConstraints.textContent = [
     roundSummary,
     yearConstraint,
-    snapshot.quality_venues_only
-      ? "仅 CCF-A、JCR Q1 或 Nature Portfolio"
-      : "出版物等级不限",
   ].join(" · ");
   renderReviewQueryRounds(snapshot);
   const shouldShowNotice = Boolean(
@@ -6029,7 +6009,7 @@ async function submitFeedback(action) {
     }
     if (
       !window.confirm(
-        `确认保留 ${acceptedCount} 篇论文并结束人工审核？`,
+        `确认保留 ${acceptedCount} 篇论文并立即开始后续研究？`,
       )
     ) {
       return;
@@ -6064,9 +6044,24 @@ async function submitFeedback(action) {
         failures.length > 0,
       );
     } else if (action === "accept" && result.ready_to_continue) {
+      backgroundStarted = Boolean(result.research_started && result.run);
+      if (backgroundStarted) {
+        state.activeRun = result.run;
+        state.activeRunId = result.run.run_id;
+      }
       await loadProjects();
       await loadProject(state.projectId, true, true);
-      notify("候选集已确认；你可以先撤销，或点击继续研究开始精读");
+      if (!backgroundStarted) {
+        backgroundStarted = await continueResearch({
+          skipConfirm: true,
+          allowBusy: true,
+          startMessage: "候选集已确认，正在启动论文精读",
+          successMessage: "候选集已确认，后续研究已启动",
+        });
+      } else {
+        startRunPolling();
+        notify("候选集已确认，后续研究已启动");
+      }
     } else {
       await loadProjects();
       await loadProject(state.projectId, true, true);
@@ -6597,7 +6592,7 @@ async function startResearchLegacy(topic, question, reviewLimits = {}) {
   });
   if (reviewLimits.max_search_rounds) {
     addActivity(
-      `系统将自动执行最多 ${reviewLimits.max_search_rounds} 轮检索-筛选，再交给你最终手筛`,
+      `Agent 最多进行 ${reviewLimits.max_search_rounds} 轮检索词设计，再交给你最终手筛`,
     );
   }
   setBusy(true);
@@ -6656,51 +6651,6 @@ async function startResearchLegacy(topic, question, reviewLimits = {}) {
     if (state.projectId && !state.projectId.includes("正在")) {
       await loadProject(state.projectId, true, true);
     }
-  } finally {
-    finishRunSession();
-    elements.runPanel.hidden = true;
-    setBusy(false);
-  }
-}
-
-async function continueResearchLegacy() {
-  if (!state.projectId || state.busy) return;
-  if (!state.agentAvailable) {
-    notify("研究助手当前不可用，请先检查模型配置", true);
-    return;
-  }
-  const mode = continuationMode(state.snapshot);
-  const confirmation = mode === "screening"
-    ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
-    : mode === "retry"
-      ? "将从当前已保存阶段重新运行研究任务。确认开始吗？"
-    : recoverableOperationalFailure(state.snapshot)
-      ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
-      : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
-  if (!window.confirm(confirmation)) {
-    return;
-  }
-  setBusy(true);
-  beginRunSession({
-    stage: state.snapshot?.project?.stage || "SCREENED",
-    message: mode === "screening"
-      ? "正在恢复项目并启动论文精读"
-      : "正在恢复写作阶段并生成缺失的综述产物",
-    snapshot: state.snapshot,
-  });
-  startRunPolling();
-  try {
-    await api(`/api/projects/${encodeURIComponent(state.projectId)}/continue`, {
-      method: "POST",
-      body: "{}",
-    });
-    addActivity("后续研究执行结束，正在刷新项目状态");
-    await loadProjects();
-    await loadProject(state.projectId, true, true);
-    notify("项目已完成本轮后续研究");
-  } catch (error) {
-    notify(`继续执行失败：${error.message}`, true);
-    await loadProject(state.projectId, true, true);
   } finally {
     finishRunSession();
     elements.runPanel.hidden = true;
@@ -6777,11 +6727,9 @@ async function continueResearch(options = {}) {
     return false;
   }
   const mode = continuationMode(state.snapshot);
-  const confirmation = mode === "screening"
-    ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
-    : mode === "retry"
+  const confirmation = mode === "retry"
       ? "将从当前已保存阶段重新运行研究任务。确认开始吗？"
-    : recoverableOperationalFailure(state.snapshot)
+      : recoverableOperationalFailure(state.snapshot)
       ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
       : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
   if (!skipConfirm && !window.confirm(confirmation)) return false;
@@ -7016,9 +6964,12 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
     max_search_rounds: numberInputValue(elements.initialMaxSearchRounds, 3),
     year_from: numberInputValue(elements.initialYearFrom, 2024),
     year_to: numberInputValue(elements.initialYearTo, 2026),
-    quality_venues_only: elements.initialQualityVenuesOnly.checked,
     prefer_library_search: elements.initialPreferLibrarySearch.checked,
   };
+  if (reviewLimits.max_search_rounds < 1 || reviewLimits.max_search_rounds > 10) {
+    notify("自动检索轮次需在 1-10 之间", true);
+    return;
+  }
   if (
     reviewLimits.year_from < 2000
     || reviewLimits.year_to > 2026
@@ -7109,7 +7060,6 @@ elements.undoReview.addEventListener("click", undoSearchFeedback);
 elements.acceptReview.addEventListener("click", () => submitFeedback("accept"));
 elements.stopReview.addEventListener("click", () => submitFeedback("stop"));
 elements.continueResearch.addEventListener("click", continueResearch);
-elements.undoDecision.addEventListener("click", undoSearchFeedback);
 
 elements.sidebarToggle.addEventListener("click", () => {
   const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";

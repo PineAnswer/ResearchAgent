@@ -86,7 +86,7 @@ def test_unsupported_source_type_is_normalized_without_dropping_candidate(
     assert candidate["nature_portfolio"] is False
 
 
-def test_openalex_hard_filters_year_and_quality_then_enriches(
+def test_openalex_filters_year_and_enriches_without_venue_filtering(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -159,16 +159,18 @@ def test_openalex_hard_filters_year_and_quality_then_enriches(
                 "limit": 10,
                 "year_from": 2024,
                 "year_to": 2026,
-                "quality_venues_only": True,
             }
         )
     )
 
-    assert len(result) == 1
+    assert len(result) == 2
     assert result[0]["paper_id"].endswith("/W1")
     assert result[0]["sci_quartile"] == "Q1"
     assert result[0]["ccf_rank"] == "A"
     assert "IF 18.6" in result[0]["venue_rating_explanation"]
+    assert result[1]["paper_id"].endswith("/W3")
+    assert result[1]["ccf_rank"] is None
+    assert result[1]["sci_quartile"] is None
     assert "from_publication_date%3A2024-01-01" in requests[0].full_url
     assert "to_publication_date%3A2026-12-31" in requests[0].full_url
 
@@ -177,7 +179,6 @@ def test_search_request_defaults_and_year_validation() -> None:
     request = CreateConversationRequest(topic="topic", research_question="question")
     assert request.year_from == 2024
     assert request.year_to == 2026
-    assert request.quality_venues_only is False
     assert request.prefer_library_search is False
 
     try:
@@ -193,7 +194,7 @@ def test_search_request_defaults_and_year_validation() -> None:
         raise AssertionError("invalid year range was accepted")
 
 
-def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
+def test_frontend_exposes_year_round_and_venue_rating_controls() -> None:
     frontend = Path("src/research_agent/api/frontend")
     html = (frontend / "index.html").read_text(encoding="utf-8")
     script = (frontend / "app.js").read_text(encoding="utf-8")
@@ -201,7 +202,8 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
 
     assert 'id="initialYearFrom"' in html
     assert 'id="initialYearTo"' in html
-    assert 'id="initialQualityVenuesOnly"' in html
+    assert 'id="initialQualityVenuesOnly"' not in html
+    assert 'id="initialMaxSearchRounds" type="number" min="1" max="10"' in html
     assert 'id="initialPreferLibrarySearch"' in html
     assert 'id="recentHistoryToggle"' in html
     assert 'id="paperHorizontalScroller"' in html
@@ -232,7 +234,7 @@ def test_frontend_exposes_year_quality_and_venue_rating_controls() -> None:
     assert 'grid-template-columns: 1fr' in styles
     assert '.app-shell[data-sidebar="collapsed"] .project-list-menu-toggle' in styles
     assert "const runFinished = syncRunningSnapshot(payload.data)" in script
-    assert "仅 CCF-A、一区和 Nature 子刊" in html
+    assert "仅 CCF-A、一区和 Nature 子刊" not in html
     assert "candidate.venue_rating_explanation" in script
     assert "candidate.impact_factor" in script
     assert "function renderEvidenceCitation" in script

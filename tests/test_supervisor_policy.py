@@ -46,6 +46,7 @@ def test_supervisor_has_atomic_commit_tool_and_explicit_ordering_policy(tmp_path
     assert "fetch_paper_text" in PI_PROMPT
     assert "必须复制 create_research_project 返回的原始 project_id" in PI_PROMPT
     assert "chief-editor 提交完整 NarrativeReview 后流程立即结束" in PI_PROMPT
+    assert "最终文献综述必须使用中文撰写" in PI_PROMPT
     assert "research-outliner、narrative-writer、chief-editor" in PI_PROMPT
 
 
@@ -227,6 +228,12 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         "fetch_paper_text",
         "extract_pdf_text",
     ]
+    outliner = next(config for config in agent_configs if config["name"] == "research-outliner")
+    writer = next(config for config in agent_configs if config["name"] == "narrative-writer")
+    editor = next(config for config in agent_configs if config["name"] == "chief-editor")
+    assert "必须使用中文" in outliner["system_prompt"]
+    assert "必须使用中文撰写" in writer["system_prompt"]
+    assert "最终综述" in editor["system_prompt"] and "必须使用中文" in editor["system_prompt"]
     scout_captured = next(
         config for config in agent_configs if config["name"] == "literature-scout"
     )
@@ -239,16 +246,13 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
         "search_multi_source",
     ]
     assert isinstance(scout_captured["middleware"][1], ModelCallLimitMiddleware)
-    assert scout_captured["middleware"][1].run_limit == 8
+    assert scout_captured["middleware"][1].run_limit == 16
     assert scout_captured["middleware"][1].exit_behavior == "end"
     assert scout_captured["middleware"][2].tool_name == "search_library"
     assert scout_captured["middleware"][2].run_limit == 2
     assert scout_captured["middleware"][2].exit_behavior == "end"
-    assert scout_captured["middleware"][3].tool_name == "search_multi_source"
-    assert scout_captured["middleware"][3].run_limit == 3
-    assert scout_captured["middleware"][3].exit_behavior == "end"
-    assert isinstance(scout_captured["middleware"][4], ExecutedSearchTrackingMiddleware)
-    assert len(scout_captured["middleware"]) == 5
+    assert isinstance(scout_captured["middleware"][3], ExecutedSearchTrackingMiddleware)
+    assert len(scout_captured["middleware"]) == 4
     assert isinstance(scout_captured["response_format"], dict)
     assert scout_captured["response_format"]["title"] == "SearchReport"
     synthesizer = next(
