@@ -115,7 +115,7 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     assert result["candidate_set"]["query_rounds"] == [["initial query"]]
     assert (
         result["candidate_set"]["candidates"][0]["agent_reason"]
-        == "Matches the research question."
+        == "论文主题与研究问题直接相关，建议纳入后续精读。"
     )
     assert result["candidate_set"]["agent_included_paper_ids"] == ["P1"]
     assert result["candidate_set"]["agent_approved"] is True
@@ -124,7 +124,7 @@ def test_initial_search_enters_persisted_human_review(tmp_path) -> None:
     )
 
 
-def test_candidate_without_agent_reason_uses_abstract_core_sentence(tmp_path) -> None:
+def test_candidate_without_agent_reason_uses_chinese_screening_fallback(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "fallback.db"))
     review = SearchReviewService(service, {}, max_papers=8)
     project = service.create_project("topic", "question")
@@ -152,9 +152,7 @@ def test_candidate_without_agent_reason_uses_abstract_core_sentence(tmp_path) ->
     review.begin_review(project.project_id)
     candidate = review.get_review(project.project_id)["candidate_set"]["candidates"][0]
 
-    assert candidate["agent_reason"] == (
-        "文章核心内容：This paper introduces a grounded retrieval method."
-    )
+    assert candidate["agent_reason"] == "论文主题与研究问题直接相关，建议纳入后续精读。"
 
 
 def test_review_records_system_search_terms_by_iteration(tmp_path) -> None:

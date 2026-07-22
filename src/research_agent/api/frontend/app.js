@@ -4714,6 +4714,12 @@ function renderResearchWorkspace(narrative, reviewElement) {
   const question = h("textarea", { rows: "3", maxlength: "4000", placeholder: state.researchChatHistory.length ? "继续追问…" : "输入问题…", "aria-label": "研究问题" });
   const submit = h("button", { type: "submit", cls: "primary" }, "发送");
   const chatThread = h("div", { cls: "research-chat-thread", "aria-live": "polite" });
+  const isChatNearBottom = () => (
+    chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight <= 48
+  );
+  const scrollChatToBottom = () => {
+    chatThread.scrollTop = chatThread.scrollHeight;
+  };
   const appendChatBubble = (message, { streaming = false } = {}) => {
     const body = h("div", { cls: "research-chat-bubble-body" });
     if (streaming && !message.content) {
@@ -4725,10 +4731,11 @@ function renderResearchWorkspace(narrative, reviewElement) {
     }
     const bubble = h("article", { cls: `research-chat-bubble is-${message.role}` }, [body]);
     chatThread.append(bubble);
-    chatThread.scrollTop = chatThread.scrollHeight;
+    scrollChatToBottom();
     return { bubble, body };
   };
   state.researchChatHistory.forEach((message) => appendChatBubble(message));
+  requestAnimationFrame(scrollChatToBottom);
   const form = h("form", { cls: "research-question-form" }, [question, submit]);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -4781,11 +4788,12 @@ function renderResearchWorkspace(narrative, reviewElement) {
           try { payload = JSON.parse(dataLines.join("\n") || "{}"); }
           catch { payload = { message: dataLines.join("\n") }; }
           if (eventName === "delta") {
+            const shouldFollowStream = isChatNearBottom();
             assistantMessage.content += payload.text || "";
             assistantBubble.body.replaceChildren(
               renderMarkdown(assistantMessage.content, "aw-markdown"),
             );
-            chatThread.scrollTop = chatThread.scrollHeight;
+            if (shouldFollowStream) scrollChatToBottom();
           } else if (eventName === "error") {
             streamError = payload.message || "模型回答失败";
           }
@@ -5647,9 +5655,9 @@ function renderCandidateCards() {
     const reason = document.createElement("div");
     reason.className = "candidate-reason";
     const reasonLabel = document.createElement("strong");
-    reasonLabel.textContent = "筛选依据 / 核心内容";
+    reasonLabel.textContent = "筛选依据";
     const reasonText = document.createElement("span");
-    reasonText.textContent = agentReason || "当前说明缺失，请结合标题和摘要人工判断。";
+    reasonText.textContent = agentReason || "标题和摘要信息不足，建议人工判断。";
     reason.append(reasonLabel, reasonText);
 
     const abstract = document.createElement("p");

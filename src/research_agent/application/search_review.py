@@ -68,15 +68,25 @@ def _candidate_matches(candidate: PaperCandidate, query: str) -> bool:
     return normalized in haystack
 
 
-def _abstract_core_sentence(abstract: str, *, limit: int = 180) -> str:
-    """Return a compact, source-grounded fallback for candidate review cards."""
-    normalized = " ".join(str(abstract or "").split())
-    if not normalized:
-        return ""
-    sentence = re.split(r"(?<=[。！？.!?])\s+", normalized, maxsplit=1)[0]
-    if len(sentence) <= limit:
-        return sentence
-    return sentence[: limit - 1].rstrip("，,；;：: ") + "…"
+def _default_candidate_reason(decision: str) -> str:
+    if decision == "include":
+        return "论文主题与研究问题直接相关，建议纳入后续精读。"
+    if decision == "exclude":
+        return "论文主题与当前研究问题关联较弱，建议排除。"
+    return "标题和摘要信息不足，暂时无法确定相关性，建议人工判断。"
+
+
+def _compact_chinese_reason(reason: str, *, decision: str, limit: int = 64) -> str:
+    normalized = " ".join(str(reason or "").split())
+    normalized = re.sub(r"^(?:筛选依据|筛选理由|文章核心内容|核心内容)\s*[：:]\s*", "", normalized)
+    if not re.search(r"[\u3400-\u9fff]", normalized):
+        return _default_candidate_reason(decision)
+    sentence = re.split(r"(?<=[。！？；;])", normalized, maxsplit=1)[0].strip()
+    if len(sentence) > limit:
+        sentence = sentence[: limit - 1].rstrip("，,；;：:。！？ ") + "…"
+    if sentence and sentence[-1] not in "。！？…":
+        sentence += "。"
+    return sentence or _default_candidate_reason(decision)
 
 
 def _candidate_reason(
@@ -85,17 +95,8 @@ def _candidate_reason(
     decision: str,
     supplied_reason: str | None,
 ) -> str:
-    reason = " ".join(str(supplied_reason or "").split())
-    if reason:
-        return reason
-    core = _abstract_core_sentence(candidate.abstract)
-    if core:
-        return f"文章核心内容：{core}"
-    if decision == "include":
-        return "标题与研究问题直接相关；当前摘要缺失，建议结合全文进一步确认。"
-    if decision == "exclude":
-        return "Agent 判断该论文偏离当前研究范围；当前摘要缺失，建议人工复核。"
-    return "标题或元数据与研究问题可能相关；当前摘要不足，需要人工或全文确认。"
+    del candidate  # 理由由 Agent 提供；缺失或非中文时按筛选状态安全兜底。
+    return _compact_chinese_reason(supplied_reason or "", decision=decision)
 
 
 class SearchReviewService:
@@ -200,7 +201,11 @@ class SearchReviewService:
         payload["abstract_truncated"] = len(abstract) > 700
         payload["selected"] = selected
         payload["agent_decision"] = decision
-        payload["agent_reason"] = reason
+        payload["agent_reason"] = _candidate_reason(
+            candidate,
+            decision=decision,
+            supplied_reason=reason,
+        )
         return payload
 
     def _resolve_limits(

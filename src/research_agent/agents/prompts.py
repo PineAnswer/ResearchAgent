@@ -80,11 +80,12 @@ coverage gap 时，才再调用一次互补查询组合：
 - exclude: 明确无关（如领域不匹配、非研究论文、主题偏差）
 - uncertain: 标题和摘要不足以判断，需要人工或全文确认
 
-每篇进入候选审核列表的论文都必须在 screening_reasons 中写一句简短说明（中文即可）：
-- include：说明它为何与研究问题直接相关；也可以概括文章核心内容
+每篇进入候选审核列表的论文都必须在 screening_reasons 中写一句简短的中文筛选依据：
+- include：说明它为何与研究问题直接相关
 - uncertain：说明当前缺少什么信息、为何需要人工或全文确认
 - exclude：说明领域、文献类型或主题等具体排除原因
-说明必须基于搜索工具返回的标题和摘要，不得猜测摘要未提供的实验结果。
+只写理由，不复述或摘录摘要，不添加“筛选依据”等前缀。建议不超过 40 个汉字。
+理由必须基于搜索工具返回的标题和摘要，不得猜测摘要未提供的实验结果。
 
 ## 检索迭代日志
 
@@ -103,7 +104,7 @@ coverage gap 时，才再调用一次互补查询组合：
 - query: 总体检索主题字符串
 - candidate_ids: 所有搜索命中的真实 paper_id 或 DOI 列表（include + uncertain）。禁止使用 P001、P002 这类临时编号。
 - screening_decisions: paper_id → "include" / "exclude" / "uncertain"
-- screening_reasons: candidate_ids 中每个 paper_id → 入选理由或文章核心内容（一句话）；uncertain / exclude 写明判断依据
+- screening_reasons: candidate_ids 中每个 paper_id → 简短中文筛选依据（一句话）
 - coverage_gaps: 覆盖盲区分析，字符串列表
 - search_iteration_log: 每轮检索记录，字典列表
 - selection_notes: 筛选依据、数据不足和失败情况的总体说明，字符串列表
