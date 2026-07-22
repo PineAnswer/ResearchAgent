@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from csv import DictReader
 from datetime import UTC, datetime
 from pathlib import Path
@@ -541,6 +541,7 @@ class ResearchSupervisor:
         research_question: str,
         thread_id: str,
         show_progress: bool,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> ResearchRunLogger:
         return ResearchRunLogger(
             runs_root=self.settings.data_dir / "runs",
@@ -548,6 +549,7 @@ class ResearchSupervisor:
             research_question=research_question,
             thread_id=thread_id,
             console=show_progress,
+            event_sink=event_sink,
         )
 
     def _invoke_graph(
@@ -714,6 +716,7 @@ class ResearchSupervisor:
         self,
         project_id: str,
         thread_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         """Continue screening or an interrupted research stage."""
         if self.graph is None:
@@ -750,6 +753,7 @@ class ResearchSupervisor:
             project.research_question,
             active_thread_id,
             False,
+            progress_callback,
         )
         config = self.build_config(active_thread_id)
         config["callbacks"] = [run_logger]
@@ -793,6 +797,7 @@ class ResearchSupervisor:
         year_to: int = 2026,
         quality_venues_only: bool = False,
         prefer_library_search: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         """Start research for a project pre-created by the conversation service."""
         if self.graph is None:
@@ -826,6 +831,7 @@ class ResearchSupervisor:
             project.research_question,
             thread_id,
             False,
+            progress_callback,
         )
         run_logger.project_id = project_id
         config = self.build_config(thread_id)

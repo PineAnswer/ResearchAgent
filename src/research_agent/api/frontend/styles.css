@@ -2778,7 +2778,7 @@ textarea:focus {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 10px;
-  align-items: center;
+  align-items: start;
   min-width: 0;
   min-height: 24px;
   font-size: 14px;
@@ -2807,10 +2807,29 @@ textarea:focus {
 }
 
 .activity-text {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.activity-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.activity-details {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.activity-details > span {
+  overflow-wrap: anywhere;
 }
 
 .review-panel {

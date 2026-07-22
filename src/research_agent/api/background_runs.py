@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -64,6 +65,21 @@ class ConversationRunManager:
         self.repository: SqliteResearchRepository = supervisor.repository
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._guard = asyncio.Lock()
+        self._progress_lock = threading.RLock()
+        self._progress_events: dict[str, list[dict[str, Any]]] = {}
+
+    def _record_progress(self, run_id: str, event: dict[str, Any]) -> None:
+        with self._progress_lock:
+            events = self._progress_events.setdefault(run_id, [])
+            events.append(dict(event))
+            if len(events) > 120:
+                del events[:-120]
+
+    def progress_events(self, run_id: str | None) -> list[dict[str, Any]]:
+        if not run_id:
+            return []
+        with self._progress_lock:
+            return [dict(event) for event in self._progress_events.get(run_id, [])]
 
     async def start_initial(
         self,
@@ -109,6 +125,10 @@ class ConversationRunManager:
     ) -> ConversationRun:
         with self.repository.user_scope(user_id):
             run = self.repository.create_conversation_run(conversation_id, kind)
+        with self._progress_lock:
+            self._progress_events[run.run_id] = []
+            while len(self._progress_events) > 50:
+                self._progress_events.pop(next(iter(self._progress_events)))
         async with self._guard:
             task = asyncio.create_task(
                 self._execute(run.run_id, user_id, options),
@@ -150,12 +170,14 @@ class ConversationRunManager:
                     result = await self.supervisor.astart_project(
                         run.project_id,
                         run.thread_id,
+                        progress_callback=lambda event: self._record_progress(run_id, event),
                         **options,
                     )
                 else:
                     result = await self.supervisor.acontinue_project(
                         run.project_id,
                         run.thread_id,
+                        progress_callback=lambda event: self._record_progress(run_id, event),
                     )
                 project = self.supervisor.service.get_project(run.project_id)
                 if project.stage is ResearchStage.SEARCH_REVIEW_PENDING:

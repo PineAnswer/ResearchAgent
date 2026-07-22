@@ -114,6 +114,85 @@ def test_run_logger_records_llm_tools_search_results_and_paper_progress(tmp_path
     assert logger.result_path.exists()
 
 
+def test_run_logger_streams_structured_search_rounds_and_summary(tmp_path) -> None:
+    streamed = []
+    logger = ResearchRunLogger(
+        tmp_path / "runs",
+        topic="topic",
+        research_question="question",
+        thread_id="thread-1",
+        event_sink=streamed.append,
+    )
+
+    search_run_id = uuid4()
+    logger.on_tool_start(
+        {"name": "search_multi_source"},
+        "",
+        run_id=search_run_id,
+        inputs={
+            "queries": ["large model AIOps", "small model anomaly detection"],
+            "limit_per_source": 5,
+        },
+    )
+    logger.on_tool_end(
+        json.dumps(
+            {
+                "queries": ["large model AIOps", "small model anomaly detection"],
+                "candidates": [{"paper_id": "P1", "title": "Paper One"}],
+                "source_status": [
+                    {"source": "OpenAlex", "query": "large model AIOps", "ok": True, "count": 1},
+                    {"source": "arXiv", "query": "large model AIOps", "ok": False},
+                ],
+            }
+        ),
+        run_id=search_run_id,
+    )
+
+    commit_run_id = uuid4()
+    logger.on_tool_start(
+        {"name": "commit_subagent_result"},
+        "",
+        run_id=commit_run_id,
+        inputs={"subagent_type": "literature-scout"},
+    )
+    logger.on_tool_end(
+        json.dumps(
+            {
+                "artifact": {
+                    "kind": "SearchReport",
+                    "payload": {
+                        "search_terms": ["large model AIOps", "small model anomaly detection"],
+                        "candidates": [{"paper_id": "P1"}],
+                        "search_iteration_log": [{"query": "large model AIOps"}],
+                        "coverage_gaps": ["缺少在线推理研究"],
+                    },
+                },
+                "project": {"stage": "SEARCH_REVIEW_PENDING"},
+            }
+        ),
+        run_id=commit_run_id,
+    )
+
+    portfolio = [
+        event
+        for event in streamed
+        if (event.get("data") or {}).get("scope") == "portfolio"
+    ]
+    assert [event["type"] for event in portfolio] == [
+        "search.started",
+        "search.results",
+        "search.synthesizing",
+        "search.summary",
+    ]
+    assert portfolio[0]["data"]["round"] == 1
+    assert portfolio[0]["data"]["queries"] == [
+        "large model AIOps",
+        "small model anomaly detection",
+    ]
+    assert portfolio[1]["data"]["count"] == 1
+    assert portfolio[-1]["data"]["coverage_gaps"] == ["缺少在线推理研究"]
+
+
 def test_run_logger_labels_model_batches_as_serial_execution(tmp_path) -> None:
     logger = ResearchRunLogger(
         tmp_path / "runs",

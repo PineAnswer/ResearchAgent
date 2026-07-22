@@ -204,6 +204,7 @@ const state = {
   runPollInFlight: false,
   runKnownEvents: new Set(),
   runKnownArtifacts: new Set(),
+  runKnownRuntimeEvents: new Set(),
   runSnapshotSignature: "",
   runLastActivity: "",
   runPhase: "thinking",
@@ -4452,6 +4453,13 @@ function continuationMode(snapshot) {
     return narrativeCompletion(snapshot).complete ? null : "recovery";
   }
   if (recoverableOperationalFailure(snapshot)) return "recovery";
+  if (
+    latestFailedRun(snapshot)
+    && !snapshot?.active_run
+    && !["COMPLETED", "SEARCH_REVIEW_PENDING"].includes(stage)
+  ) {
+    return "retry";
+  }
   return null;
 }
 
@@ -4598,8 +4606,15 @@ function renderProjectSummary(snapshot) {
     STAGE_LABELS[project.stage] || project.stage,
     "项目正在推进中。",
   ];
+  const failedRun = latestFailedRun(snapshot);
   const needsRecovery = continuationMode(snapshot) === "recovery";
-  if (needsRecovery) {
+  if (failedRun) {
+    const detail = failedRun.error || failedRun.message || "后台执行遇到异常。";
+    title = "研究任务运行失败";
+    text = `已保留成功写入的阶段数据，可以点击下方按钮重试。错误详情：${detail}`;
+    elements.stageBadge.textContent = "运行失败";
+    elements.stageBadge.className = "stage-badge is-warning";
+  } else if (needsRecovery) {
     const completion = narrativeCompletion(snapshot);
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDrafts = currentSectionDrafts(snapshot);
@@ -4783,6 +4798,11 @@ function renderStagePanels(snapshot) {
     elements.continueTitle.textContent = "候选集已经确认";
     elements.continueText.textContent = "继续后将读取论文、提取证据并完成综述。";
     elements.continueButtonLabel.textContent = "继续研究";
+  } else if (mode === "retry") {
+    elements.continueEyebrow.textContent = "运行中断";
+    elements.continueTitle.textContent = "从已保存进度重试";
+    elements.continueText.textContent = "系统会从当前项目阶段重新执行；已经提交的研究产物将继续保留。";
+    elements.continueButtonLabel.textContent = "重新运行";
   } else if (mode) {
     const operationalRecovery = recoverableOperationalFailure(snapshot);
     const savedDraftCount = currentSectionDrafts(snapshot).length;
@@ -4818,6 +4838,8 @@ function snapshotSignature(snapshot) {
   const latestEvent = events.at(-1);
   const latestRun = snapshot?.runs?.[0] || null;
   const activeRun = snapshot?.active_run || null;
+  const runtimeEvents = snapshot?.runtime_events || [];
+  const latestRuntimeEvent = runtimeEvents.at(-1);
   return [
     snapshot?.project?.updated_at || "",
     snapshot?.project?.stage || "",
@@ -4828,6 +4850,9 @@ function snapshotSignature(snapshot) {
     activeRun?.run_id || latestRun?.run_id || "",
     activeRun?.status || latestRun?.status || "",
     activeRun?.updated_at || latestRun?.updated_at || "",
+    runtimeEvents.length,
+    latestRuntimeEvent?.timestamp || "",
+    latestRuntimeEvent?.type || "",
   ].join(":");
 }
 
@@ -4835,6 +4860,11 @@ function activeSnapshotRun(snapshot) {
   if (snapshot?.project?.stage === "SEARCH_REVIEW_PENDING") return null;
   const run = snapshot?.active_run;
   return run && ["queued", "running"].includes(run.status) ? run : null;
+}
+
+function latestFailedRun(snapshot) {
+  const latestRun = snapshot?.runs?.[0] || null;
+  return latestRun?.status === "failed" ? latestRun : null;
 }
 
 function displayRunMessage(message, phaseName) {
@@ -5534,10 +5564,11 @@ function runTimestamp(value, fallback = Date.now()) {
 }
 
 function formatActivityTime(timestamp, current = false) {
+  if (current) return "进行中";
   const elapsed = formatRunElapsed(
     Math.max(0, runTimestamp(timestamp) - (state.runStartedAt || Date.now())),
   );
-  return current ? `进行中 ${elapsed}` : `完成于 ${elapsed}`;
+  return `完成于 ${elapsed}`;
 }
 
 function refreshActivityTimes(now = Date.now()) {
@@ -5587,7 +5618,7 @@ function markCurrentActivityComplete(completedAt = Date.now()) {
 
 function addActivity(
   message,
-  { updateStatus = true, kind = "progress", completedAt = null } = {},
+  { updateStatus = true, kind = "progress", completedAt = null, details = [] } = {},
 ) {
   if (!message) return;
   if (message === state.runLastActivity) {
@@ -5608,21 +5639,105 @@ function addActivity(
   const text = document.createElement("span");
   text.className = "activity-text";
   text.textContent = message;
+  const copy = document.createElement("span");
+  copy.className = "activity-copy";
+  copy.append(text);
+  if (details.length) {
+    const detailList = document.createElement("span");
+    detailList.className = "activity-details";
+    details.filter(Boolean).forEach((detail) => {
+      const line = document.createElement("span");
+      line.textContent = detail;
+      detailList.append(line);
+    });
+    copy.append(detailList);
+  }
   const time = document.createElement("time");
   time.className = "activity-time";
   time.textContent = formatActivityTime(
     kind === "complete" ? item.dataset.completedAt : Date.now(),
     kind !== "complete",
   );
-  item.append(marker, text, time);
+  item.append(marker, copy, time);
   elements.activityLog.append(item);
-  while (elements.activityLog.children.length > 7) {
+  while (elements.activityLog.children.length > 14) {
     elements.activityLog.firstElementChild?.remove();
   }
   elements.activityLog.scrollTop = elements.activityLog.scrollHeight;
   state.runLastActivity = message;
   if (updateStatus) elements.runStatusText.textContent = message;
   refreshIcons();
+}
+
+function runtimeEventIdentity(event, index = 0) {
+  return `${event?.timestamp || index}:${event?.type || "runtime"}:${event?.message || ""}`;
+}
+
+function sourceRoundSummary(statuses = []) {
+  const summary = new Map();
+  statuses.forEach((status) => {
+    const source = status?.source;
+    if (!source) return;
+    const current = summary.get(source) || { count: 0, failed: false };
+    if (status.ok === false) current.failed = true;
+    else current.count += Number(status.count || 0);
+    summary.set(source, current);
+  });
+  return [...summary.entries()].map(([source, value]) => (
+    value.failed && value.count === 0
+      ? `${source}：本轮跳过`
+      : `${source}：${value.count} 篇${value.failed ? "（部分查询跳过）" : ""}`
+  ));
+}
+
+function appendRuntimeEvent(event, index = 0) {
+  const identity = runtimeEventIdentity(event, index);
+  if (state.runKnownRuntimeEvents.has(identity)) return;
+  const data = event?.data || {};
+  if (data.scope !== "portfolio") return;
+
+  let activity = null;
+  if (event.type === "search.started") {
+    activity = {
+      message: `第 ${data.round || 1} 轮检索`,
+      details: [
+        data.queries?.length ? `检索词：${data.queries.join("；")}` : "",
+        data.sources?.length ? `来源：${data.sources.join("、")}` : "",
+      ],
+      kind: "progress",
+    };
+  } else if (event.type === "search.results") {
+    activity = {
+      message: `第 ${data.round || 1} 轮检索完成：去重后 ${data.count || 0} 篇`,
+      details: sourceRoundSummary(data.source_status),
+      kind: "complete",
+    };
+  } else if (event.type === "search.synthesizing") {
+    activity = {
+      message: `第 ${data.round || 1} 轮综合分析`,
+      details: [`正在比较 ${data.candidate_count || 0} 篇候选论文并检查覆盖盲区`],
+      kind: "progress",
+    };
+  } else if (event.type === "search.summary") {
+    activity = {
+      message: `检索综合完成：${data.rounds || 0} 轮，共 ${data.candidate_count || 0} 篇候选论文`,
+      details: [
+        data.search_terms?.length ? `综合检索词：${data.search_terms.join("；")}` : "",
+        data.coverage_gaps?.length ? `仍需关注：${data.coverage_gaps.join("；")}` : "覆盖分析已完成",
+      ],
+      kind: "complete",
+    };
+  }
+  if (!activity) return;
+
+  state.runKnownRuntimeEvents.add(identity);
+  setRunPhase("searching", event.message || RUN_PHASES.searching.detail);
+  addActivity(activity.message, {
+    updateStatus: false,
+    kind: activity.kind,
+    completedAt: event.timestamp,
+    details: activity.details,
+  });
 }
 
 function stopRunTimers() {
@@ -5642,6 +5757,7 @@ function beginRunSession({ stage = "CREATED", message = "", snapshot = null, pha
   state.runKnownArtifacts = new Set(
     (snapshot?.artifacts || []).map((artifact, index) => artifactIdentity(artifact, index)),
   );
+  state.runKnownRuntimeEvents = new Set();
   state.runSnapshotSignature = snapshot ? snapshotSignature(snapshot) : "";
   state.runLastActivity = "";
   elements.activityLog.replaceChildren();
@@ -5657,7 +5773,7 @@ function beginRunSession({ stage = "CREATED", message = "", snapshot = null, pha
   });
   const activePhase = phase || STAGE_RUN_PHASES[stage] || "thinking";
   setRunPhase(activePhase, message);
-  addActivity(message || RUN_PHASES[activePhase].detail);
+  (snapshot?.runtime_events || []).forEach(appendRuntimeEvent);
   state.runClockTimer = window.setInterval(updateRunClock, 1000);
 }
 
@@ -5747,6 +5863,13 @@ function syncRunningSnapshot(snapshot) {
   }
   const stage = snapshot?.project?.stage;
   setRunPhase(STAGE_RUN_PHASES[stage] || "thinking");
+  (snapshot?.runtime_events || []).forEach(appendRuntimeEvent);
+  const latestPortfolioEvent = [...(snapshot?.runtime_events || [])]
+    .reverse()
+    .find((event) => event?.data?.scope === "portfolio");
+  if (latestPortfolioEvent && stage === "CREATED") {
+    setRunPhase("searching", latestPortfolioEvent.message);
+  }
   return runFinished;
 }
 
@@ -5769,7 +5892,12 @@ async function pollRunningProject() {
     if (runFinished && projectId === state.projectId) {
       await loadProject(projectId, true, true);
       await loadProjects();
-      notify("本阶段已经完成，界面已自动更新");
+      const failedRun = latestFailedRun(payload.data);
+      if (failedRun) {
+        notify(`研究执行失败：${failedRun.error || failedRun.message || "未知错误"}`, true);
+      } else {
+        notify("本阶段已经完成，界面已自动更新");
+      }
     }
   } catch {
     // The main request owns error reporting; polling remains best-effort.
@@ -5987,6 +6115,8 @@ async function continueResearchLegacy() {
   const mode = continuationMode(state.snapshot);
   const confirmation = mode === "screening"
     ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
+    : mode === "retry"
+      ? "将从当前已保存阶段重新运行研究任务。确认开始吗？"
     : recoverableOperationalFailure(state.snapshot)
       ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
       : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";
@@ -6092,6 +6222,8 @@ async function continueResearch(options = {}) {
   const mode = continuationMode(state.snapshot);
   const confirmation = mode === "screening"
     ? "继续后将开始逐篇读取论文，这可能需要几分钟。确认开始吗？"
+    : mode === "retry"
+      ? "将从当前已保存阶段重新运行研究任务。确认开始吗？"
     : recoverableOperationalFailure(state.snapshot)
       ? "将从已保存的章节草稿恢复综述整合，不会重新检索、重读论文或重写章节。确认开始吗？"
       : "将复用已保存的研究结果继续生成综述，不会重新检索或重读论文。确认开始吗？";

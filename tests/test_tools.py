@@ -1,4 +1,5 @@
 import json
+import threading
 from io import BytesIO
 from email.message import Message
 from pathlib import Path
@@ -528,3 +529,137 @@ def test_multi_source_search_splits_queries_and_merges_duplicate_papers(
     ]
     assert duplicate["source"] == "OpenAlex + Crossref + Semantic Scholar"
     assert duplicate["relevance_score"] > 0
+
+
+def test_multi_source_search_runs_sources_in_parallel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    barrier = threading.Barrier(4, timeout=2)
+    atom = b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        barrier.wait()
+        url = request.full_url
+        if "api.openalex.org" in url:
+            return FakeJsonResponse({"results": []})
+        if "api.crossref.org" in url:
+            return FakeJsonResponse({"message": {"items": []}})
+        if "api.semanticscholar.org" in url:
+            return FakeJsonResponse({"data": []})
+        if "export.arxiv.org" in url:
+            return FakeBinaryResponse(atom)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {
+        item.name: item
+        for item in build_literature_tools(tmp_path, max_retries=0)
+    }
+
+    result = json.loads(
+        tools["search_multi_source"].invoke(
+            {"queries": ["parallel literature search"], "limit_per_source": 2}
+        )
+    )
+
+    assert len(result["source_status"]) == 4
+    assert all(item["ok"] is True for item in result["source_status"])
+
+
+def test_multi_source_search_retries_timeout_then_returns_empty_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    arxiv_calls = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal arxiv_calls
+        del timeout
+        url = request.full_url
+        if "api.openalex.org" in url:
+            return FakeJsonResponse({"results": []})
+        if "api.crossref.org" in url:
+            return FakeJsonResponse({"message": {"items": []}})
+        if "api.semanticscholar.org" in url:
+            return FakeJsonResponse({"data": []})
+        if "export.arxiv.org" in url:
+            arxiv_calls += 1
+            raise TimeoutError("read timed out")
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {
+        item.name: item
+        for item in build_literature_tools(
+            tmp_path,
+            max_retries=3,
+            backoff_seconds=0,
+        )
+    }
+
+    result = json.loads(
+        tools["search_multi_source"].invoke(
+            {
+                "queries": [
+                    "resilient literature search",
+                    "fallback academic search",
+                ],
+                "limit_per_source": 2,
+            }
+        )
+    )
+
+    arxiv_status = next(
+        item for item in result["source_status"] if item["source"] == "arXiv"
+    )
+    assert arxiv_calls == 2
+    assert arxiv_status["ok"] is False
+    assert arxiv_status["error_code"] == "timeout"
+    assert arxiv_status["attempts"] == 2
+    skipped_arxiv_status = [
+        item for item in result["source_status"] if item["source"] == "arXiv"
+    ][1]
+    assert skipped_arxiv_status["error_code"] == "source_unavailable"
+    assert skipped_arxiv_status["attempts"] == 0
+    assert result["candidates"] == []
+
+
+def test_multi_source_search_retries_unexpected_source_exception_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    arxiv_calls = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal arxiv_calls
+        del timeout
+        url = request.full_url
+        if "api.openalex.org" in url:
+            return FakeJsonResponse({"results": []})
+        if "api.crossref.org" in url:
+            return FakeJsonResponse({"message": {"items": []}})
+        if "api.semanticscholar.org" in url:
+            return FakeJsonResponse({"data": []})
+        if "export.arxiv.org" in url:
+            arxiv_calls += 1
+            raise RuntimeError("unexpected arXiv failure")
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(literature_module, "urlopen", fake_urlopen)
+    tools = {
+        item.name: item
+        for item in build_literature_tools(tmp_path, max_retries=0)
+    }
+
+    result = json.loads(
+        tools["search_multi_source"].invoke(
+            {"queries": ["fallback literature search"], "limit_per_source": 2}
+        )
+    )
+
+    arxiv_status = next(
+        item for item in result["source_status"] if item["source"] == "arXiv"
+    )
+    assert arxiv_calls == 2
+    assert arxiv_status["ok"] is False
+    assert arxiv_status["error_code"] == "source_exception"
+    assert arxiv_status["attempts"] == 2

@@ -74,6 +74,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     supervisor = ResearchSupervisor(settings)
     run_manager = ConversationRunManager(supervisor)
 
+    def with_runtime_events(snapshot: Any) -> dict[str, Any]:
+        data = _json_safe(snapshot)
+        active_run = data.get("active_run") or {}
+        runs = data.get("runs") or []
+        latest_run = active_run or (runs[0] if runs else {})
+        data["runtime_events"] = run_manager.progress_events(latest_run.get("run_id"))
+        return data
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
@@ -185,7 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return ApiEnvelope(
             message="conversation_started",
             data={
-                **_json_safe(snapshot),
+                **with_runtime_events(snapshot),
                 "run": run.model_dump(mode="json"),
             },
         )
@@ -221,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             snapshot = supervisor.service.get_snapshot(conversation.project_id)
         except (ConversationNotFound, ProjectNotFound) as exc:
             raise HTTPException(status_code=404, detail="conversation_not_found") from exc
-        return ApiEnvelope(data=_json_safe(snapshot))
+        return ApiEnvelope(data=with_runtime_events(snapshot))
 
     @app.patch("/api/conversations/{conversation_id}", response_model=ApiEnvelope)
     async def update_conversation(
@@ -1002,7 +1010,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             snapshot = supervisor.service.get_snapshot(project_id)
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
-        return ApiEnvelope(data=_json_safe(snapshot))
+        return ApiEnvelope(data=with_runtime_events(snapshot))
 
     @app.get(
         "/api/projects/{project_id}/library",

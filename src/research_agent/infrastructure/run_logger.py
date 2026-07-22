@@ -7,6 +7,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -131,6 +132,7 @@ class ResearchRunLogger(BaseCallbackHandler):
         research_question: str,
         thread_id: str,
         console: bool = False,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ):
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         self.run_id = f"{timestamp}-{uuid.uuid4().hex[:8]}"
@@ -142,6 +144,7 @@ class ResearchRunLogger(BaseCallbackHandler):
         self.run_path = self.run_dir / "run.json"
         self.report_path = self.run_dir / "final-report.md"
         self.console = console
+        self.event_sink = event_sink
         self._lock = threading.RLock()
         self._tool_names: dict[str, str] = {}
         self._tool_inputs: dict[str, dict[str, Any]] = {}
@@ -149,6 +152,7 @@ class ResearchRunLogger(BaseCallbackHandler):
         self._paper_completed = 0
         self._paper_order: dict[str, int] = {}
         self._paper_attempts: dict[str, int] = {}
+        self._search_round = 0
         self.project_id: str | None = None
         self._run_record = {
             "run_id": self.run_id,
@@ -192,6 +196,12 @@ class ResearchRunLogger(BaseCallbackHandler):
             "data": _json_safe(data),
         }
         self._append_jsonl(self.events_path, record)
+        if self.event_sink is not None:
+            try:
+                self.event_sink(dict(record))
+            except Exception:
+                # Observability must never interrupt the research workflow.
+                pass
         if self.console:
             self._console(f"[进度] {message}")
 
@@ -317,9 +327,25 @@ class ResearchRunLogger(BaseCallbackHandler):
                 if name == "search_multi_source"
                 else inputs.get("query", "")
             )
+            if name == "search_multi_source":
+                self._search_round += 1
+                inputs["_search_round"] = self._search_round
+                queries = [str(item) for item in inputs.get("queries", []) if str(item)]
+                self.emit(
+                    "search.started",
+                    f"第{self._search_round}轮检索开始，共{len(queries)}组检索词",
+                    {
+                        "scope": "portfolio",
+                        "round": self._search_round,
+                        "queries": queries,
+                        "sources": ["OpenAlex", "Crossref", "Semantic Scholar", "arXiv"],
+                    },
+                )
+                return
             self.emit(
                 "search.started",
                 f"正在使用{source_names[name]}搜索：{query}",
+                {"scope": "source", "source": source_names[name], "query": query},
             )
             return
         if name == "task":
@@ -498,6 +524,7 @@ class ResearchRunLogger(BaseCallbackHandler):
         if name == "search_multi_source" and isinstance(parsed, dict):
             papers = parsed.get("candidates", [])
             statuses = parsed.get("source_status", [])
+            search_round = int(inputs.get("_search_round") or self._search_round or 1)
             failure_count = sum(
                 1
                 for status in statuses
@@ -505,12 +532,24 @@ class ResearchRunLogger(BaseCallbackHandler):
             )
             self.emit(
                 "search.results",
-                f"四源合并去重后返回{len(papers)}篇，部分失败{failure_count}项",
+                f"第{search_round}轮完成：合并去重后得到{len(papers)}篇候选论文",
                 {
+                    "scope": "portfolio",
+                    "round": search_round,
+                    "queries": parsed.get("queries", inputs.get("queries", [])),
                     "count": len(papers),
                     "partial_failures": failure_count,
                     "papers": papers,
                     "source_status": statuses,
+                },
+            )
+            self.emit(
+                "search.synthesizing",
+                f"正在综合第{search_round}轮结果并分析覆盖盲区",
+                {
+                    "scope": "portfolio",
+                    "round": search_round,
+                    "candidate_count": len(papers),
                 },
             )
             return
@@ -549,6 +588,23 @@ class ResearchRunLogger(BaseCallbackHandler):
             artifact = parsed.get("artifact", {})
             project = parsed.get("project", {})
             kind = str(artifact.get("kind", "Artifact"))
+            if kind == "SearchReport":
+                payload = artifact.get("payload", {})
+                iterations = payload.get("search_iteration_log", [])
+                candidates = payload.get("candidates", [])
+                self.emit(
+                    "search.summary",
+                    f"检索综合完成：共{len(iterations) or self._search_round}轮，形成{len(candidates)}篇候选论文",
+                    {
+                        "scope": "portfolio",
+                        "rounds": len(iterations) or self._search_round,
+                        "candidate_count": len(candidates),
+                        "search_terms": payload.get("search_terms", []),
+                        "search_iteration_log": iterations,
+                        "coverage_gaps": payload.get("coverage_gaps", []),
+                    },
+                )
+                return
             if kind == "PaperCard":
                 self._paper_completed += 1
                 payload = artifact.get("payload", {})

@@ -7,6 +7,7 @@ import ipaddress
 import re
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -197,6 +198,18 @@ def _get_json(url: str, *, source: str, policy: HttpRetryPolicy) -> dict:
                 attempts=attempts,
                 retryable=True,
             ) from exc
+        except TimeoutError as exc:
+            delay = policy.backoff_seconds * (2**attempt)
+            if attempt < min(policy.max_retries, 1) and delay <= policy.max_retry_wait_seconds:
+                time.sleep(delay)
+                continue
+            raise AcademicApiError(
+                source=source,
+                error_code="timeout",
+                message=f"{source} read timed out",
+                attempts=attempts,
+                retryable=True,
+            ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise AcademicApiError(
                 source=source,
@@ -259,6 +272,18 @@ def _get_text(
                 source=source,
                 error_code="network_error",
                 message=f"{source} network error: {exc.reason}",
+                attempts=attempts,
+                retryable=True,
+            ) from exc
+        except TimeoutError as exc:
+            delay = policy.backoff_seconds * (2**attempt)
+            if attempt < min(policy.max_retries, 1) and delay <= policy.max_retry_wait_seconds:
+                time.sleep(delay)
+                continue
+            raise AcademicApiError(
+                source=source,
+                error_code="timeout",
+                message=f"{source} read timed out",
                 attempts=attempts,
                 retryable=True,
             ) from exc
@@ -813,27 +838,83 @@ def build_literature_tools(
             ("Semantic Scholar", search_semantic_scholar),
             ("arXiv", search_arxiv),
         ]
+        def search_one_source(source: str, source_tool: Any) -> list[dict[str, Any]]:
+            results = []
+            source_failure: dict[str, Any] | None = None
+            for query in normalized_queries:
+                if source_failure is not None:
+                    results.append(
+                        {
+                            "query": query,
+                            "parsed": {
+                                "ok": False,
+                                "error_code": "source_unavailable",
+                                "error": source_failure.get("error", ""),
+                                "attempts": 0,
+                            },
+                        }
+                    )
+                    continue
+                inputs = {
+                    "query": query,
+                    "limit": limit_per_source,
+                    "year_from": year_from,
+                    "year_to": year_to,
+                    "quality_venues_only": quality_venues_only,
+                }
+                raw: Any = None
+                invocation_error: Exception | None = None
+                for invocation_attempt in range(2):
+                    try:
+                        raw = source_tool.invoke(inputs)
+                        invocation_error = None
+                        break
+                    except Exception as exc:  # keep one source from aborting the portfolio
+                        invocation_error = exc
+                        if invocation_attempt == 0:
+                            continue
+                if invocation_error is not None:
+                    parsed: Any = {
+                        "ok": False,
+                        "error_code": "source_exception",
+                        "error": str(invocation_error),
+                        "attempts": 2,
+                    }
+                else:
+                    try:
+                        parsed = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed = {
+                            "ok": False,
+                            "error_code": "invalid_response",
+                            "error": f"{source} returned an invalid response",
+                            "attempts": 1,
+                        }
+                if isinstance(parsed, dict):
+                    source_failure = parsed
+                results.append({"query": query, "parsed": parsed})
+            return results
+
+        # Run sources in parallel while keeping queries serial within each source.
+        # This lowers latency without sending a burst of concurrent requests to the
+        # same academic API.
+        with ThreadPoolExecutor(
+            max_workers=len(source_tools),
+            thread_name_prefix="literature-source",
+        ) as executor:
+            futures = {
+                source: executor.submit(search_one_source, source, source_tool)
+                for source, source_tool in source_tools
+            }
+            results_by_source = {
+                source: futures[source].result() for source, _source_tool in source_tools
+            }
+
         merged_by_key: dict[str, dict[str, Any]] = {}
         source_status = []
-        for query in normalized_queries:
-            for source, source_tool in source_tools:
-                raw = source_tool.invoke(
-                    {
-                        "query": query,
-                        "limit": limit_per_source,
-                        "year_from": year_from,
-                        "year_to": year_to,
-                        "quality_venues_only": quality_venues_only,
-                    }
-                )
-                try:
-                    parsed = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    parsed = {
-                        "ok": False,
-                        "error_code": "invalid_response",
-                        "error": f"{source} returned an invalid response",
-                    }
+        for query_index, query in enumerate(normalized_queries):
+            for source, _source_tool in source_tools:
+                parsed = results_by_source[source][query_index]["parsed"]
                 if isinstance(parsed, dict):
                     source_status.append(
                         {
@@ -842,6 +923,7 @@ def build_literature_tools(
                             "ok": False,
                             "error_code": parsed.get("error_code", "source_error"),
                             "error": parsed.get("error", ""),
+                            "attempts": parsed.get("attempts", 1),
                         }
                     )
                     continue
