@@ -16,6 +16,7 @@ from research_agent.domain.models import (
     PaperReadingProgress,
     ProjectPaper,
     ResearchConversation,
+    ResearchRelation,
     ResearchNote,
     ResearchProject,
     ResearchStage,
@@ -55,7 +56,11 @@ class ResearchRepositoryPort(Protocol):
 
     def get_project_conversation(self, project_id: str) -> ResearchConversation: ...
 
-    def list_conversations(self, limit: int = 50) -> list[ResearchConversation]: ...
+    def list_conversations(
+        self,
+        limit: int = 50,
+        archived: bool | None = False,
+    ) -> list[ResearchConversation]: ...
 
     def create_conversation_run(
         self,
@@ -159,6 +164,24 @@ class ResearchRepositoryPort(Protocol):
 
     def delete_research_note(self, note_id: str) -> None: ...
 
+    def search_research_library(self, query: str, limit: int = 50) -> list[dict[str, Any]]: ...
+
+    def find_similar_research(
+        self, project_id: str | None = None, limit: int = 3, threshold: float = 0.24
+    ) -> list[dict[str, Any]]: ...
+
+    def create_research_relation(
+        self,
+        parent_project_id: str,
+        child_project_id: str,
+        relation_type: str,
+        note: str = "",
+    ) -> dict[str, Any]: ...
+
+    def list_research_relations(self, project_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def delete_research_relation(self, relation_id: str) -> None: ...
+
     def save_paper_annotation(self, annotation: PaperAnnotation) -> PaperAnnotation: ...
 
     def list_paper_annotations(self, library_id: str) -> list[PaperAnnotation]: ...
@@ -228,6 +251,22 @@ class ResearchRepositoryPort(Protocol):
     ) -> list[tuple[ProjectPaper, LibraryPaper]]: ...
 
     def list_library_paper_projects(self, library_id: str) -> list[ProjectPaper]: ...
+
+    # ── research relations ──────────────────────────────────────────
+
+    def create_research_relation(
+        self,
+        parent_project_id: str,
+        child_project_id: str,
+        note: str = "",
+    ) -> ResearchRelation: ...
+
+    def list_research_relations(
+        self,
+        project_id: str | None = None,
+    ) -> list[ResearchRelation]: ...
+
+    def delete_research_relation(self, relation_id: str) -> None: ...
 
     def transition(
         self,

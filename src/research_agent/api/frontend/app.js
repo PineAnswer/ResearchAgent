@@ -157,6 +157,15 @@ const state = {
   projectSelectionMode: false,
   selectedProjectIds: new Set(),
   projectBulkDeleting: false,
+  projectStatusFilter: "all",
+  projectSort: "updated_desc",
+  researchSimilarities: new Map(),
+  researchRelations: [],
+  researchSearchMatches: null,
+  researchSearchPending: false,
+  researchSearchSequence: 0,
+  similarityFocusProjectId: null,
+  relationChildProjectId: null,
   projectId: null,
   project: null,
   snapshot: null,
@@ -202,7 +211,7 @@ const state = {
   paperScrollSyncing: false,
   paperCurrentPage: null,
   paperProgressTimer: null,
-  paperLastAnswer: null,
+  paperChatHistory: [],
   researchSelection: "",
   researchNotes: [],
   researchNotesProjectId: null,
@@ -242,6 +251,7 @@ const elements = {
   usageGuideOpen: byId("usageGuideOpen"),
   newProjectToggle: byId("newProjectToggle"),
   libraryToggle: byId("libraryToggle"),
+  researchLibraryToggle: byId("researchLibraryToggle"),
   recentHistoryToggle: byId("recentHistoryToggle"),
   newProjectForm: byId("newProjectForm"),
   createView: byId("createView"),
@@ -265,11 +275,8 @@ const elements = {
   noteSelection: byId("noteSelection"),
   askSelection: byId("askSelection"),
   paperPdfPages: byId("paperPdfPages"),
-  paperAskContext: byId("paperAskContext"),
-  paperQuestionForm: byId("paperQuestionForm"),
-  paperQuestionInput: byId("paperQuestionInput"),
-  clearPaperSelection: byId("clearPaperSelection"),
-  paperAnswer: byId("paperAnswer"),
+  paperChatArea: byId("paperChatArea"),
+  paperChatPanel: byId("paperChatPanel"),
   paperAskPanel: byId("paperAskPanel"),
   paperAnnotationsPanel: byId("paperAnnotationsPanel"),
   paperCardPanel: byId("paperCardPanel"),
@@ -309,23 +316,51 @@ const elements = {
   cancelNewProject: byId("cancelNewProject"),
   cancelNewProjectSecondary: byId("cancelNewProjectSecondary"),
   emptyNewProject: byId("emptyNewProject"),
-  emptyReadPaper: byId("emptyReadPaper"),
+  emptyResearchLibrary: byId("emptyResearchLibrary"),
   emptyOpenLibrary: byId("emptyOpenLibrary"),
   projectList: byId("projectList"),
+  projectsView: byId("projectsView"),
+  projectsManagerList: byId("projectsManagerList"),
+  researchPreview: byId("researchPreview"),
+  projectsNewResearch: byId("projectsNewResearch"),
   projectSearch: byId("projectSearch"),
+  projectSort: byId("projectSort"),
+  projectsResultSummary: byId("projectsResultSummary"),
+  clearSimilarityFocus: byId("clearSimilarityFocus"),
+  researchRelationDialog: byId("researchRelationDialog"),
+  researchRelationForm: byId("researchRelationForm"),
+  researchRelationChildLabel: byId("researchRelationChildLabel"),
+  researchRelationParent: byId("researchRelationParent"),
+  researchRelationNote: byId("researchRelationNote"),
+  existingResearchRelations: byId("existingResearchRelations"),
+  closeResearchRelationDialog: byId("closeResearchRelationDialog"),
+  cancelResearchRelation: byId("cancelResearchRelation"),
   toggleProjectSelection: byId("toggleProjectSelection"),
   projectBulkBar: byId("projectBulkBar"),
   projectSelectedCount: byId("projectSelectedCount"),
   selectAllProjects: byId("selectAllProjects"),
   cancelProjectSelection: byId("cancelProjectSelection"),
   deleteSelectedProjects: byId("deleteSelectedProjects"),
+  archiveSelectedProjects: byId("archiveSelectedProjects"),
+  restoreSelectedProjects: byId("restoreSelectedProjects"),
+  projectsTotalCount: byId("projectsTotalCount"),
+  projectsActiveCount: byId("projectsActiveCount"),
+  projectsReviewCount: byId("projectsReviewCount"),
+  projectsCompletedCount: byId("projectsCompletedCount"),
+  projectsArchivedCount: byId("projectsArchivedCount"),
   refreshProjects: byId("refreshProjects"),
+  inheritanceTree: byId("inheritanceTree"),
+  inheritanceTreeHeading: byId("inheritanceTreeHeading"),
+  nameInput: byId("nameInput"),
   projectLookupForm: byId("projectLookupForm"),
   projectIdInput: byId("projectIdInput"),
   initialMaxSearchRounds: byId("initialMaxSearchRounds"),
   initialYearFrom: byId("initialYearFrom"),
   initialYearTo: byId("initialYearTo"),
   initialPreferLibrarySearch: byId("initialPreferLibrarySearch"),
+  inheritProjectSelect: byId("inheritProjectSelect"),
+  inheritanceNote: byId("inheritanceNote"),
+  inheritanceNoteField: byId("inheritanceNoteField"),
   emptyState: byId("emptyState"),
   projectView: byId("projectView"),
   stageBadge: byId("stageBadge"),
@@ -375,12 +410,13 @@ const elements = {
   filteredCandidatePageStatus: byId("filteredCandidatePageStatus"),
   selectAll: byId("selectAll"),
   clearAll: byId("clearAll"),
+  selectAllCandidates: byId("selectAllCandidates"),
+  clearAllCandidates: byId("clearAllCandidates"),
   paperCapacity: byId("paperCapacity"),
   manualDois: byId("manualDois"),
   refineReview: byId("refineReview"),
   undoReview: byId("undoReview"),
   acceptReview: byId("acceptReview"),
-  stopReview: byId("stopReview"),
   continuePanel: byId("continuePanel"),
   continueEyebrow: byId("continueEyebrow"),
   continueTitle: byId("continueTitle"),
@@ -425,11 +461,13 @@ function showWorkspace(view) {
   elements.createView.hidden = view !== "create";
   elements.libraryView.hidden = view !== "library";
   elements.paperWorkspaceView.hidden = view !== "paper";
+  elements.projectsView.hidden = view !== "projects";
   elements.projectView.hidden = view !== "project";
   const navigationStates = [
     [elements.homeToggle, view === "empty"],
     [elements.newProjectToggle, view === "create"],
     [elements.libraryToggle, ["library", "paper"].includes(view)],
+    [elements.researchLibraryToggle, view === "projects"],
   ];
   navigationStates.forEach(([button, active]) => {
     button.classList.toggle("is-active", active);
@@ -546,7 +584,10 @@ function renderRecentHistoryPopover() {
     ),
   ]);
   const list = h("div", { cls: "recent-history-list" });
-  state.projects.slice(0, 12).forEach((project) => {
+  const recentProjects = state.projects.filter(
+    (project) => !projectConversation(project)?.archived_at,
+  ).slice(0, 12);
+  recentProjects.forEach((project) => {
     const button = h(
       "button",
       {
@@ -565,7 +606,7 @@ function renderRecentHistoryPopover() {
     );
     list.append(button);
   });
-  if (!state.projects.length) {
+  if (!recentProjects.length) {
     list.append(h("p", { cls: "muted small recent-history-empty" }, "还没有研究记录"));
   }
   popover.replaceChildren(header, list);
@@ -815,7 +856,6 @@ function setBusy(busy) {
     elements.refineReview,
     elements.undoReview,
     elements.acceptReview,
-    elements.stopReview,
     elements.reloadProject,
     elements.deleteProject,
   ].forEach((button) => {
@@ -2001,14 +2041,12 @@ function setPaperTab(tab) {
   elements.paperAskPanel.hidden = tab !== "ask";
   elements.paperAnnotationsPanel.hidden = tab !== "annotations";
   elements.paperCardPanel.hidden = tab !== "card";
+  if (tab === "ask") renderPaperChat();
 }
 
 function clearPaperSelection() {
   state.paperSelection = null;
   elements.paperSelectionBar.hidden = true;
-  elements.clearPaperSelection.hidden = true;
-  elements.paperAskContext.querySelector("strong").textContent = "论文全文";
-  elements.paperAskContext.querySelector("p").textContent = "回答将基于当前论文，并给出可点击的引用页码。";
   window.getSelection()?.removeAllRanges();
 }
 
@@ -2089,14 +2127,11 @@ function capturePaperSelection() {
 function renderPaperReadingCard() {
   const analyses = (state.paperWorkspace?.analyses || [])
     .filter((item) => item.kind === "PaperCard");
+  const hasCard = analyses.length > 0;
+  elements.generateReadingCard.hidden = hasCard;
+  elements.exportReadingReport.hidden = !hasCard;
+  if (!hasCard) return;
   elements.paperReadingCard.replaceChildren();
-  if (!analyses.length) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "尚未生成精读卡。点击页面顶部的“生成精读卡”开始分析。";
-    elements.paperReadingCard.append(empty);
-    return;
-  }
   const card = analyses[0].payload || {};
   const level = document.createElement("span");
   level.className = "library-analysis-mode";
@@ -2149,6 +2184,7 @@ function renderPaperReadingCard() {
     }
     elements.paperReadingCard.append(article);
   });
+  elements.paperReadingCard.append(elements.exportReadingReport);
   refreshIcons();
 }
 
@@ -2452,6 +2488,165 @@ function scrollToPaperPage(pageNumber) {
   window.setTimeout(() => page.classList.remove("is-cited"), 1600);
 }
 
+function renderPaperChat() {
+  const workspace = state.paperWorkspace;
+  if (!workspace) return;
+  const libraryId = workspace.paper.library_id;
+  const attachmentId = workspace.workspace_attachment?.attachment_id || null;
+  const selection = state.paperSelection;
+  const chatArea = elements.paperChatArea;
+  chatArea.replaceChildren();
+
+  // Context card
+  const contextDiv = h("div", { cls: "paper-chat-context" });
+  contextDiv.append(
+    h("div", { cls: "paper-chat-context-head" }, [
+      h("span", {}, [iconNode(selection ? "text-select" : "book-open"), ` ${selection ? "选段提问" : "论文全文"}`]),
+      h("button", {
+        cls: "icon-button",
+        type: "button",
+        title: selection ? "改为询问全文" : "",
+        "aria-label": selection ? "改为询问全文" : "",
+        hidden: !selection,
+        onClick: () => { clearPaperSelection(); renderPaperChat(); },
+      }, iconNode("x")),
+    ]),
+  );
+  if (selection) {
+    contextDiv.append(h("p", { cls: "paper-chat-context-preview" }, `第 ${selection.page} 页选中文本：${selection.text.slice(0, 120)}`));
+  } else {
+    contextDiv.append(h("p", { cls: "paper-chat-context-hint" }, "当前论文全文已纳入回答上下文，支持连续追问。"));
+  }
+  chatArea.append(contextDiv);
+
+  // Chat thread
+  const chatThread = h("div", { cls: "paper-chat-thread", "aria-live": "polite" });
+  const isChatNearBottom = () => (
+    chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight <= 48
+  );
+  const scrollChatToBottom = () => { chatThread.scrollTop = chatThread.scrollHeight; };
+  const appendChatBubble = (message, { streaming = false } = {}) => {
+    const body = h("div", { cls: "paper-chat-bubble-body" });
+    if (streaming && !message.content) {
+      body.append(h("p", { cls: "paper-answer-working" }, [iconNode("loader-circle"), " 正在回答…"]));
+    } else if (message.role === "assistant") {
+      body.append(renderMarkdown(message.content || "", "aw-markdown"));
+    } else {
+      body.textContent = message.content || "";
+    }
+    const bubble = h("article", { cls: `paper-chat-bubble is-${message.role}` }, [body]);
+    chatThread.append(bubble);
+    scrollChatToBottom();
+    return { bubble, body };
+  };
+  state.paperChatHistory.forEach((message) => appendChatBubble(message));
+  chatArea.append(chatThread);
+
+  // Input form
+  const question = h("textarea", {
+    rows: "3", maxlength: "4000",
+    placeholder: state.paperChatHistory.length ? "继续追问…" : "输入问题，例如：作者的核心假设是什么？",
+    "aria-label": "论文问题",
+  });
+  const submit = h("button", { type: "submit", cls: "primary" }, "发送");
+  const form = h("form", { cls: "paper-chat-form" }, [question, submit]);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const cleanQuestion = question.value.trim();
+    if (!cleanQuestion) return;
+    const requestHistory = state.paperChatHistory.filter((m) => !m.failed).slice(-40);
+    const userMessage = { role: "user", content: cleanQuestion };
+    const assistantMessage = { role: "assistant", content: "" };
+    state.paperChatHistory.push(userMessage, assistantMessage);
+    appendChatBubble(userMessage);
+    const assistantBubble = appendChatBubble(assistantMessage, { streaming: true });
+    question.value = "";
+    try {
+      submit.disabled = true;
+      refreshIcons();
+      const sel = state.paperSelection;
+      const response = await fetch(
+        `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/question/stream`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scope: sel ? "selection" : "paper",
+            attachment_id: attachmentId,
+            question: cleanQuestion,
+            page: sel?.page || null,
+            selected_text: sel?.text || "",
+            prefix: sel?.prefix || "",
+            suffix: sel?.suffix || "",
+            history: requestHistory,
+          }),
+        },
+      );
+      if (!response.ok) {
+        let payload = null;
+        try { payload = await response.json(); } catch { payload = null; }
+        throw new Error(errorMessage(payload, `请求失败（HTTP ${response.status}）`));
+      }
+      if (!response.body) throw new Error("浏览器无法读取流式回答");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+          let eventName = "message";
+          const dataLines = [];
+          block.split(/\r?\n/).forEach((line) => {
+            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          });
+          if (eventName === "delta") {
+            const payload = JSON.parse(dataLines.join("\n"));
+            assistantMessage.content += payload.text || "";
+            assistantBubble.body.replaceChildren(
+              renderMarkdown(assistantMessage.content, "aw-markdown"),
+            );
+            if (isChatNearBottom()) scrollChatToBottom();
+          } else if (eventName === "error") {
+            const payload = JSON.parse(dataLines.join("\n"));
+            throw new Error(payload.message || "模型回答失败");
+          }
+        }
+        if (done) break;
+      }
+      state.paperChatHistory = state.paperChatHistory.slice(-40);
+      const saveBtn = h("button", {
+        type: "button",
+        cls: "quiet-button paper-chat-save",
+        onClick: async () => {
+          await annotatePaperNote(
+            `Q: ${userMessage.content}\nA: ${assistantMessage.content}`,
+            "qa",
+          );
+        },
+      }, [iconNode("bookmark-plus"), " 保存为批注"]);
+      assistantBubble.body.append(saveBtn);
+      refreshIcons();
+    } catch (error) {
+      assistantMessage.content = `回答失败：${error.message}`;
+      assistantMessage.failed = true;
+      assistantBubble.body.replaceChildren(
+        h("p", { cls: "aw-error" }, `回答失败：${error.message}`),
+      );
+    } finally {
+      submit.disabled = false;
+      refreshIcons();
+    }
+  });
+  chatArea.append(form);
+  requestAnimationFrame(() => { chatThread.scrollTop = chatThread.scrollHeight; });
+  refreshIcons();
+}
+
 function renderPaperAnswer(answer) {
   elements.paperAnswer.replaceChildren();
   elements.paperAnswer.hidden = false;
@@ -2642,7 +2837,7 @@ async function openPaperWorkspace(
   state.activePaperAnnotationId = null;
   state.paperCurrentPage = null;
   clearPaperSelection();
-  elements.paperAnswer.hidden = true;
+  state.paperChatHistory = [];
   try {
     const payload = await api(`/api/library/papers/${encodeURIComponent(libraryId)}/workspace`);
     let workspace = payload.data;
@@ -2769,6 +2964,33 @@ async function openLibrary() {
   showWorkspace("library");
   window.history.replaceState({}, "", `${window.location.pathname}?view=library`);
   await loadLibrary();
+}
+
+async function continueRecentReading() {
+  state.libraryView = "recent";
+  state.libraryCollectionId = null;
+  state.selectedLibraryIds.clear();
+  await openLibrary();
+
+  const recentPaper = [...state.libraryPapers]
+    .filter((paper) => paper.recent_reading)
+    .sort((left, right) => (
+      Date.parse(right.recent_reading.updated_at || "")
+      - Date.parse(left.recent_reading.updated_at || "")
+    ))[0];
+  if (recentPaper) {
+    await openPaperWorkspace(
+      recentPaper.library_id,
+      recentPaper.recent_reading.attachment_id || null,
+      false,
+      recentPaper.recent_reading.last_page || 1,
+    );
+    return;
+  }
+
+  state.libraryView = "all";
+  await loadLibrary();
+  notify("还没有最近阅读记录，请先选择一篇论文开始精读");
 }
 
 async function updateLibraryPaper(libraryId, changes) {
@@ -3088,11 +3310,42 @@ async function importLibraryRecords() {
 
 function filteredProjects() {
   const query = elements.projectSearch.value.trim().toLocaleLowerCase();
-  return state.projects.filter((project) => {
+  const similarIds = state.similarityFocusProjectId
+    ? new Set(
+      (state.researchSimilarities.get(state.similarityFocusProjectId) || [])
+        .map((item) => item.project_id),
+    )
+    : null;
+  const projects = state.projects.filter((project) => {
+    if (similarIds && !similarIds.has(project.project_id)) return false;
+    const archived = Boolean(projectConversation(project)?.archived_at);
+    const status = state.projectStatusFilter;
+    const isReview = ["SEARCH_REVIEW_PENDING", "REVIEW_PENDING"].includes(project.stage);
+    const matchesStatus = status === "all"
+      || (status === "archived" && archived)
+      || (status === "active" && !archived && project.stage !== "COMPLETED")
+      || (status === "review" && !archived && isReview)
+      || (status === "completed" && !archived && project.stage === "COMPLETED");
+    if (!matchesStatus) return false;
     if (!query) return true;
+    if (state.researchSearchMatches instanceof Map) {
+      return state.researchSearchMatches.has(project.project_id);
+    }
     return [projectDisplayTitle(project), project.research_question, project.project_id]
       .filter(Boolean)
       .some((value) => String(value).toLocaleLowerCase().includes(query));
+  });
+  return projects.sort((left, right) => {
+    if (query && state.researchSearchMatches instanceof Map) {
+      const scoreDifference = (state.researchSearchMatches.get(right.project_id)?.score || 0)
+        - (state.researchSearchMatches.get(left.project_id)?.score || 0);
+      if (scoreDifference) return scoreDifference;
+    }
+    if (state.projectSort === "title_asc") {
+      return projectDisplayTitle(left).localeCompare(projectDisplayTitle(right), "zh-CN");
+    }
+    const field = state.projectSort === "created_desc" ? "created_at" : "updated_at";
+    return String(right[field] || "").localeCompare(String(left[field] || ""));
   });
 }
 
@@ -3101,7 +3354,7 @@ function projectConversation(project) {
 }
 
 function projectDisplayTitle(project) {
-  return projectConversation(project)?.title || project?.topic || "未命名研究";
+  return project?.name || projectConversation(project)?.title || project?.topic || "未命名研究";
 }
 
 function projectListDisplayStage(project) {
@@ -3121,6 +3374,10 @@ function projectListSignature(projects) {
   return JSON.stringify({
     current: state.projectId,
     query: elements.projectSearch.value.trim().toLocaleLowerCase(),
+    status: state.projectStatusFilter,
+    sort: state.projectSort,
+    similarityFocus: state.similarityFocusProjectId,
+    searchPending: state.researchSearchPending,
     selecting: state.projectSelectionMode,
     selected: [...state.selectedProjectIds].sort(),
     projects: projects.map((project) => ({
@@ -3129,6 +3386,12 @@ function projectListSignature(projects) {
       stage: projectListDisplayStage(project),
       date: formatDate(project.updated_at),
       pinned: Boolean(projectConversation(project)?.pinned),
+      archived: Boolean(projectConversation(project)?.archived_at),
+      similar: state.researchSimilarities.get(project.project_id)?.length || 0,
+      relations: state.researchRelations.filter((relation) =>
+        relation.parent_project_id === project.project_id
+        || relation.child_project_id === project.project_id).length,
+      search: state.researchSearchMatches?.get(project.project_id)?.matches?.[0]?.snippet || "",
     })),
   });
 }
@@ -3228,9 +3491,13 @@ function conversationMenuItem(label, iconName, action, danger = false) {
 }
 
 function renderRecentProjects() {
+  if (!elements.recentProjectList || !elements.recentProjects) return;
   elements.recentProjectList.replaceChildren();
-  elements.recentProjects.hidden = !state.projects.length;
-  state.projects.slice(0, 3).forEach((project) => {
+  const activeProjects = state.projects.filter(
+    (project) => !projectConversation(project)?.archived_at,
+  );
+  elements.recentProjects.hidden = !activeProjects.length;
+  activeProjects.slice(0, 3).forEach((project) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "start-recent-item";
@@ -3263,6 +3530,15 @@ function updateProjectBulkControls(projects = filteredProjects()) {
   elements.selectAllProjects.textContent = allVisibleSelected ? "取消全选" : "全选";
   elements.selectAllProjects.disabled = state.projectBulkDeleting || !projects.length;
   elements.deleteSelectedProjects.disabled = state.projectBulkDeleting || !selectedCount;
+  const selectedProjects = state.projects.filter((project) =>
+    state.selectedProjectIds.has(project.project_id));
+  const canArchive = selectedProjects.some((project) =>
+    !projectConversation(project)?.archived_at
+    && !["queued", "running"].includes(project.active_run?.status));
+  const canRestore = selectedProjects.some((project) =>
+    Boolean(projectConversation(project)?.archived_at));
+  elements.archiveSelectedProjects.disabled = state.projectBulkDeleting || !canArchive;
+  elements.restoreSelectedProjects.disabled = state.projectBulkDeleting || !canRestore;
   elements.deleteSelectedProjects.lastChild.textContent = state.projectBulkDeleting ? "删除中…" : "删除";
   elements.toggleProjectSelection.classList.toggle("is-active", state.projectSelectionMode);
   elements.toggleProjectSelection.setAttribute("aria-pressed", String(state.projectSelectionMode));
@@ -3327,28 +3603,301 @@ async function deleteSelectedProjectRecords() {
   }
 }
 
-function renderProjectList() {
+function escapeHtml(text) {
+  if (!text) return "";
+  const div = document.createElement("div");
+  div.appendChild(document.createTextNode(text));
+  return div.innerHTML;
+}
+
+function buildInheritanceMap() {
+  const projectById = new Map(state.projects.map((p) => [p.project_id, p]));
+  const parentOf = new Map();   // child_project_id → {relation_id, parent_title, note}
+  const childrenOf = new Map(); // parent_project_id → [{relation_id, child_project_id, child_title}]
+  state.researchRelations.forEach((rel) => {
+    const parentProj = projectById.get(rel.parent_project_id);
+    const childProj = projectById.get(rel.child_project_id);
+    const parentTitle = parentProj?.name || parentProj?.topic || rel.parent_project_id;
+    const childTitle = childProj?.name || childProj?.topic || rel.child_project_id;
+    parentOf.set(rel.child_project_id, {
+      relation_id: rel.relation_id,
+      parent_title: rel.parent_title || parentTitle,
+      note: rel.note || "",
+    });
+    if (!childrenOf.has(rel.parent_project_id)) childrenOf.set(rel.parent_project_id, []);
+    childrenOf.get(rel.parent_project_id).push({
+      relation_id: rel.relation_id,
+      child_project_id: rel.child_project_id,
+      child_title: rel.child_title || childTitle,
+    });
+  });
+  return { parentOf, childrenOf };
+}
+
+function renderInheritanceTree() {
+  const tree = elements.inheritanceTree;
+  const heading = elements.inheritanceTreeHeading;
+  tree.replaceChildren();
+
+  if (!state.researchRelations || !state.researchRelations.length) {
+    heading.hidden = true;
+    tree.hidden = true;
+    return;
+  }
+
+  const inheritMap = buildInheritanceMap();
+  const projectById = new Map(state.projects.map((p) => [p.project_id, p]));
+
+  const allChildren = new Set(state.researchRelations.map((r) => r.child_project_id));
+  const allParents = new Set(state.researchRelations.map((r) => r.parent_project_id));
+
+  // Roots: projects that are parents but not children of any project
+  const rootIds = [...allParents].filter((id) => !allChildren.has(id));
+
+  if (!rootIds.length) {
+    heading.hidden = true;
+    tree.hidden = true;
+    return;
+  }
+
+  heading.hidden = false;
+  tree.hidden = false;
+
+  rootIds.sort((a, b) => {
+    const pa = projectById.get(a);
+    const pb = projectById.get(b);
+    const ta = (pa?.name || pa?.topic || a).toLowerCase();
+    const tb = (pb?.name || pb?.topic || b).toLowerCase();
+    return ta.localeCompare(tb, "zh-Hans");
+  });
+
+  const visited = new Set();
+
+  function renderNode(projectId, depth) {
+    if (visited.has(projectId)) return null;
+    visited.add(projectId);
+
+    const project = projectById.get(projectId);
+    const displayTitle = project ? projectDisplayTitle(project) : projectId;
+    const children = inheritMap.childrenOf.get(projectId) || [];
+    const hasChildren = children.length > 0;
+
+    const row = document.createElement("div");
+    row.className = "inheritance-tree-row";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "inheritance-tree-item";
+    button.style.paddingLeft = `${8 + depth * 14}px`;
+    if (projectId === state.projectId) button.classList.add("is-active");
+
+    const chevron = document.createElement("span");
+    chevron.className = "inheritance-tree-chevron";
+    if (hasChildren) chevron.append(iconNode("chevron-down"));
+    button.append(chevron);
+
+    const label = document.createElement("span");
+    label.className = "inheritance-tree-label";
+    label.textContent = displayTitle;
+    button.append(label);
+
+    button.addEventListener("click", () => {
+      if (project) renderResearchPreview(project);
+      const projectEntry = document.querySelector(
+        `.project-list-entry[data-conversation-id="${project?.conversation?.conversation_id || project?.conversation_id || ""}"]`,
+      );
+      projectEntry?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+
+    row.append(button);
+
+    if (hasChildren) {
+      const group = document.createElement("div");
+      group.className = "inheritance-tree-children";
+      let collapsed = false;
+      chevron.addEventListener("click", (e) => {
+        e.stopPropagation();
+        collapsed = !collapsed;
+        group.classList.toggle("is-collapsed", collapsed);
+        chevron.replaceChildren(iconNode(collapsed ? "chevron-right" : "chevron-down"));
+      });
+      children
+        .sort((a, b) => a.child_title.localeCompare(b.child_title, "zh-Hans"))
+        .forEach((child) => {
+          const childRow = renderNode(child.child_project_id, depth + 1);
+          if (childRow) group.append(childRow);
+        });
+      row.append(group);
+    }
+
+    visited.delete(projectId);
+    return row;
+  }
+
+  rootIds.forEach((id) => {
+    const rootRow = renderNode(id, 0);
+    if (rootRow) tree.append(rootRow);
+  });
+}
+
+function renderResearchPreview(project) {
+  const conversation = projectConversation(project);
+  const isRunning = ["queued", "running"].includes(project.active_run?.status);
+  const displayStage = projectListDisplayStage(project);
+  const displayTitle = projectDisplayTitle(project);
+  const inheritMap = buildInheritanceMap();
+  const parentInfo = inheritMap.parentOf.get(project.project_id);
+  const childrenInfo = inheritMap.childrenOf.get(project.project_id) || [];
+  elements.researchPreview.replaceChildren();
+
+  const header = document.createElement("header");
+  header.className = "research-preview-header";
+  const stageBadge = document.createElement("span");
+  stageBadge.className = "preview-stage-badge";
+  stageBadge.textContent = conversation?.archived_at ? "已归档" : displayStage;
+  const title = document.createElement("h3");
+  title.textContent = displayTitle;
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "icon-button bordered";
+  closeBtn.setAttribute("aria-label", "关闭预览");
+  closeBtn.append(iconNode("x"));
+  closeBtn.addEventListener("click", clearResearchPreview);
+  header.append(stageBadge, title, closeBtn);
+
+  const body = document.createElement("div");
+  body.className = "research-preview-body";
+
+  // Topic (when name is set and differs from topic)
+  if (project.name && project.topic && project.name !== project.topic) {
+    const topicDetail = document.createElement("p");
+    topicDetail.className = "research-preview-topic";
+    topicDetail.innerHTML = `<strong>研究主题</strong> ${escapeHtml(project.topic)}`;
+    body.append(topicDetail);
+  }
+
+  // Research question
+  if (project.research_question) {
+    const q = document.createElement("p");
+    q.className = "research-preview-question";
+    q.textContent = project.research_question;
+    body.append(q);
+  }
+
+  // Meta info
+  const meta = document.createElement("div");
+  meta.className = "research-preview-meta";
+  meta.innerHTML = `
+    <span><strong>创建</strong> ${formatDate(project.created_at)}</span>
+    <span><strong>更新</strong> ${formatDate(project.updated_at)}</span>
+  `;
+  if (conversation?.conversation_id) {
+    meta.innerHTML += `<span><strong>对话 ID</strong> ${conversation.conversation_id}</span>`;
+  }
+  body.append(meta);
+
+  // Inheritance info
+  if (parentInfo || childrenInfo.length) {
+    const lineage = document.createElement("div");
+    lineage.className = "research-preview-section";
+    const lineageTitle = document.createElement("h4");
+    lineageTitle.textContent = "继承关系";
+    lineage.append(lineageTitle);
+    if (parentInfo) {
+      const p = document.createElement("p");
+      p.innerHTML = `<span class="lineage-item parent">↳ 继承自 <strong>${escapeHtml(parentInfo.parent_title)}</strong></span>`;
+      if (parentInfo.note) { p.title = parentInfo.note; const s = document.createElement("small"); s.textContent = parentInfo.note; p.append(s); }
+      lineage.append(p);
+    }
+    if (childrenInfo.length) {
+      const p = document.createElement("p");
+      p.innerHTML = `<span class="lineage-item children">→ ${childrenInfo.length} 个子研究</span>`;
+      p.title = childrenInfo.map((c) => c.child_title).join("\n");
+      lineage.append(p);
+    }
+    body.append(lineage);
+  }
+
+  // Actions
+  const actions = document.createElement("div");
+  actions.className = "research-preview-actions";
+  const viewBtn = document.createElement("button");
+  viewBtn.className = "primary";
+  viewBtn.textContent = "查看综述";
+  viewBtn.append(iconNode("arrow-right"));
+  viewBtn.addEventListener("click", () => loadProject(project.project_id));
+  const manageBtn = document.createElement("button");
+  manageBtn.className = "secondary";
+  manageBtn.innerHTML = '<i data-lucide="git-branch"></i> 管理继承';
+  manageBtn.addEventListener("click", () => openResearchRelationDialog(project));
+  const renameBtn = document.createElement("button");
+  renameBtn.className = "secondary";
+  renameBtn.innerHTML = '<i data-lucide="pencil"></i> 修改名称';
+  renameBtn.addEventListener("click", () => renameConversation(project));
+  actions.append(viewBtn, manageBtn, renameBtn);
+
+  const footer = document.createElement("footer");
+  footer.className = "research-preview-footer";
+  footer.append(actions);
+
+  elements.researchPreview.append(header, body, footer);
+  elements.researchPreview.classList.remove("is-empty");
+  refreshIcons();
+}
+
+function clearResearchPreview() {
+  elements.researchPreview.classList.add("is-empty");
+  elements.researchPreview.replaceChildren();
+  const empty = document.createElement("div");
+  empty.className = "research-preview-empty";
+  empty.innerHTML = '<i data-lucide="panel-right-open" aria-hidden="true"></i><p>选择一项研究以预览详情</p>';
+  elements.researchPreview.append(empty);
+  refreshIcons();
+}
+
+function renderProjectsManager() {
   const projects = filteredProjects();
+  const statusLabels = {
+    all: "全部研究",
+    active: "进行中",
+    review: "待审核",
+    completed: "已完成",
+    archived: "已归档",
+  };
+  const query = elements.projectSearch.value.trim();
+  const similaritySource = state.projects.find(
+    (project) => project.project_id === state.similarityFocusProjectId,
+  );
+  if (state.researchSearchPending) {
+    elements.projectsResultSummary.textContent = `正在跨研究检索“${query}”…`;
+  } else if (similaritySource) {
+    elements.projectsResultSummary.textContent = `与“${projectDisplayTitle(similaritySource)}”相似的研究 · 共 ${projects.length} 项`;
+  } else {
+    elements.projectsResultSummary.textContent = query
+      ? `${statusLabels[state.projectStatusFilter]} · 全文检索找到 ${projects.length} 项与“${query}”匹配的研究`
+      : `${statusLabels[state.projectStatusFilter]} · 共 ${projects.length} 项`;
+  }
+  elements.clearSimilarityFocus.hidden = !state.similarityFocusProjectId;
   updateProjectBulkControls(projects);
   const signature = projectListSignature(projects);
   const recentPopover = document.getElementById("recentHistoryPopover");
-  if (signature === state.projectListRenderSignature && elements.projectList.childElementCount) {
+  if (signature === state.projectListRenderSignature && elements.projectsManagerList.childElementCount) {
     if (recentPopover && !recentPopover.hidden) renderRecentHistoryPopover();
     return;
   }
   state.projectListRenderSignature = signature;
-  const previousScrollTop = elements.projectList.scrollTop;
+  const previousScrollTop = elements.projectsManagerList.scrollTop;
   hideProjectPreview();
-  elements.projectList.replaceChildren();
+  elements.projectsManagerList.replaceChildren();
   const finishRender = () => {
-    elements.projectList.scrollTop = previousScrollTop;
+    elements.projectsManagerList.scrollTop = previousScrollTop;
     if (recentPopover && !recentPopover.hidden) renderRecentHistoryPopover();
   };
   if (!state.projects.length) {
     const empty = document.createElement("p");
     empty.className = "muted small sidebar-label";
     empty.textContent = "还没有项目记录";
-    elements.projectList.append(empty);
+    elements.projectsManagerList.append(empty);
     finishRender();
     return;
   }
@@ -3357,7 +3906,7 @@ function renderProjectList() {
     const empty = document.createElement("p");
     empty.className = "muted small sidebar-label";
     empty.textContent = "没有找到匹配的研究";
-    elements.projectList.append(empty);
+    elements.projectsManagerList.append(empty);
     finishRender();
     return;
   }
@@ -3369,6 +3918,7 @@ function renderProjectList() {
     const displayTitle = projectDisplayTitle(project);
     const entry = document.createElement("div");
     entry.className = "project-list-entry";
+    entry.classList.toggle("is-archived", Boolean(conversation?.archived_at));
     entry.dataset.conversationId = conversation?.conversation_id || "";
 
     const button = document.createElement("button");
@@ -3420,16 +3970,62 @@ function renderProjectList() {
       pinned.append(iconNode("pin"));
       titleRow.append(pinned);
     }
+    const inheritMap = buildInheritanceMap();
+    const similarCount = state.researchSimilarities.get(project.project_id)?.length || 0;
+    const parentInfo = inheritMap.parentOf.get(project.project_id);
+    const childrenInfo = inheritMap.childrenOf.get(project.project_id) || [];
+    if (similarCount) {
+      const similarBadge = document.createElement("span");
+      similarBadge.className = "research-insight-badge";
+      similarBadge.textContent = `${similarCount} 项相似`;
+      titleRow.append(similarBadge);
+    }
+    if (parentInfo || childrenInfo.length) {
+      const relationBadge = document.createElement("span");
+      relationBadge.className = "research-insight-badge relation";
+      if (parentInfo && childrenInfo.length) {
+        relationBadge.textContent = `继承自 ${parentInfo.parent_title}，${childrenInfo.length} 个子研究`;
+      } else if (parentInfo) {
+        relationBadge.textContent = `继承自 ${parentInfo.parent_title}`;
+      } else {
+        relationBadge.textContent = `${childrenInfo.length} 个子研究`;
+      }
+      if (parentInfo?.note) relationBadge.title = parentInfo.note;
+      titleRow.append(relationBadge);
+    }
 
     const meta = document.createElement("span");
     meta.className = "project-list-meta";
     const stage = document.createElement("span");
-    stage.textContent = displayStage;
+    stage.textContent = conversation?.archived_at ? "已归档" : displayStage;
     const date = document.createElement("span");
     date.textContent = formatDate(project.updated_at);
     meta.append(stage, date);
 
-    content.append(titleRow, meta);
+    const lineage = document.createElement("span");
+    lineage.className = "project-list-lineage";
+    if (parentInfo) {
+      const parentSpan = document.createElement("span");
+      parentSpan.className = "lineage-item parent";
+      parentSpan.textContent = `↳ ${escapeHtml(parentInfo.parent_title)}`;
+      if (parentInfo.note) parentSpan.title = `继承备注：${parentInfo.note}`;
+      lineage.append(parentSpan);
+    }
+    if (childrenInfo.length) {
+      const childSpan = document.createElement("span");
+      childSpan.className = "lineage-item children";
+      childSpan.textContent = `→ ${childrenInfo.length} 个子研究`;
+      childSpan.title = childrenInfo.map((c) => c.child_title).join("\n");
+      lineage.append(childSpan);
+    }
+
+    const question = document.createElement("span");
+    question.className = "project-manager-question";
+    const searchMatch = state.researchSearchMatches?.get(project.project_id)?.matches?.[0];
+    question.textContent = searchMatch
+      ? `${searchMatch.label} · ${searchMatch.snippet}`
+      : project.research_question || "暂无研究问题";
+    content.append(titleRow, question, lineage, meta);
     button.append(icon, content);
     button.addEventListener("click", () => {
       hideProjectPreview();
@@ -3443,7 +4039,7 @@ function renderProjectList() {
         renderProjectList();
         return;
       }
-      loadProject(project.project_id);
+      renderResearchPreview(project);
     });
     button.addEventListener("mouseenter", () => showProjectPreview(project, button));
     button.addEventListener("mouseleave", hideProjectPreview);
@@ -3468,15 +4064,35 @@ function renderProjectList() {
     );
     menu.hidden = !keepMenuOpen;
     menuToggle.setAttribute("aria-expanded", String(keepMenuOpen));
-    menu.append(
-      conversationMenuItem(
+    const archived = Boolean(conversation?.archived_at);
+    const menuItems = [];
+    if (!archived) {
+      menuItems.push(conversationMenuItem(
         conversation?.pinned ? "取消置顶" : "置顶",
         conversation?.pinned ? "pin-off" : "pin",
         () => toggleConversationPin(project),
-      ),
+      ));
+    }
+    menuItems.push(
       conversationMenuItem("修改名称", "pencil", () => renameConversation(project)),
-      conversationMenuItem("删除", "trash-2", () => deleteConversationFromSidebar(project), true),
+      ...(similarCount ? [conversationMenuItem(
+        `查看相似研究（${similarCount}）`,
+        "scan-search",
+        () => focusSimilarResearch(project),
+      )] : []),
+      conversationMenuItem(
+        "管理继承关系",
+        "git-branch",
+        () => openResearchRelationDialog(project),
+      ),
+      conversationMenuItem(
+        archived ? "恢复到研究列表" : "归档研究",
+        archived ? "archive-restore" : "archive",
+        () => setConversationArchived(project, !archived),
+      ),
+      conversationMenuItem("永久删除", "trash-2", () => deleteConversationFromSidebar(project), true),
     );
+    menu.append(...menuItems);
     menuToggle.addEventListener("click", (event) => {
       event.stopPropagation();
       const open = menu.hidden;
@@ -3487,9 +4103,95 @@ function renderProjectList() {
     });
 
     entry.append(button, menuToggle, menu);
-    elements.projectList.append(entry);
+    elements.projectsManagerList.append(entry);
   });
   finishRender();
+  refreshIcons();
+  renderInheritanceTree();
+}
+
+function renderSidebarProjectGroup(label, projects) {
+  if (!projects.length) return;
+  const heading = document.createElement("p");
+  heading.className = "project-list-section sidebar-label";
+  heading.textContent = label;
+  elements.projectList.append(heading);
+  projects.forEach((project) => {
+    const isRunning = ["queued", "running"].includes(project.active_run?.status);
+    const entry = document.createElement("div");
+    entry.className = "project-list-entry";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "project-list-item";
+    button.classList.toggle("is-active", project.project_id === state.projectId);
+    button.setAttribute("aria-current", project.project_id === state.projectId ? "page" : "false");
+    button.setAttribute("aria-label", `打开研究：${projectDisplayTitle(project)}`);
+
+    const icon = document.createElement("span");
+    icon.className = "project-list-icon";
+    icon.classList.toggle("is-running", isRunning);
+    icon.append(iconNode(isRunning ? "loader-circle" : "folder"));
+
+    const content = document.createElement("span");
+    content.className = "project-list-content";
+    const title = document.createElement("span");
+    title.className = "project-list-title";
+    title.textContent = projectDisplayTitle(project);
+    const meta = document.createElement("span");
+    meta.className = "project-list-meta";
+    meta.append(
+      Object.assign(document.createElement("span"), { textContent: projectListDisplayStage(project) }),
+      Object.assign(document.createElement("span"), { textContent: formatDate(project.updated_at) }),
+    );
+    content.append(title, meta);
+    button.append(icon, content);
+    button.addEventListener("click", () => loadProject(project.project_id));
+    button.addEventListener("mouseenter", () => showProjectPreview(project, button));
+    button.addEventListener("mouseleave", hideProjectPreview);
+    entry.append(button);
+    elements.projectList.append(entry);
+  });
+}
+
+function updateProjectsOverview() {
+  const archived = state.projects.filter((project) => projectConversation(project)?.archived_at);
+  const visible = state.projects.filter((project) => !projectConversation(project)?.archived_at);
+  const isReview = (stage) => ["SEARCH_REVIEW_PENDING", "REVIEW_PENDING"].includes(stage);
+  const review = visible.filter((project) => isReview(project.stage));
+  const running = visible.filter((project) => !isReview(project.stage) && project.stage !== "COMPLETED");
+  const completed = visible.filter((project) => project.stage === "COMPLETED");
+  elements.projectsTotalCount.textContent = String(state.projects.length);
+  elements.projectsActiveCount.textContent = String(running.length);
+  elements.projectsReviewCount.textContent = String(review.length);
+  elements.projectsCompletedCount.textContent = String(completed.length);
+  elements.projectsArchivedCount.textContent = String(archived.length);
+  document.querySelectorAll("[data-project-status]").forEach((button) => {
+    const active = button.dataset.projectStatus === state.projectStatusFilter;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function renderProjectList() {
+  renderProjectsManager();
+  updateProjectsOverview();
+  const activeProjects = state.projects.filter(
+    (project) => !projectConversation(project)?.archived_at,
+  );
+  const pinned = activeProjects.filter((project) => projectConversation(project)?.pinned).slice(0, 5);
+  const pinnedIds = new Set(pinned.map((project) => project.project_id));
+  const recent = activeProjects.filter((project) => !pinnedIds.has(project.project_id)).slice(0, 8);
+  elements.projectList.replaceChildren();
+  if (!activeProjects.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted small sidebar-label";
+    empty.textContent = "还没有进行中的研究";
+    elements.projectList.append(empty);
+  } else {
+    renderSidebarProjectGroup("置顶", pinned);
+    renderSidebarProjectGroup("最近", recent);
+  }
+  renderRecentProjects();
   refreshIcons();
 }
 
@@ -3497,8 +4199,11 @@ async function loadProjects(options = {}) {
   if (state.projectsLoading) return;
   state.projectsLoading = true;
   try {
-    const payload = await api("/api/projects?limit=30");
-    const incoming = payload.data || [];
+    const payload = await api("/api/conversations?limit=200&view=all");
+    const incoming = (payload.data || []).map((row) => {
+      const { project, active_run: activeRun, ...conversation } = row;
+      return { ...project, conversation, active_run: activeRun };
+    });
     state.projects = options?.preserveOrder
       ? preserveExistingProjectOrder(incoming)
       : incoming;
@@ -3544,9 +4249,9 @@ async function deleteCurrentProject() {
   if (!state.projectId || state.busy) return;
   closeMenus();
   const projectId = state.projectId;
-  const topic = state.project?.topic || "未命名研究";
+  const title = projectDisplayTitle(state.project);
   const confirmed = window.confirm(
-    `确定永久删除“${topic}”吗？\n\n项目、研究产物和状态记录都会被删除，此操作无法撤销。`,
+    `确定永久删除”${title}”吗？\n\n项目、研究产物和状态记录都会被删除，此操作无法撤销。`,
   );
   if (!confirmed) return;
 
@@ -3705,8 +4410,18 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
   state.projectId = project.project_id;
   showWorkspace("project");
   elements.projectIdLabel.textContent = project.project_id;
-  elements.projectTopic.textContent = project.topic || "未命名研究";
+  const displayName = project.name || project.topic || "未命名研究";
+  elements.projectTopic.textContent = displayName;
   elements.projectQuestion.textContent = project.research_question || "";
+  // Show topic as subtitle when name differs from topic
+  const existingSub = document.querySelector(".project-topic-subtitle");
+  if (existingSub) existingSub.remove();
+  if (project.name && project.topic && project.name !== project.topic) {
+    const topicSub = document.createElement("p");
+    topicSub.className = "project-topic-subtitle";
+    topicSub.textContent = `研究主题：${project.topic}`;
+    elements.projectTopic.after(topicSub);
+  }
   const needsReviewRevision =
     project.stage === "REVIEWED"
     && project.current_review?.verdict === "REVISE";
@@ -5850,6 +6565,300 @@ async function setCurrentReviewPageSelection(selected) {
   }
 }
 
+async function updateSelectedProjectsArchive(archived) {
+  if (state.projectBulkDeleting || !state.selectedProjectIds.size) return;
+  const selected = state.projects.filter((project) => {
+    if (!state.selectedProjectIds.has(project.project_id)) return false;
+    const currentlyArchived = Boolean(projectConversation(project)?.archived_at);
+    if (currentlyArchived === archived) return false;
+    return !archived || !["queued", "running"].includes(project.active_run?.status);
+  });
+  if (!selected.length) {
+    notify(archived ? "所选研究暂时无法归档" : "所选研究中没有归档项", true);
+    return;
+  }
+  state.projectBulkDeleting = true;
+  updateProjectBulkControls();
+  let succeeded = 0;
+  for (const project of selected) {
+    const conversation = projectConversation(project);
+    try {
+      await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ archived }),
+      });
+      succeeded += 1;
+    } catch {
+      // Keep processing the remaining selected research records.
+    }
+  }
+  state.projectBulkDeleting = false;
+  state.selectedProjectIds.clear();
+  state.projectSelectionMode = false;
+  await loadProjects();
+  notify(`${archived ? "已归档" : "已恢复"} ${succeeded} 项研究`, succeeded === 0);
+}
+
+async function setConversationArchived(project, archived) {
+  const conversation = projectConversation(project);
+  if (!conversation?.conversation_id) {
+    notify("该研究缺少可归档的对话记录", true);
+    return false;
+  }
+  if (archived && ["queued", "running"].includes(project.active_run?.status)) {
+    notify("研究正在执行，完成或停止后才能归档", true);
+    return false;
+  }
+  try {
+    await api(`/api/conversations/${encodeURIComponent(conversation.conversation_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ archived }),
+    });
+    await loadProjects();
+    notify(archived ? "研究已归档" : "研究已恢复");
+    return true;
+  } catch (error) {
+    notify(`${archived ? "归档" : "恢复"}失败：${error.message}`, true);
+    return false;
+  }
+}
+
+async function loadResearchLibraryInsights() {
+  const [similarityResult, relationResult] = await Promise.allSettled([
+    api("/api/research-library/similarities?limit=3&threshold=0.24"),
+    api("/api/research-relations"),
+  ]);
+  if (similarityResult.status === "fulfilled") {
+    state.researchSimilarities = new Map(
+      (similarityResult.value.data || []).map((item) => [item.project_id, item.matches || []]),
+    );
+  }
+  if (relationResult.status === "fulfilled") {
+    state.researchRelations = relationResult.value.data || [];
+  }
+  state.projectListRenderSignature = "";
+  renderProjectList();
+}
+
+async function searchResearchLibrary() {
+  const query = elements.projectSearch.value.trim();
+  const sequence = ++state.researchSearchSequence;
+  state.similarityFocusProjectId = null;
+  if (!query) {
+    state.researchSearchMatches = null;
+    state.researchSearchPending = false;
+    renderProjectList();
+    return;
+  }
+  state.researchSearchPending = true;
+  state.researchSearchMatches = new Map();
+  renderProjectList();
+  try {
+    const payload = await api(
+      `/api/research-library/search?q=${encodeURIComponent(query)}&limit=100`,
+    );
+    if (sequence !== state.researchSearchSequence) return;
+    state.researchSearchMatches = new Map(
+      (payload.data || []).map((item) => [item.project_id, item]),
+    );
+  } catch (error) {
+    if (sequence !== state.researchSearchSequence) return;
+    state.researchSearchMatches = null;
+    notify(`跨研究检索失败：${error.message}`, true);
+  } finally {
+    if (sequence === state.researchSearchSequence) {
+      state.researchSearchPending = false;
+      state.projectListRenderSignature = "";
+      renderProjectList();
+    }
+  }
+}
+
+function focusSimilarResearch(project) {
+  const matches = state.researchSimilarities.get(project.project_id) || [];
+  if (!matches.length) {
+    notify("暂未识别到相似研究");
+    return;
+  }
+  state.similarityFocusProjectId = project.project_id;
+  state.projectStatusFilter = "all";
+  elements.projectSearch.value = "";
+  state.researchSearchMatches = null;
+  state.projectListRenderSignature = "";
+  renderProjectList();
+}
+
+function clearSimilarityFocus() {
+  state.similarityFocusProjectId = null;
+  state.projectListRenderSignature = "";
+  renderProjectList();
+}
+
+function renderExistingResearchRelations(projectId) {
+  elements.existingResearchRelations.replaceChildren();
+  const relations = state.researchRelations.filter((relation) =>
+    relation.parent_project_id === projectId || relation.child_project_id === projectId);
+  if (!relations.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted small";
+    empty.textContent = "尚未建立研究继承关系";
+    elements.existingResearchRelations.append(empty);
+    return;
+  }
+  relations.forEach((relation) => {
+    const row = document.createElement("div");
+    row.className = "research-relation-item";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    const isChild = relation.child_project_id === projectId;
+    title.textContent = isChild
+      ? `继承自：${relation.parent_title}`
+      : `子研究：${relation.child_title}`;
+    if (relation.note) {
+      const note = document.createElement("small");
+      note.textContent = relation.note;
+      copy.append(title, note);
+    } else {
+      copy.append(title);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button";
+    remove.setAttribute("aria-label", "删除此研究关系");
+    remove.append(iconNode("unlink"));
+    remove.addEventListener("click", async () => {
+      try {
+        await api(`/api/research-relations/${encodeURIComponent(relation.relation_id)}`, {
+          method: "DELETE",
+        });
+        state.researchRelations = state.researchRelations.filter(
+          (item) => item.relation_id !== relation.relation_id,
+        );
+        renderExistingResearchRelations(projectId);
+        state.projectListRenderSignature = "";
+        renderProjectList();
+        notify("研究关系已删除");
+      } catch (error) {
+        notify(`删除关系失败：${error.message}`, true);
+      }
+    });
+    row.append(copy, remove);
+    elements.existingResearchRelations.append(row);
+  });
+  refreshIcons();
+}
+
+async function openResearchRelationDialog(project) {
+  state.relationChildProjectId = project.project_id;
+  elements.researchRelationChildLabel.textContent = `当前研究：${projectDisplayTitle(project)}`;
+  elements.researchRelationParent.replaceChildren();
+  state.projects
+    .filter((item) => item.project_id !== project.project_id)
+    .forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.project_id;
+      option.textContent = projectDisplayTitle(item);
+      elements.researchRelationParent.append(option);
+    });
+  elements.researchRelationNote.value = "";
+  // Ensure relations are fresh before rendering, to avoid showing stale
+  // empty state when the backend already auto-created a relation via
+  // create_conversation with parent_project_id.
+  try {
+    const result = await api("/api/research-relations");
+    state.researchRelations = result.data || [];
+  } catch {
+    // If the request fails, keep whatever is in state.
+  }
+  renderExistingResearchRelations(project.project_id);
+  elements.researchRelationDialog.showModal();
+  refreshIcons();
+}
+
+async function saveResearchRelation(event) {
+  event.preventDefault();
+  const childProjectId = state.relationChildProjectId;
+  const parentProjectId = elements.researchRelationParent.value;
+  if (!childProjectId || !parentProjectId) return;
+  // Always fetch latest relations before saving to avoid stale-state duplicates.
+  let latest = [];
+  try {
+    const result = await api("/api/research-relations");
+    latest = result.data || [];
+  } catch {
+    // Proceed with local state if fetch fails; the backend UNIQUE check
+    // is the final safety net.
+  }
+  const already = latest.some(
+    (r) => r.parent_project_id === parentProjectId && r.child_project_id === childProjectId,
+  );
+  if (already) {
+    state.researchRelations = latest;
+    renderExistingResearchRelations(childProjectId);
+    notify("该继承关系已建立，无需重复创建", true);
+    return;
+  }
+  try {
+    const payload = await api("/api/research-relations", {
+      method: "POST",
+      body: JSON.stringify({
+        parent_project_id: parentProjectId,
+        child_project_id: childProjectId,
+        note: elements.researchRelationNote.value.trim(),
+      }),
+    });
+    state.researchRelations = latest;
+    state.researchRelations.unshift(payload.data);
+    elements.researchRelationDialog.close();
+    state.projectListRenderSignature = "";
+    renderProjectList();
+    notify("研究继承关系已保存");
+  } catch (error) {
+    const messages = {
+      research_relation_exists: "该研究关系已经存在",
+      research_relation_cycle: "保存后会形成循环继承，请选择其他前序研究",
+    };
+    notify(messages[error.message] || `保存关系失败：${error.message}`, true);
+  }
+}
+
+async function setAllReviewSelection(selected) {
+  const candidateTotal = Number(state.review?.selection?.total_count || 0);
+  if ((!candidateTotal && !state.manualCandidates.size) || state.busy) return;
+  setBusy(true);
+  try {
+    const payload = await api(
+      `/api/projects/${encodeURIComponent(state.projectId)}/search-review/selection`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ selected, all_candidates: true }),
+      },
+    );
+    if (state.review?.selection) {
+      state.review.selection.selected_count = payload.data.selected_count;
+      state.review.selection.total_count = payload.data.total_count;
+    }
+    state.candidates.forEach((candidate) => {
+      candidate.selected = selected;
+      const id = candidateId(candidate);
+      if (selected) state.selectedIds.add(id);
+      else state.selectedIds.delete(id);
+    });
+    state.manualCandidates.forEach((_candidate, id) => {
+      if (selected) state.selectedIds.add(id);
+      else state.selectedIds.delete(id);
+    });
+    state.reviewSelectionDirty = true;
+    renderCandidateCards();
+    updateReviewStats();
+    notify(selected ? "已选择全部候选论文" : "已取消全部候选论文");
+  } catch (error) {
+    notify(`批量更新选择失败：${error.message}`, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function loadReviewPage({ page = state.reviewPage, filteredPage = state.reviewFilteredPage } = {}) {
   if (!state.projectId) return;
   const params = new URLSearchParams({
@@ -5864,15 +6873,21 @@ async function loadReviewPage({ page = state.reviewPage, filteredPage = state.re
   renderReview(payload.data, { preserveManual: true });
 }
 
+function stripQueryRoundPrefix(query) {
+  return String(query || "")
+    .replace(/^\s*第\s*(?:\d+|[零〇一二三四五六七八九十百]+)\s*轮\s*[：:]\s*/, "")
+    .trim();
+}
+
 function normalizeQueryRounds(snapshot) {
   const rounds = Array.isArray(snapshot?.query_rounds) ? snapshot.query_rounds : [];
   const normalized = rounds
     .map((round) => (Array.isArray(round) ? round : []))
-    .map((round) => round.map((query) => String(query || "").trim()).filter(Boolean))
+    .map((round) => round.map(stripQueryRoundPrefix).filter(Boolean))
     .filter((round) => round.length);
   if (normalized.length) return normalized;
   const executed = Array.isArray(snapshot?.executed_queries) ? snapshot.executed_queries : [];
-  const fallback = executed.map((query) => String(query || "").trim()).filter(Boolean);
+  const fallback = executed.map(stripQueryRoundPrefix).filter(Boolean);
   return fallback.length ? [fallback] : [];
 }
 
@@ -6658,7 +7673,7 @@ async function startResearchLegacy(topic, question, reviewLimits = {}) {
   }
 }
 
-async function startResearch(topic, question, reviewLimits = {}) {
+async function startResearch(name, topic, question, reviewLimits = {}) {
   stopRunTimers();
   state.runSessionId += 1;
   state.projectId = null;
@@ -6674,6 +7689,7 @@ async function startResearch(topic, question, reviewLimits = {}) {
   elements.projectDetails.hidden = true;
   const pendingProject = {
     project_id: "正在创建对话…",
+    name: name || "",
     topic,
     research_question: question,
     stage: "CREATED",
@@ -6691,6 +7707,7 @@ async function startResearch(topic, question, reviewLimits = {}) {
     const payload = await api("/api/conversations", {
       method: "POST",
       body: JSON.stringify({
+        name: name || undefined,
         topic,
         research_question: question,
         ...reviewLimits,
@@ -6771,15 +7788,60 @@ function toggleNewProject(show) {
   if (show) {
     closeMenus();
     showWorkspace("create");
-    window.setTimeout(() => byId("topicInput").focus(), 0);
+    populateInheritProjectSelect();
+    elements.nameInput.value = "";
+    elements.inheritanceNote.value = "";
+    elements.inheritanceNoteField.hidden = true;
+    window.setTimeout(() => elements.nameInput.focus(), 0);
     return;
   }
   showWorkspace(state.project ? "project" : "empty");
 }
 
+function populateInheritProjectSelect() {
+  const select = elements.inheritProjectSelect;
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">不继承，独立研究</option>';
+  // Exclude the currently viewed project from the parent options.
+  const others = (state.projects || []).filter(
+    (p) => p.project_id !== state.projectId,
+  );
+  others.forEach((p) => {
+    const option = document.createElement("option");
+    option.value = p.project_id;
+    option.textContent = projectDisplayTitle(p);
+    if (p.stage === "COMPLETED") option.textContent += " ✓";
+    select.appendChild(option);
+  });
+  if (others.some((p) => p.project_id === currentValue)) {
+    select.value = currentValue;
+  }
+}
+
+elements.inheritProjectSelect.addEventListener("change", () => {
+  const hasParent = !!elements.inheritProjectSelect.value;
+  elements.inheritanceNoteField.hidden = !hasParent;
+  if (!hasParent) elements.inheritanceNote.value = "";
+});
+
+async function openProjectsManager() {
+  closeMenus();
+  showWorkspace("projects");
+  clearResearchPreview();
+  window.history.replaceState({}, "", `${window.location.pathname}?view=projects`);
+  renderProjectList();
+  await loadResearchLibraryInsights();
+  window.setTimeout(() => elements.projectSearch.focus(), 0);
+}
+
+async function openResearchLibrary() {
+  return openProjectsManager();
+}
+
 elements.newProjectToggle.addEventListener("click", () => {
   toggleNewProject(true);
 });
+elements.projectsNewResearch.addEventListener("click", () => toggleNewProject(true));
 elements.libraryToggle.addEventListener("click", openLibrary);
 elements.refreshLibrary.addEventListener("click", loadLibrary);
 elements.askLibrary.addEventListener("click", openLibraryAssistant);
@@ -6862,49 +7924,7 @@ elements.paperNoteForm.addEventListener("submit", async (event) => {
 elements.askSelection.addEventListener("click", () => {
   if (!state.paperSelection) return;
   setPaperTab("ask");
-  elements.paperAskContext.querySelector("strong").textContent = `第 ${state.paperSelection.page} 页选中文本`;
-  elements.paperAskContext.querySelector("p").textContent = state.paperSelection.text;
-  elements.clearPaperSelection.hidden = false;
-  elements.paperQuestionInput.focus();
-});
-elements.clearPaperSelection.addEventListener("click", clearPaperSelection);
-elements.paperQuestionForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const question = elements.paperQuestionInput.value.trim();
-  const workspace = state.paperWorkspace;
-  if (!question || !workspace) return;
-  const selection = state.paperSelection;
-  const submit = elements.paperQuestionForm.querySelector('button[type="submit"]');
-  submit.disabled = true;
-  elements.paperAnswer.hidden = false;
-  elements.paperAnswer.textContent = "正在检索论文证据并组织回答…";
-  try {
-    const payload = await api(
-      `/api/library/papers/${encodeURIComponent(workspace.paper.library_id)}/workspace/question`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          scope: selection ? "selection" : "paper",
-          attachment_id: workspace.workspace_attachment?.attachment_id || null,
-          question,
-          page: selection?.page || null,
-          selected_text: selection?.text || "",
-          prefix: selection?.prefix || "",
-          suffix: selection?.suffix || "",
-        }),
-      },
-    );
-    state.paperLastAnswer = {
-      ...payload.data,
-      selection_rects: selection?.rects || [],
-    };
-    renderPaperAnswer(state.paperLastAnswer);
-  } catch (error) {
-    elements.paperAnswer.textContent = `提问失败：${error.message}`;
-    notify(`论文提问失败：${error.message}`, true);
-  } finally {
-    submit.disabled = false;
-  }
+  renderPaperChat();
 });
 elements.generateReadingCard.addEventListener("click", async () => {
   const workspace = state.paperWorkspace;
@@ -6947,24 +7967,52 @@ elements.librarySearch.addEventListener("input", () => {
   librarySearchTimer = window.setTimeout(loadLibrary, 220);
 });
 elements.emptyNewProject.addEventListener("click", () => toggleNewProject(true));
-elements.emptyReadPaper.addEventListener("click", async () => {
-  await openLibrary();
-  notify("请选择一篇论文，点击“打开论文研读工作台”开始精读");
-});
+elements.emptyResearchLibrary.addEventListener("click", openResearchLibrary);
 elements.emptyOpenLibrary.addEventListener("click", openLibrary);
-elements.projectSearch.addEventListener("input", renderProjectList);
+let researchLibrarySearchTimer = null;
+elements.projectSearch.addEventListener("input", () => {
+  window.clearTimeout(researchLibrarySearchTimer);
+  state.researchSearchMatches = null;
+  state.similarityFocusProjectId = null;
+  renderProjectList();
+  researchLibrarySearchTimer = window.setTimeout(searchResearchLibrary, 240);
+});
+elements.projectSort.addEventListener("change", () => {
+  state.projectSort = elements.projectSort.value;
+  renderProjectList();
+});
+document.querySelectorAll("[data-project-status]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.projectStatusFilter = button.dataset.projectStatus;
+    state.selectedProjectIds.clear();
+    renderProjectList();
+  });
+});
+elements.clearSimilarityFocus.addEventListener("click", clearSimilarityFocus);
+elements.researchRelationForm.addEventListener("submit", saveResearchRelation);
+elements.closeResearchRelationDialog.addEventListener("click", () => {
+  elements.researchRelationDialog.close();
+});
+elements.cancelResearchRelation.addEventListener("click", () => {
+  elements.researchRelationDialog.close();
+});
 elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false));
 elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
 elements.newProjectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const name = elements.nameInput.value.trim();
   const topic = byId("topicInput").value.trim();
   const question = byId("questionInput").value.trim();
   if (!topic || !question) return;
+  const parentProjectId = elements.inheritProjectSelect.value || null;
+  const inheritanceNote = parentProjectId ? elements.inheritanceNote.value.trim() : "";
   const reviewLimits = {
     max_search_rounds: numberInputValue(elements.initialMaxSearchRounds, 3),
     year_from: numberInputValue(elements.initialYearFrom, 2024),
     year_to: numberInputValue(elements.initialYearTo, 2026),
     prefer_library_search: elements.initialPreferLibrarySearch.checked,
+    parent_project_id: parentProjectId,
+    inheritance_note: inheritanceNote,
   };
   if (reviewLimits.max_search_rounds < 1 || reviewLimits.max_search_rounds > 10) {
     notify("自动检索轮次需在 1-10 之间", true);
@@ -6979,7 +8027,7 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
     return;
   }
   toggleNewProject(false);
-  await startResearch(topic, question, reviewLimits);
+  await startResearch(name, topic, question, reviewLimits);
 });
 elements.refreshProjects.addEventListener("click", loadProjects);
 elements.toggleProjectSelection.addEventListener("click", () => {
@@ -6988,6 +8036,8 @@ elements.toggleProjectSelection.addEventListener("click", () => {
 elements.selectAllProjects.addEventListener("click", toggleVisibleProjectSelection);
 elements.cancelProjectSelection.addEventListener("click", () => setProjectSelectionMode(false));
 elements.deleteSelectedProjects.addEventListener("click", deleteSelectedProjectRecords);
+elements.archiveSelectedProjects.addEventListener("click", () => updateSelectedProjectsArchive(true));
+elements.restoreSelectedProjects.addEventListener("click", () => updateSelectedProjectsArchive(false));
 elements.projectLookupForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const projectId = elements.projectIdInput.value.trim();
@@ -7019,6 +8069,8 @@ elements.candidateFilter.addEventListener("input", () => {
 });
 elements.selectAll.addEventListener("click", () => setCurrentReviewPageSelection(true));
 elements.clearAll.addEventListener("click", () => setCurrentReviewPageSelection(false));
+elements.selectAllCandidates.addEventListener("click", () => setAllReviewSelection(true));
+elements.clearAllCandidates.addEventListener("click", () => setAllReviewSelection(false));
 elements.candidatePrevPage.addEventListener("click", async () => {
   try {
     await loadReviewPage({ page: Math.max(1, state.reviewPage - 1) });
@@ -7058,7 +8110,6 @@ elements.filteredCandidateNextPage.addEventListener("click", async () => {
 elements.refineReview.addEventListener("click", () => submitFeedback("refine"));
 elements.undoReview.addEventListener("click", undoSearchFeedback);
 elements.acceptReview.addEventListener("click", () => submitFeedback("accept"));
-elements.stopReview.addEventListener("click", () => submitFeedback("stop"));
 elements.continueResearch.addEventListener("click", continueResearch);
 
 elements.sidebarToggle.addEventListener("click", () => {
@@ -7073,6 +8124,7 @@ elements.recentHistoryToggle.addEventListener("click", (event) => {
   closeMenus();
   if (shouldOpen) openRecentHistoryPopover();
 });
+elements.researchLibraryToggle.addEventListener("click", openProjectsManager);
 elements.brandHome.addEventListener("click", clearProjectView);
 elements.homeToggle.addEventListener("click", clearProjectView);
 elements.toolsMenuToggle.addEventListener("click", () => {
@@ -7187,6 +8239,10 @@ async function initialize() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("view") === "library") {
     await openLibrary();
+    return;
+  }
+  if (params.get("view") === "projects") {
+    await openProjectsManager();
     return;
   }
   const requestedProject = params.get("project");

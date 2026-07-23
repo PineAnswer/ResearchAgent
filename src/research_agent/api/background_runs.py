@@ -92,6 +92,7 @@ class ConversationRunManager:
         year_from: int = 2024,
         year_to: int = 2026,
         prefer_library_search: bool = False,
+        parent_project_id: str | None = None,
     ) -> ConversationRun:
         return await self._start(
             conversation_id,
@@ -104,6 +105,7 @@ class ConversationRunManager:
                 "year_from": year_from,
                 "year_to": year_to,
                 "prefer_library_search": prefer_library_search,
+                "parent_project_id": parent_project_id,
             },
         )
 

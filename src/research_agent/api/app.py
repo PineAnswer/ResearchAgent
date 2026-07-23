@@ -33,8 +33,10 @@ from research_agent.api.schemas import (
     PaperAnnotationRequest,
     PaperReadingProgressRequest,
     PaperQuestionRequest,
+    PaperQuestionStreamRequest,
     ProjectAssistantRequest,
     ResearchNoteRequest,
+    ResearchRelationRequest,
     LibraryPaperRequest,
     LibraryPaperUpdateRequest,
     LibrarySelectionRequest,
@@ -209,6 +211,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conversation, project = supervisor.service.create_conversation(
             request.topic,
             request.research_question,
+            parent_project_id=request.parent_project_id,
+            inheritance_note=request.inheritance_note,
+            name=request.name,
         )
         try:
             run = await run_manager.start_initial(
@@ -220,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 year_from=request.year_from,
                 year_to=request.year_to,
                 prefer_library_search=request.prefer_library_search,
+                parent_project_id=request.parent_project_id,
             )
         except ActiveConversationRunError as exc:
             raise HTTPException(status_code=409, detail="conversation_already_running") from exc
@@ -235,8 +241,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/conversations", response_model=ApiEnvelope)
     async def list_conversations(
         limit: int = Query(default=50, ge=1, le=200),
+        view: Literal["active", "archived", "all"] = Query(default="active"),
     ) -> ApiEnvelope:
-        rows = supervisor.service.list_conversations(limit)
+        archived = {"active": False, "archived": True, "all": None}[view]
+        rows = supervisor.service.list_conversations(limit, archived=archived)
         data = []
         for conversation in rows:
             active_run = supervisor.repository.get_active_conversation_run(
@@ -271,11 +279,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: ConversationUpdateRequest,
     ) -> ApiEnvelope:
         try:
+            if request.archived:
+                active_run = supervisor.repository.get_active_conversation_run(
+                    conversation_id
+                )
+                if active_run is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="conversation_is_running",
+                    )
             conversation = await asyncio.to_thread(
                 supervisor.service.update_conversation,
                 conversation_id,
                 title=request.title,
                 pinned=request.pinned,
+                archived=request.archived,
             )
         except ConversationNotFound as exc:
             raise HTTPException(status_code=404, detail="conversation_not_found") from exc
@@ -305,6 +323,102 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "conversation_id": conversation_id,
                 "project_id": conversation.project_id,
             },
+        )
+
+    @app.get("/api/research-library/search", response_model=ApiEnvelope)
+    async def search_research_library(
+        q: str = Query(min_length=1, max_length=500),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> ApiEnvelope:
+        results = await asyncio.to_thread(
+            supervisor.repository.search_research_library,
+            q,
+            limit,
+        )
+        return ApiEnvelope(data=results)
+
+    @app.get("/api/research-library/similarities", response_model=ApiEnvelope)
+    async def list_research_similarities(
+        project_id: str | None = None,
+        limit: int = Query(default=3, ge=1, le=10),
+        threshold: float = Query(default=0.24, ge=0.0, le=1.0),
+    ) -> ApiEnvelope:
+        try:
+            results = await asyncio.to_thread(
+                supervisor.repository.find_similar_research,
+                project_id,
+                limit,
+                threshold,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        return ApiEnvelope(data=results)
+
+    @app.get("/api/research-relations", response_model=ApiEnvelope)
+    async def list_research_relations(project_id: str | None = None) -> ApiEnvelope:
+        try:
+            relations = await asyncio.to_thread(
+                supervisor.repository.list_research_relations,
+                project_id,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        enriched: list[dict[str, Any]] = []
+        for rel in relations:
+            item = rel.model_dump(mode="json") if hasattr(rel, "model_dump") else dict(rel)
+            try:
+                parent = supervisor.service.get_project(rel.parent_project_id)
+                item["parent_title"] = parent.topic
+            except Exception:
+                item["parent_title"] = rel.parent_project_id
+            try:
+                child = supervisor.service.get_project(rel.child_project_id)
+                item["child_title"] = child.topic
+            except Exception:
+                item["child_title"] = rel.child_project_id
+            enriched.append(item)
+        return ApiEnvelope(data=enriched)
+
+    @app.post("/api/research-relations", response_model=ApiEnvelope)
+    async def create_research_relation(
+        request: ResearchRelationRequest,
+    ) -> ApiEnvelope:
+        try:
+            relation = await asyncio.to_thread(
+                supervisor.repository.create_research_relation,
+                request.parent_project_id,
+                request.child_project_id,
+                request.note,
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=404, detail="project_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        item = relation.model_dump(mode="json") if hasattr(relation, "model_dump") else dict(relation)
+        try:
+            parent = supervisor.service.get_project(request.parent_project_id)
+            item["parent_title"] = parent.topic
+        except Exception:
+            item["parent_title"] = request.parent_project_id
+        try:
+            child = supervisor.service.get_project(request.child_project_id)
+            item["child_title"] = child.topic
+        except Exception:
+            item["child_title"] = request.child_project_id
+        return ApiEnvelope(message="research_relation_created", data=item)
+
+    @app.delete("/api/research-relations/{relation_id}", response_model=ApiEnvelope)
+    async def delete_research_relation(relation_id: str) -> ApiEnvelope:
+        try:
+            await asyncio.to_thread(
+                supervisor.repository.delete_research_relation,
+                relation_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="research_relation_not_found") from exc
+        return ApiEnvelope(
+            message="research_relation_deleted",
+            data={"relation_id": relation_id},
         )
 
     @app.post(
@@ -579,6 +693,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (ValueError, KeyError, LibraryPaperNotFound) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ApiEnvelope(data=data)
+
+    @app.post(
+        "/api/library/papers/{library_id}/workspace/question/stream",
+    )
+    async def stream_paper_question(
+        library_id: str,
+        request: PaperQuestionStreamRequest,
+    ) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            try:
+                async for delta in supervisor.stream_paper_chat(
+                    library_id,
+                    request.question,
+                    attachment_id=request.attachment_id,
+                    page=request.page,
+                    selected_text=request.selected_text,
+                    prefix=request.prefix,
+                    suffix=request.suffix,
+                    history=request.history,
+                ):
+                    payload = json.dumps({"text": delta}, ensure_ascii=False)
+                    yield f"event: delta\ndata: {payload}\n\n"
+                yield "event: done\ndata: {}\n\n"
+            except (ValueError, KeyError, LibraryPaperNotFound) as exc:
+                payload = json.dumps({"message": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {payload}\n\n"
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post(
         "/api/library/papers/{library_id}/workspace/reading-card",
@@ -1272,13 +1417,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project_id: str,
         request: SearchReviewSelectionRequest,
     ) -> ApiEnvelope:
+        if not request.all_candidates and not request.paper_ids:
+            raise HTTPException(status_code=422, detail="paper_ids_required")
         try:
-            result = await asyncio.to_thread(
-                supervisor.search_review.update_selection,
-                project_id,
-                request.paper_ids,
-                selected=request.selected,
-            )
+            if request.all_candidates:
+                result = await asyncio.to_thread(
+                    supervisor.search_review.update_all_selections,
+                    project_id,
+                    selected=request.selected,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    supervisor.search_review.update_selection,
+                    project_id,
+                    request.paper_ids,
+                    selected=request.selected,
+                )
         except ProjectNotFound as exc:
             raise HTTPException(status_code=404, detail="project_not_found") from exc
         except WorkflowPrerequisiteError as exc:

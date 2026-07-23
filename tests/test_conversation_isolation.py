@@ -71,6 +71,23 @@ def test_conversations_can_be_renamed_pinned_and_ordered(tmp_path) -> None:
     assert unpinned.pinned is False
     assert unpinned.pinned_at is None
 
+    repository.update_conversation(first.conversation_id, pinned=True)
+    archived = repository.update_conversation(first.conversation_id, archived=True)
+    assert archived.archived_at is not None
+    assert archived.pinned is False
+    assert [item.conversation_id for item in repository.list_conversations()] == [
+        second.conversation_id
+    ]
+    assert repository.list_conversations(archived=True)[0].conversation_id == first.conversation_id
+    assert len(repository.list_conversations(archived=None)) == 2
+
+    restored = repository.update_conversation(first.conversation_id, archived=False)
+    assert restored.archived_at is None
+    assert {item.conversation_id for item in repository.list_conversations()} == {
+        first.conversation_id,
+        second.conversation_id,
+    }
+
 
 def test_local_shared_mode_rebinds_existing_browser_sessions_to_primary_user(
     tmp_path,
@@ -183,6 +200,49 @@ def test_conversation_api_renames_pins_and_deletes_sidebar_entry(
     assert listing.json()["data"][0]["conversation"]["pinned"] is True
     assert deleted.status_code == 200
     assert missing.status_code == 404
+
+
+def test_conversation_api_archives_and_restores_research(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    filesystem_root = tmp_path / "filesystem"
+    filesystem_root.mkdir()
+    app = create_app(
+        Settings(
+            model="openai:gpt-4.1-mini",
+            data_dir=tmp_path,
+            database_path=tmp_path / "agent.db",
+            filesystem_root=filesystem_root,
+            enable_fallback=True,
+        )
+    )
+    conversation, _ = app.state.supervisor.service.create_conversation(
+        "Archive topic",
+        "Archive question",
+    )
+
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            archived = await client.patch(
+                f"/api/conversations/{conversation.conversation_id}",
+                json={"archived": True},
+            )
+            active_list = await client.get("/api/conversations?view=active")
+            archive_list = await client.get("/api/conversations?view=archived")
+            active_projects = await client.get("/api/projects")
+            restored = await client.patch(
+                f"/api/conversations/{conversation.conversation_id}",
+                json={"archived": False},
+            )
+            return archived, active_list, archive_list, active_projects, restored
+
+    archived, active_list, archive_list, active_projects, restored = asyncio.run(exercise_api())
+    assert archived.status_code == 200
+    assert archived.json()["data"]["archived_at"] is not None
+    assert active_list.json()["data"] == []
+    assert archive_list.json()["data"][0]["conversation_id"] == conversation.conversation_id
+    assert active_projects.json()["data"] == []
+    assert restored.json()["data"]["archived_at"] is None
 
 
 def test_api_runs_two_conversations_concurrently_and_blocks_cross_user_access(

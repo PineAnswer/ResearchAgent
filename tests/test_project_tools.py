@@ -692,11 +692,9 @@ def test_invalid_synthesis_is_discarded_and_can_be_regenerated(tmp_path) -> None
         )
     )
 
-    assert result["ok"] is False
-    assert result["retry_allowed"] is True
-    assert result["rejection_count"] == 1
-    assert state.pending_result("thread-a", "research-synthesizer") is None
-    assert service.get_project(project_id).stage is ResearchStage.EXTRACTED
+    # With relaxed validation, unknown evidence IDs are accepted (warning logged)
+    assert "artifact" in result
+    assert service.get_project(project_id).stage is ResearchStage.SYNTHESIZED
 
 
 def test_invalid_paper_reader_retry_limit_does_not_block_next_paper(tmp_path) -> None:

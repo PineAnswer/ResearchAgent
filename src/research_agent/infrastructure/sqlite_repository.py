@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import uuid
@@ -9,6 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
+from difflib import SequenceMatcher
 from typing import Any, Iterator
 
 from research_agent.domain.models import (
@@ -28,6 +30,7 @@ from research_agent.domain.models import (
     ResearchConversation,
     ResearchNote,
     ResearchProject,
+    ResearchRelation,
     ResearchStage,
     ReviewResult,
     StateEvent,
@@ -173,6 +176,21 @@ class SqliteResearchRepository:
                     FOREIGN KEY(project_id) REFERENCES projects(project_id),
                     FOREIGN KEY(library_id) REFERENCES library_papers(library_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS research_relations (
+                    relation_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    parent_project_id TEXT NOT NULL,
+                    child_project_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL DEFAULT 'inherits',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, parent_project_id, child_project_id),
+                    FOREIGN KEY(parent_project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                    FOREIGN KEY(child_project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_relations_user_child
+                ON research_relations(user_id, child_project_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS library_collections (
                     collection_id TEXT PRIMARY KEY,
@@ -350,6 +368,24 @@ class SqliteResearchRepository:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS research_relations (
+                    relation_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    parent_project_id TEXT NOT NULL,
+                    child_project_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, parent_project_id, child_project_id, relation_type),
+                    FOREIGN KEY(parent_project_id) REFERENCES projects(project_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(child_project_id) REFERENCES projects(project_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_research_relations_user_child
+                ON research_relations(user_id, child_project_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS search_review_selections (
                     project_id TEXT NOT NULL,
                     paper_id TEXT NOT NULL,
@@ -425,6 +461,12 @@ class SqliteResearchRepository:
                 connection,
                 "conversations",
                 "pinned_at",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "conversations",
+                "archived_at",
                 "TEXT",
             )
             self._ensure_column(
@@ -754,6 +796,8 @@ class SqliteResearchRepository:
         self,
         topic: str,
         research_question: str,
+        *,
+        name: str = "",
     ) -> tuple[ResearchConversation, ResearchProject]:
         user_id = self.current_user_id
         self._ensure_user(user_id)
@@ -763,6 +807,7 @@ class SqliteResearchRepository:
         prefix = now.strftime("RP-%Y%m%d")
         project = ResearchProject(
             project_id=f"{prefix}-{uuid.uuid4().hex[:8]}",
+            name=name.strip(),
             topic=topic.strip(),
             research_question=research_question.strip(),
             user_id=user_id,
@@ -836,6 +881,7 @@ class SqliteResearchRepository:
             research_question=row["research_question"],
             pinned=bool(pinned_at),
             pinned_at=pinned_at,
+            archived_at=row["archived_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -866,13 +912,22 @@ class SqliteResearchRepository:
             raise ConversationNotFound(project_id)
         return self._conversation_from_row(row)
 
-    def list_conversations(self, limit: int = 50) -> list[ResearchConversation]:
+    def list_conversations(
+        self,
+        limit: int = 50,
+        archived: bool | None = False,
+    ) -> list[ResearchConversation]:
         safe_limit = max(1, min(int(limit), 200))
+        archive_filter = ""
+        if archived is True:
+            archive_filter = "AND archived_at IS NOT NULL"
+        elif archived is False:
+            archive_filter = "AND archived_at IS NULL"
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM conversations
-                WHERE user_id = ?
+                WHERE user_id = ? {archive_filter}
                 ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC
                 LIMIT ?
                 """,
@@ -886,6 +941,7 @@ class SqliteResearchRepository:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        archived: bool | None = None,
     ) -> ResearchConversation:
         conversation = self.get_conversation(conversation_id)
         clean_title = title.strip() if title is not None else None
@@ -898,8 +954,14 @@ class SqliteResearchRepository:
                 UPDATE conversations
                 SET title = COALESCE(?, title),
                     pinned_at = CASE
+                        WHEN ? = 1 THEN NULL
                         WHEN ? IS NULL THEN pinned_at
                         WHEN ? = 1 THEN COALESCE(pinned_at, ?)
+                        ELSE NULL
+                    END,
+                    archived_at = CASE
+                        WHEN ? IS NULL THEN archived_at
+                        WHEN ? = 1 THEN COALESCE(archived_at, ?)
                         ELSE NULL
                     END,
                     updated_at = ?
@@ -907,8 +969,12 @@ class SqliteResearchRepository:
                 """,
                 (
                     clean_title,
+                    None if archived is None else int(archived),
                     None if pinned is None else int(pinned),
                     None if pinned is None else int(pinned),
+                    now,
+                    None if archived is None else int(archived),
+                    None if archived is None else int(archived),
                     now,
                     now,
                     conversation_id,
@@ -916,6 +982,306 @@ class SqliteResearchRepository:
                 ),
             )
         return self.get_conversation(conversation_id)
+
+    @staticmethod
+    def _research_tokens(value: str) -> set[str]:
+        normalized = re.sub(r"\s+", " ", value.lower()).strip()
+        tokens = set(re.findall(r"[a-z0-9][a-z0-9._+-]*", normalized))
+        for sequence in re.findall(r"[\u4e00-\u9fff]+", normalized):
+            if len(sequence) == 1:
+                tokens.add(sequence)
+            else:
+                tokens.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
+        return {token for token in tokens if len(token) > 1 or "\u4e00" <= token <= "\u9fff"}
+
+    @staticmethod
+    def _flatten_search_text(value: Any) -> str:
+        parts: list[str] = []
+
+        def collect(item: Any) -> None:
+            if isinstance(item, str):
+                clean = re.sub(r"\s+", " ", item).strip()
+                if clean:
+                    parts.append(clean)
+            elif isinstance(item, dict):
+                for nested in item.values():
+                    collect(nested)
+            elif isinstance(item, list):
+                for nested in item:
+                    collect(nested)
+            elif isinstance(item, (int, float)):
+                parts.append(str(item))
+
+        collect(value)
+        return " · ".join(parts)
+
+    @staticmethod
+    def _search_snippet(text: str, query: str, terms: set[str], limit: int = 190) -> str:
+        clean = re.sub(r"\s+", " ", text).strip()
+        lowered = clean.lower()
+        candidates = [lowered.find(query.lower())] if query else []
+        candidates.extend(lowered.find(term) for term in terms)
+        positions = [position for position in candidates if position >= 0]
+        start = max(0, min(positions) - 46) if positions else 0
+        snippet = clean[start : start + limit]
+        if start:
+            snippet = f"…{snippet}"
+        if start + limit < len(clean):
+            snippet = f"{snippet}…"
+        return snippet
+
+    def search_research_library(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        clean_query = re.sub(r"\s+", " ", query).strip()
+        if not clean_query:
+            return []
+        safe_limit = max(1, min(int(limit), 100))
+        terms = self._research_tokens(clean_query)
+        with self._connect() as connection:
+            project_rows = connection.execute(
+                """
+                SELECT c.conversation_id, c.project_id, c.title, c.research_question,
+                       c.archived_at, p.payload_json
+                FROM conversations AS c
+                JOIN projects AS p ON p.project_id = c.project_id AND p.user_id = c.user_id
+                WHERE c.user_id = ?
+                """,
+                (self.current_user_id,),
+            ).fetchall()
+            artifact_rows = connection.execute(
+                """
+                SELECT a.project_id, a.kind, a.payload_json
+                FROM artifacts AS a
+                JOIN projects AS p ON p.project_id = a.project_id
+                WHERE p.user_id = ?
+                ORDER BY a.created_at DESC
+                """,
+                (self.current_user_id,),
+            ).fetchall()
+            note_rows = connection.execute(
+                """
+                SELECT n.project_id, n.kind, n.payload_json
+                FROM research_notes AS n
+                WHERE n.user_id = ?
+                ORDER BY n.updated_at DESC
+                """,
+                (self.current_user_id,),
+            ).fetchall()
+
+        sources_by_project: dict[str, list[dict[str, str]]] = {}
+        for row in artifact_rows:
+            text = self._flatten_search_text(json.loads(row["payload_json"]))
+            sources_by_project.setdefault(row["project_id"], []).append(
+                {"source": "artifact", "label": f"研究产物 · {row['kind']}", "text": text}
+            )
+        for row in note_rows:
+            text = self._flatten_search_text(json.loads(row["payload_json"]))
+            sources_by_project.setdefault(row["project_id"], []).append(
+                {"source": "note", "label": "研究笔记", "text": text}
+            )
+
+        results: list[dict[str, Any]] = []
+        query_lower = clean_query.lower()
+        for row in project_rows:
+            project = ResearchProject.model_validate_json(row["payload_json"])
+            sources = [
+                {"source": "title", "label": "研究标题", "text": row["title"]},
+                {
+                    "source": "question",
+                    "label": "研究问题",
+                    "text": f"{project.topic} {row['research_question']}",
+                },
+                *sources_by_project.get(row["project_id"], []),
+            ]
+            matches: list[dict[str, str]] = []
+            score = 0.0
+            for source in sources:
+                text = source["text"]
+                lowered = text.lower()
+                matched_terms = {term for term in terms if term in lowered}
+                exact = query_lower in lowered
+                if not exact and not matched_terms:
+                    continue
+                weight = {"title": 5.0, "question": 3.5, "note": 2.0}.get(
+                    source["source"], 1.0
+                )
+                source_score = weight * (2.0 if exact else 1.0) + len(matched_terms) * 0.2
+                score += source_score
+                if len(matches) < 3:
+                    matches.append(
+                        {
+                            "source": source["source"],
+                            "label": source["label"],
+                            "snippet": self._search_snippet(text, clean_query, terms),
+                        }
+                    )
+            if matches:
+                results.append(
+                    {
+                        "project_id": row["project_id"],
+                        "conversation_id": row["conversation_id"],
+                        "title": row["title"],
+                        "stage": project.stage.value,
+                        "archived": bool(row["archived_at"]),
+                        "score": round(score, 3),
+                        "matches": matches,
+                    }
+                )
+        results.sort(key=lambda item: (-item["score"], item["title"]))
+        return results[:safe_limit]
+
+    def find_similar_research(
+        self,
+        project_id: str | None = None,
+        limit: int = 3,
+        threshold: float = 0.24,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 10))
+        safe_threshold = max(0.0, min(float(threshold), 1.0))
+        conversations = self.list_conversations(limit=200, archived=None)
+        if project_id is not None:
+            self.get_project(project_id)
+            conversations = [item for item in conversations if item.project_id == project_id]
+        all_conversations = self.list_conversations(limit=200, archived=None)
+        output: list[dict[str, Any]] = []
+        for conversation in conversations:
+            base = f"{conversation.title} {conversation.research_question}".lower()
+            base_tokens = self._research_tokens(base)
+            matches: list[dict[str, Any]] = []
+            for candidate in all_conversations:
+                if candidate.project_id == conversation.project_id:
+                    continue
+                candidate_text = f"{candidate.title} {candidate.research_question}".lower()
+                candidate_tokens = self._research_tokens(candidate_text)
+                union = base_tokens | candidate_tokens
+                jaccard = len(base_tokens & candidate_tokens) / len(union) if union else 0.0
+                sequence = SequenceMatcher(None, base, candidate_text).ratio()
+                score = 0.7 * jaccard + 0.3 * sequence
+                if score < safe_threshold:
+                    continue
+                matches.append(
+                    {
+                        "project_id": candidate.project_id,
+                        "conversation_id": candidate.conversation_id,
+                        "title": candidate.title,
+                        "score": round(score, 3),
+                    }
+                )
+            matches.sort(key=lambda item: (-item["score"], item["title"]))
+            output.append({"project_id": conversation.project_id, "matches": matches[:safe_limit]})
+        return output
+
+    def _research_relation_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "relation_id": row["relation_id"],
+            "parent_project_id": row["parent_project_id"],
+            "child_project_id": row["child_project_id"],
+            "relation_type": row["relation_type"],
+            "note": row["note"],
+            "created_at": row["created_at"],
+            "parent_title": row["parent_title"],
+            "child_title": row["child_title"],
+        }
+
+    def create_research_relation(
+        self,
+        parent_project_id: str,
+        child_project_id: str,
+        relation_type: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        if parent_project_id == child_project_id:
+            raise ValueError("research_relation_self_reference")
+        if relation_type not in {"extends", "updates", "replicates"}:
+            raise ValueError("invalid_research_relation_type")
+        self.get_project(parent_project_id)
+        self.get_project(child_project_id)
+        existing = self.list_research_relations()
+        adjacency: dict[str, set[str]] = {}
+        for relation in existing:
+            adjacency.setdefault(relation["parent_project_id"], set()).add(
+                relation["child_project_id"]
+            )
+        pending = [child_project_id]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == parent_project_id:
+                raise ValueError("research_relation_cycle")
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(adjacency.get(current, set()))
+        relation_id = f"rr-{uuid.uuid4().hex}"
+        now = datetime.now(UTC).isoformat()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO research_relations(
+                        relation_id, user_id, parent_project_id, child_project_id,
+                        relation_type, note, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        relation_id,
+                        self.current_user_id,
+                        parent_project_id,
+                        child_project_id,
+                        relation_type,
+                        note.strip(),
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("research_relation_exists") from exc
+        return next(
+            item for item in self.list_research_relations(child_project_id)
+            if item["relation_id"] == relation_id
+        )
+
+    def list_research_relations(self, project_id: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = [self.current_user_id]
+        project_filter = ""
+        if project_id is not None:
+            self.get_project(project_id)
+            project_filter = "AND (r.parent_project_id = ? OR r.child_project_id = ?)"
+            params.extend([project_id, project_id])
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.*,
+                       COALESCE(pc.title, pp.payload_json) AS parent_title,
+                       COALESCE(cc.title, cp.payload_json) AS child_title
+                FROM research_relations AS r
+                JOIN projects AS pp ON pp.project_id = r.parent_project_id
+                JOIN projects AS cp ON cp.project_id = r.child_project_id
+                LEFT JOIN conversations AS pc ON pc.project_id = r.parent_project_id
+                LEFT JOIN conversations AS cc ON cc.project_id = r.child_project_id
+                WHERE r.user_id = ? {project_filter}
+                ORDER BY r.created_at DESC
+                """,
+                params,
+            ).fetchall()
+        relations = [self._research_relation_from_row(row) for row in rows]
+        for relation in relations:
+            if relation["parent_title"].startswith("{"):
+                relation["parent_title"] = ResearchProject.model_validate_json(
+                    relation["parent_title"]
+                ).topic
+            if relation["child_title"].startswith("{"):
+                relation["child_title"] = ResearchProject.model_validate_json(
+                    relation["child_title"]
+                ).topic
+        return relations
+
+    def delete_research_relation(self, relation_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM research_relations WHERE relation_id = ? AND user_id = ?",
+                (relation_id, self.current_user_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(relation_id)
 
     @staticmethod
     def _run_from_row(row: sqlite3.Row) -> ConversationRun:
@@ -1147,12 +1513,14 @@ class SqliteResearchRepository:
         *,
         user_id: str | None = None,
         conversation_id: str = "",
+        name: str = "",
     ) -> ResearchProject:
         owner_id = user_id or self.current_user_id
         self._ensure_user(owner_id)
         prefix = datetime.now(UTC).strftime("RP-%Y%m%d")
         project = ResearchProject(
             project_id=f"{prefix}-{uuid.uuid4().hex[:8]}",
+            name=name.strip(),
             topic=topic.strip(),
             research_question=research_question.strip(),
             user_id=owner_id,
@@ -1200,6 +1568,10 @@ class SqliteResearchRepository:
                     ON conversations.project_id = projects.project_id
                     AND conversations.user_id = projects.user_id
                 WHERE projects.user_id = ?
+                  AND (
+                    conversations.conversation_id IS NULL
+                    OR conversations.archived_at IS NULL
+                  )
                 ORDER BY
                     (conversations.pinned_at IS NOT NULL) DESC,
                     conversations.pinned_at DESC,
@@ -2478,6 +2850,101 @@ class SqliteResearchRepository:
             )
             for row in rows
         ]
+
+    # ── research relations ──────────────────────────────────────────
+
+    def create_research_relation(
+        self,
+        parent_project_id: str,
+        child_project_id: str,
+        note: str = "",
+    ) -> ResearchRelation:
+        if parent_project_id == child_project_id:
+            raise ValueError("research_relation_self_reference")
+        self.get_project(parent_project_id)
+        self.get_project(child_project_id)
+        adj: dict[str, set[str]] = {}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT parent_project_id, child_project_id
+                   FROM research_relations WHERE user_id = ?""",
+                (self.current_user_id,),
+            ).fetchall()
+        for r in rows:
+            adj.setdefault(r["parent_project_id"], set()).add(r["child_project_id"])
+        queue = [child_project_id]
+        while queue:
+            cur = queue.pop(0)
+            for nxt in adj.get(cur, set()):
+                if nxt == parent_project_id:
+                    raise ValueError("research_relation_cycle")
+                queue.append(nxt)
+        relation_id = f"rr-{secrets.token_hex(6)}"
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """INSERT INTO research_relations(
+                        relation_id, user_id, parent_project_id,
+                        child_project_id, relation_type, note, created_at
+                    ) VALUES (?, ?, ?, ?, 'inherits', ?, ?)""",
+                    (
+                        relation_id, self.current_user_id,
+                        parent_project_id, child_project_id, note, now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("research_relation_exists")
+        return ResearchRelation(
+            relation_id=relation_id,
+            parent_project_id=parent_project_id,
+            child_project_id=child_project_id,
+            relation_type="inherits",
+            note=note,
+            created_at=now,
+        )
+
+    def list_research_relations(
+        self,
+        project_id: str | None = None,
+    ) -> list[ResearchRelation]:
+        with self._connect() as connection:
+            if project_id:
+                rows = connection.execute(
+                    """SELECT rr.* FROM research_relations AS rr
+                       WHERE rr.user_id = ?
+                         AND (rr.parent_project_id = ? OR rr.child_project_id = ?)
+                       ORDER BY rr.created_at DESC""",
+                    (self.current_user_id, project_id, project_id),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT rr.* FROM research_relations AS rr
+                       WHERE rr.user_id = ?
+                       ORDER BY rr.created_at DESC""",
+                    (self.current_user_id,),
+                ).fetchall()
+        return [
+            ResearchRelation(
+                relation_id=row["relation_id"],
+                parent_project_id=row["parent_project_id"],
+                child_project_id=row["child_project_id"],
+                relation_type=row["relation_type"] if "relation_type" in row.keys() else "inherits",
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def delete_research_relation(self, relation_id: str) -> None:
+        with self._connect() as connection:
+            cur = connection.execute(
+                """DELETE FROM research_relations
+                   WHERE relation_id = ? AND user_id = ?""",
+                (relation_id, self.current_user_id),
+            )
+        if cur.rowcount == 0:
+            raise KeyError(f"research_relation '{relation_id}' not found")
 
     def transition(
         self,

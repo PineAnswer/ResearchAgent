@@ -8,25 +8,38 @@ from research_agent.domain.models import SearchConstraints, SearchFeedback
 
 
 class ResearchRequest(SearchConstraints):
+    name: str = Field(default="", max_length=200)
     topic: str = Field(min_length=1)
     research_question: str = Field(min_length=1)
     thread_id: str | None = None
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
     max_search_rounds: int | None = Field(default=None, ge=1, le=10)
+    parent_project_id: str | None = None
+    inheritance_note: str = Field(default="", max_length=1000)
 
 
 class CreateConversationRequest(SearchConstraints):
+    name: str = Field(default="", max_length=200)
     topic: str = Field(min_length=1)
     research_question: str = Field(min_length=1)
     min_papers: int | None = Field(default=None, ge=1)
     max_papers: int | None = Field(default=None, ge=1)
     max_search_rounds: int | None = Field(default=None, ge=1, le=10)
+    parent_project_id: str | None = None
+    inheritance_note: str = Field(default="", max_length=1000)
 
 
 class ConversationUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     pinned: bool | None = None
+    archived: bool | None = None
+
+
+class ResearchRelationRequest(BaseModel):
+    parent_project_id: str = Field(min_length=1, max_length=160)
+    child_project_id: str = Field(min_length=1, max_length=160)
+    note: str = Field(default="", max_length=1000)
 
 
 class ApiEnvelope(BaseModel):
@@ -40,8 +53,9 @@ class SearchFeedbackRequest(SearchFeedback):
 
 
 class SearchReviewSelectionRequest(BaseModel):
-    paper_ids: list[str] = Field(min_length=1, max_length=100)
+    paper_ids: list[str] = Field(default_factory=list, max_length=100)
     selected: bool
+    all_candidates: bool = False
 
 
 class ContinueProjectRequest(BaseModel):
@@ -192,6 +206,13 @@ class ResearchNoteRequest(BaseModel):
     citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
+class ResearchRelationRequest(BaseModel):
+    parent_project_id: str = Field(min_length=1, max_length=160)
+    child_project_id: str = Field(min_length=1, max_length=160)
+    relation_type: Literal["extends", "updates", "replicates"] = "extends"
+    note: str = Field(default="", max_length=1000)
+
+
 class PaperQuestionRequest(BaseModel):
     scope: Literal["selection", "paper"] = "paper"
     attachment_id: str | None = None
@@ -200,6 +221,17 @@ class PaperQuestionRequest(BaseModel):
     selected_text: str = Field(default="", max_length=12000)
     prefix: str = Field(default="", max_length=1000)
     suffix: str = Field(default="", max_length=1000)
+
+
+class PaperQuestionStreamRequest(BaseModel):
+    scope: Literal["selection", "paper"] = "paper"
+    attachment_id: str | None = None
+    question: str = Field(min_length=1, max_length=4000)
+    page: int | None = Field(default=None, ge=1)
+    selected_text: str = Field(default="", max_length=12000)
+    prefix: str = Field(default="", max_length=1000)
+    suffix: str = Field(default="", max_length=1000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=40)
 
 
 class PaperAnnotationRequest(BaseModel):

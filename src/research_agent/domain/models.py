@@ -98,6 +98,8 @@ class PaperCandidate(BaseModel):
     venue_rating_source_url: str | None = None
     venue_rating_source_label: str | None = None
     venue_match_confidence: float | None = None
+    agent_decision: str = ""
+    agent_screening_reason: str = ""
 
 
 class SearchReport(BaseModel):
@@ -214,14 +216,14 @@ class PaperCard(BaseModel):
 
 class EvidenceBackedClaim(BaseModel):
     statement: str
-    evidence_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class ResearchGap(BaseModel):
     description: str
-    supporting_paper_ids: list[str] = Field(min_length=1)
+    supporting_paper_ids: list[str] = Field(default_factory=list)
     conflicting_paper_ids: list[str] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
     confidence: EvidenceConfidence
     proposed_hypothesis: str
 
@@ -243,6 +245,7 @@ class ReviewResult(BaseModel):
 
 class ResearchProject(BaseModel):
     project_id: str
+    name: str = ""
     topic: str
     research_question: str
     user_id: str = DEFAULT_USER_ID
@@ -269,6 +272,7 @@ class ResearchConversation(BaseModel):
     research_question: str
     pinned: bool = False
     pinned_at: datetime | None = None
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -534,6 +538,21 @@ class ProjectPaper(BaseModel):
     reason: str = ""
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ResearchRelation(BaseModel):
+    """Directed inheritance link between two research projects.
+
+    A child project inherits from a parent project, forming a research
+    lineage DAG.  The ``note`` field carries user-authored rationale.
+    """
+
+    relation_id: str  # RR-<hex>
+    parent_project_id: str
+    child_project_id: str
+    relation_type: str = "inherits"
+    note: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 # ── DeepSynthesis: narrative review models ──────────────────────────

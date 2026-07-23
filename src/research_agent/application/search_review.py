@@ -276,7 +276,11 @@ class SearchReviewService:
             decision = normalized_decisions.get(candidate_id) or normalized_decisions.get(
                 doi
             )
-            reason = normalized_reasons.get(candidate_id) or normalized_reasons.get(doi)
+            reason = (
+                candidate.agent_screening_reason
+                or normalized_reasons.get(candidate_id)
+                or normalized_reasons.get(doi)
+            )
             if decision in {"include", "included", "accept", "selected", "pass"}:
                 included.append(candidate_id)
                 reason_map[candidate_id] = _candidate_reason(
@@ -641,6 +645,19 @@ class SearchReviewService:
             "total_count": len(valid_ids),
             "max_papers": self.max_papers,
         }
+
+    def update_all_selections(
+        self,
+        project_id: str,
+        *,
+        selected: bool,
+    ) -> dict[str, Any]:
+        snapshot = self._latest_snapshot(project_id)
+        return self.update_selection(
+            project_id,
+            [_candidate_id(candidate) for candidate in snapshot.candidates],
+            selected=selected,
+        )
 
     def undo_last_feedback(self, project_id: str) -> dict[str, Any]:
         """Append a compensating review snapshot and reopen reversible decisions."""

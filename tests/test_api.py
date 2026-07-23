@@ -386,7 +386,10 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert 'id="toggleProjectSelection"' in index.text
     assert 'id="projectBulkBar"' in index.text
     assert 'id="deleteSelectedProjects"' in index.text
-    assert 'id="emptyReadPaper"' in index.text
+    assert 'id="emptyResearchLibrary"' in index.text
+    assert "管理研究库" in index.text
+    assert 'class="start-task-card is-primary"' not in index.text
+    assert "首轮计入；每轮可生成多条检索词" not in index.text
     assert 'id="brandHome"' in index.text
     assert 'id="homeToggle"' in index.text
     assert "vendor/marked.umd.js" in index.text
@@ -402,6 +405,7 @@ def test_visual_console_and_project_read_endpoints(tmp_path, monkeypatch) -> Non
     assert "syncRunningSnapshot" in script.text
     assert "继续生成综述" in script.text
     assert "证据审查要求修订" in script.text
+    assert "continueRecentReading" in script.text
     assert 'return reviseCount >= 2 ? null : "pipeline"' in script.text
     assert 'id="supplementalQueries"' in index.text
     assert "成果待补全" in script.text
@@ -682,7 +686,8 @@ def test_search_review_api_can_show_accept_and_continue_project(
             "query": "question",
             "search_terms": ["query"],
             "candidates": [
-                {"paper_id": "P1", "title": "Paper", "source": "OpenAlex"}
+                {"paper_id": "P1", "title": "Paper 1", "source": "OpenAlex"},
+                {"paper_id": "P2", "title": "Paper 2", "source": "OpenAlex"},
             ],
             "selection_notes": [],
         },
@@ -715,6 +720,18 @@ def test_search_review_api_can_show_accept_and_continue_project(
                 f"/api/projects/{project.project_id}/search-review/selection",
                 json={"paper_ids": ["P1"], "selected": True},
             )
+            cleared_all = await client.patch(
+                f"/api/projects/{project.project_id}/search-review/selection",
+                json={"selected": False, "all_candidates": True},
+            )
+            selected_all = await client.patch(
+                f"/api/projects/{project.project_id}/search-review/selection",
+                json={"selected": True, "all_candidates": True},
+            )
+            await client.patch(
+                f"/api/projects/{project.project_id}/search-review/selection",
+                json={"paper_ids": ["P2"], "selected": False},
+            )
             snapshot = await client.get(f"/api/projects/{project.project_id}")
             accepted = await client.post(
                 f"/api/projects/{project.project_id}/search-feedback",
@@ -725,23 +742,41 @@ def test_search_review_api_can_show_accept_and_continue_project(
                 f"/api/projects/{project.project_id}/continue",
                 json={},
             )
-            return review, deselected, reselected, snapshot, accepted, continued
+            return (
+                review,
+                deselected,
+                reselected,
+                cleared_all,
+                selected_all,
+                snapshot,
+                accepted,
+                continued,
+            )
 
-    review, deselected, reselected, snapshot, accepted, continued = asyncio.run(
-        exercise_api()
-    )
+    (
+        review,
+        deselected,
+        reselected,
+        cleared_all,
+        selected_all,
+        snapshot,
+        accepted,
+        continued,
+    ) = asyncio.run(exercise_api())
 
     assert review.status_code == 200
     assert review.json()["data"]["awaiting_input"] is True
     assert review.json()["data"]["candidate_page"]["page_size"] == 1
-    assert deselected.json()["data"]["selected_count"] == 0
-    assert reselected.json()["data"]["selected_count"] == 1
+    assert deselected.json()["data"]["selected_count"] == 1
+    assert reselected.json()["data"]["selected_count"] == 2
+    assert cleared_all.json()["data"]["selected_count"] == 0
+    assert selected_all.json()["data"]["selected_count"] == 2
     search_artifact = next(
         artifact
         for artifact in snapshot.json()["data"]["artifacts"]
         if artifact["kind"] == "SearchReport"
     )
-    assert search_artifact["payload"]["candidate_count"] == 1
+    assert search_artifact["payload"]["candidate_count"] == 2
     assert search_artifact["payload"]["candidates"] == []
     assert accepted.status_code == 200
     assert accepted.json()["data"]["ready_to_continue"] is True
@@ -773,7 +808,8 @@ def test_accepting_conversation_candidates_starts_research_immediately(
             "query": "question",
             "search_terms": ["query"],
             "candidates": [
-                {"paper_id": "P1", "title": "Paper", "source": "OpenAlex"}
+                {"paper_id": "P1", "title": "Paper 1", "source": "OpenAlex"},
+                {"paper_id": "P2", "title": "Paper 2", "source": "OpenAlex"},
             ],
         },
         target=ResearchStage.SEARCHED,

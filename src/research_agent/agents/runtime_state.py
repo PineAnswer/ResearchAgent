@@ -1157,10 +1157,16 @@ def recording_runnable(
                     normalize_paper_id(key): value
                     for key, value in (payload.get("screening_decisions") or {}).items()
                 }
+                reasons = {
+                    normalize_paper_id(key): value
+                    for key, value in (payload.get("screening_reasons") or {}).items()
+                }
                 for candidate in matched:
-                    candidate["agent_decision"] = decisions.get(
-                        _candidate_identity(candidate), "uncertain"
-                    )
+                    identity = _candidate_identity(candidate)
+                    candidate["agent_decision"] = decisions.get(identity, "uncertain")
+                    agent_reason = reasons.get(identity)
+                    if agent_reason:
+                        candidate["agent_screening_reason"] = agent_reason
                 payload["candidates"] = rank_candidates(
                     matched,
                     search_terms,

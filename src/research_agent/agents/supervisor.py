@@ -418,6 +418,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         prefer_library_search: bool = False,
+        parent_context: dict | None = None,
     ) -> str:
         limits: list[str] = [
             f"- 论文发表年份：{year_from}-{year_to}（后端强制过滤）"
@@ -444,10 +445,25 @@ class ResearchSupervisor:
                 "入选论文数不超过系统精读容量且覆盖盲区可接受，或工具上限触发后，才返回最终 SearchReport。"
                 " 不要在每一轮后等待用户反馈。"
             )
+        parent_text = ""
+        if parent_context:
+            parent_terms = parent_context.get("parent_search_terms", [])
+            parent_findings = parent_context.get("parent_key_findings", [])
+            parent_text = (
+                "\n\n## 继承自父研究\n\n"
+                "当前研究继承自以下前序研究，请在此基础之上设计检索策略，"
+                "而非简单地从用户输入重新开始：\n"
+                f"- 父研究主题：{parent_context.get('parent_topic', '')}\n"
+                f"- 父研究问题：{parent_context.get('parent_research_question', '')}\n"
+                f"- 父研究已使用的检索词：{parent_terms if parent_terms else '（无）'}\n"
+                f"- 父研究关键发现/覆盖盲区：{parent_findings if parent_findings else '（无）'}\n"
+                "\n检索词设计应覆盖父研究未充分探索的方向，或基于其结论延伸、更新、复现。"
+                "避免简单重复父研究已有的检索词。"
+            )
         return (
             f"研究主题：{topic}\n"
             f"研究问题：{research_question}\n"
-            f"{limit_text}\n"
+            f"{limit_text}{parent_text}\n"
             "请创建项目，并按证据驱动科研流程执行。"
         )
 
@@ -490,6 +506,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         prefer_library_search: bool = False,
+        parent_context: dict | None = None,
     ) -> str:
         base = cls.build_prompt(
             topic,
@@ -500,6 +517,7 @@ class ResearchSupervisor:
             year_from=year_from,
             year_to=year_to,
             prefer_library_search=prefer_library_search,
+            parent_context=parent_context,
         )
         return (
             f"系统已经为当前隔离对话创建科研项目：{project_id}\n"
@@ -804,6 +822,7 @@ class ResearchSupervisor:
         year_from: int = 2024,
         year_to: int = 2026,
         prefer_library_search: bool = False,
+        parent_project_id: str | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         """Start research for a project pre-created by the conversation service."""
@@ -816,6 +835,9 @@ class ResearchSupervisor:
             raise ValueError(
                 f"Initial conversation run requires CREATED; current stage is {project.stage.value}"
             )
+        parent_context: dict | None = None
+        if parent_project_id:
+            parent_context = self.service.build_parent_context(parent_project_id)
         options = self._search_review_options(
             min_papers=min_papers,
             max_papers=max_papers,
@@ -852,6 +874,7 @@ class ResearchSupervisor:
                                 project_id,
                                 project.topic,
                                 project.research_question,
+                                parent_context=parent_context,
                                 **options,
                             ),
                         }
@@ -1821,6 +1844,97 @@ class ResearchSupervisor:
             "开场。回答使用 Markdown。"
             f"\n\n当前研究主题：{project.topic}"
             + (f"\n\n可选研究上下文：\n{context}" if context else "")
+        )
+        messages: list[Any] = [SystemMessage(content=system_content)]
+        for item in (history or [])[-40:]:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            if item.get("role") == "assistant":
+                messages.append(AIMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
+        messages.append(HumanMessage(content=clean_question))
+
+        model = self._build_model()
+        if isinstance(model, str):
+            model = init_chat_model(model)
+        async for chunk in model.astream(messages):
+            text = self._chat_chunk_text(getattr(chunk, "content", chunk))
+            if text:
+                yield text
+
+    async def stream_paper_chat(
+        self,
+        library_id: str,
+        question: str,
+        *,
+        attachment_id: str | None = None,
+        page: int | None = None,
+        selected_text: str = "",
+        prefix: str = "",
+        suffix: str = "",
+        history: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream an unrestricted, multi-turn LLM chat about a single paper."""
+        paper = await asyncio.to_thread(self.repository.get_library_paper, library_id)
+        clean_question = question.strip()
+        if not clean_question:
+            raise ValueError("Question is required")
+
+        if not attachment_id:
+            workspace = await asyncio.to_thread(
+                self.service.library.paper_workspace,
+                library_id,
+            )
+            attachment_id = (workspace.get("workspace_attachment") or {}).get(
+                "attachment_id"
+            )
+
+        pages: list[dict[str, Any]] = []
+        if attachment_id:
+            attachment = await asyncio.to_thread(
+                self.repository.get_library_attachment,
+                attachment_id,
+            )
+            if attachment.library_id == library_id and attachment.url.startswith("/api/library/attachments/"):
+                try:
+                    path = await asyncio.to_thread(
+                        self._library_attachment_path,
+                        attachment_id,
+                    )
+                    pages = await asyncio.to_thread(extract_pdf_pages, path, 1000)
+                except Exception:
+                    pages = []
+
+        page_blocks: list[str] = []
+        for item in pages:
+            page_number = int(item.get("page") or 0)
+            text = str(item.get("text") or "").strip()
+            if page_number < 1 or not text:
+                continue
+            page_blocks.append(f"\n\n--- PAGE {page_number} ---\n{text}")
+
+        full_text = "".join(page_blocks) if page_blocks else ""
+        context_parts: list[str] = []
+        if full_text:
+            context_parts.append(f"【论文标题】{paper.title}\n【论文全文】{full_text}")
+        if selected_text.strip():
+            sel_ctx = f"【用户选段】\n页码：{page or '未知'}\n选中文本：{selected_text.strip()}"
+            if prefix.strip():
+                sel_ctx += f"\n选段前文：{prefix.strip()}"
+            if suffix.strip():
+                sel_ctx += f"\n选段后文：{suffix.strip()}"
+            context_parts.append(sel_ctx)
+
+        context = "\n\n".join(context_parts)[:120000]
+        system_content = (
+            "你是一个自然、专业、善于解释的学术论文助手。直接回答用户关于当前论文的"
+            "问题，可以使用你掌握的知识，也可以参考下面提供的论文全文。论文全文只是"
+            "辅助信息，不构成回答范围限制。理解并承接此前对话，支持连续追问；避免"
+            "无意义的免责说明和模板化开场。回答使用 Markdown。"
+            f"\n\n论文标题：{paper.title}"
+            + (f"\n\n可选的论文上下文：\n{context}" if context else "")
         )
         messages: list[Any] = [SystemMessage(content=system_content)]
         for item in (history or [])[-40:]:

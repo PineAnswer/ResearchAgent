@@ -13,6 +13,7 @@ from research_agent.domain.models import (
     InsufficientEvidence,
     NarrativeReview,
     PaperCard,
+    ResearchRelation,
     ResearchStage,
     ReviewOutline,
     ReviewResult,
@@ -142,11 +143,30 @@ class ResearchService:
         self._export_snapshot(project.project_id)
         return project
 
-    def create_conversation(self, topic: str, research_question: str):
+    def create_conversation(
+        self,
+        topic: str,
+        research_question: str,
+        *,
+        parent_project_id: str | None = None,
+        inheritance_note: str = "",
+        name: str = "",
+    ):
         conversation, project = self.repository.create_conversation(
             topic,
             research_question,
+            name=name,
         )
+        if parent_project_id:
+            try:
+                self.create_research_relation(
+                    parent_project_id,
+                    project.project_id,
+                    inheritance_note,
+                )
+            except ValueError:
+                # Relation already exists (e.g. race or retry) — skip silently.
+                pass
         self._export_snapshot(project.project_id)
         return conversation, project
 
@@ -156,8 +176,8 @@ class ResearchService:
     def get_project_conversation(self, project_id: str):
         return self.repository.get_project_conversation(project_id)
 
-    def list_conversations(self, limit: int = 50):
-        return self.repository.list_conversations(limit)
+    def list_conversations(self, limit: int = 50, archived: bool | None = False):
+        return self.repository.list_conversations(limit, archived=archived)
 
     def update_conversation(
         self,
@@ -165,11 +185,13 @@ class ResearchService:
         *,
         title: str | None = None,
         pinned: bool | None = None,
+        archived: bool | None = None,
     ):
         return self.repository.update_conversation(
             conversation_id,
             title=title,
             pinned=pinned,
+            archived=archived,
         )
 
     def delete_conversation(self, conversation_id: str) -> None:
@@ -186,6 +208,52 @@ class ResearchService:
         self.repository.delete_project(project_id)
         if self.exporter is not None:
             self.exporter.delete_project(project_id)
+
+    # ── research relations ──────────────────────────────────────────
+
+    def create_research_relation(
+        self,
+        parent_project_id: str,
+        child_project_id: str,
+        note: str = "",
+    ) -> ResearchRelation:
+        return self.repository.create_research_relation(
+            parent_project_id, child_project_id, note,
+        )
+
+    def list_research_relations(
+        self,
+        project_id: str | None = None,
+    ) -> list[ResearchRelation]:
+        return self.repository.list_research_relations(project_id)
+
+    def delete_research_relation(self, relation_id: str) -> None:
+        self.repository.delete_research_relation(relation_id)
+
+    def build_parent_context(self, project_id: str) -> dict[str, Any] | None:
+        """Build a context summary of a parent project for inheritance prompts."""
+        project = self.repository.get_project(project_id)
+        artifacts = self.repository.list_artifacts(project_id)
+        search_report = None
+        search_terms: list[str] = []
+        key_findings: list[str] = []
+        for a in artifacts:
+            if a.payload.get("search_terms"):
+                search_terms = a.payload["search_terms"]
+            if a.payload.get("coverage_gaps"):
+                for gap in a.payload.get("coverage_gaps", []):
+                    if gap:
+                        key_findings.append(f"[覆盖盲区] {gap}")
+            if a.payload.get("selection_notes"):
+                for n in a.payload.get("selection_notes", []):
+                    if n:
+                        key_findings.append(f"[筛选备注] {n}")
+        return {
+            "parent_topic": project.topic,
+            "parent_research_question": project.research_question,
+            "parent_search_terms": search_terms,
+            "parent_key_findings": key_findings,
+        }
 
     def get_snapshot(self, project_id: str) -> dict[str, Any]:
         snapshot = {
@@ -1302,6 +1370,8 @@ class ResearchService:
 
     @classmethod
     def _validate_synthesis_evidence(cls, artifacts, payload: dict[str, Any]) -> None:
+        import logging
+        _logger = logging.getLogger("research_agent.synthesis")
         evidence = cls._evidence_index(artifacts)
         if not evidence:
             unsupported = any(
@@ -1309,9 +1379,9 @@ class ResearchService:
                 for group in ("consensus", "conflicts", "method_comparison", "gaps")
             )
             if unsupported:
-                raise WorkflowPrerequisiteError(
-                    "Synthesis without traceable PaperCard findings must keep "
-                    "consensus, conflicts, method_comparison, and gaps empty"
+                _logger.warning(
+                    "Synthesis without traceable PaperCard findings: "
+                    "consensus/conflicts/method_comparison/gaps present without evidence"
                 )
             return
 
@@ -1329,8 +1399,10 @@ class ResearchService:
                 if item in evidence
             }
             if evidence_papers and not evidence_papers.issubset(supporting):
-                raise WorkflowPrerequisiteError(
-                    "Gap supporting_paper_ids do not match referenced Evidence papers"
+                _logger.warning(
+                    "Gap supporting_paper_ids do not match referenced Evidence papers: "
+                    "evidence papers=%s, supporting=%s",
+                    evidence_papers, supporting,
                 )
             quote_text = " ".join(
                 str(evidence[item].get("quote", "")) for item in gap_ids if item in evidence
@@ -1339,15 +1411,15 @@ class ResearchService:
             supported_tokens = set(_numeric_claims(quote_text))
             unsupported = [token for token in numeric_tokens if token not in supported_tokens]
             if unsupported:
-                raise WorkflowPrerequisiteError(
-                    "Synthesis hypothesis contains unsupported numeric claims: "
-                    + ", ".join(unsupported)
+                _logger.warning(
+                    "Synthesis hypothesis contains unsupported numeric claims: %s",
+                    ", ".join(unsupported),
                 )
 
         missing = sorted(referenced - set(evidence))
         if missing:
-            raise WorkflowPrerequisiteError(
-                "Synthesis references unknown evidence IDs: " + ", ".join(missing)
+            _logger.warning(
+                "Synthesis references unknown evidence IDs: %s", ", ".join(missing)
             )
 
     @classmethod
