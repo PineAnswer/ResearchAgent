@@ -57,15 +57,15 @@ class ObservableChatAnthropic(ChatAnthropic):
 def structured_output_strategy(model: BaseChatModel | str, schema: type[BaseModel]) -> Any:
     """Return a `response_format` value that is safe for the resolved model.
 
-    `create_agent`'s `AutoStrategy` assumes newer Claude model names (matched
-    by a hardcoded regex in `langchain.agents.factory`) support OpenAI-style
-    native `response_format`, even though the model's own capability profile
-    reports `structured_output=False`. Relays that proxy Claude through the
-    OpenAI-compatible surface don't implement that native mode, so the model
-    call silently returns no content and structured-output parsing fails on
-    an empty string. Forcing `ToolStrategy` makes every subagent fall back to
-    Claude's regular (and reliable) tool-calling mechanism instead.
+    Native OpenAI-style `response_format` (json_schema) is only implemented by
+    a few first-party providers. OpenAI-compatible relays and most third-party
+    gateways ignore or reject it, so the model call silently completes without
+    any parsed `structured_response` (observed as `None` downstream). Function
+    calling, by contrast, is required for these agents' tools to work at all,
+    so `ToolStrategy` is the one mechanism that is reliable everywhere —
+    including genuine OpenAI, Claude, and OpenAI-compatible relays. Use it
+    unconditionally.
     """
-    if isinstance(model, ChatAnthropic):
-        return ToolStrategy(schema)
-    return schema.model_json_schema()
+    # The model argument stays in the signature for call-site compatibility;
+    # every supported provider path now uses the same tool-calling strategy.
+    return ToolStrategy(schema)

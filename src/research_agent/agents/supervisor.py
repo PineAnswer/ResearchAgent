@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,8 +21,9 @@ from deepagents.backends import FilesystemBackend
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import ValidationError
 from anthropic import (
     APIConnectionError as AnthropicAPIConnectionError,
     APITimeoutError as AnthropicAPITimeoutError,
@@ -66,6 +68,8 @@ from research_agent.tools.library_tools import build_library_tools
 from research_agent.tools.literature_tools import build_literature_tools, extract_pdf_pages
 from research_agent.tools.project_tools import build_project_tools
 
+logger = logging.getLogger(__name__)
+
 
 class AgentUnavailableError(RuntimeError):
     """Raised when the model-backed Agent graph cannot be used."""
@@ -100,6 +104,20 @@ FALLBACK_EXCEPTIONS = (
     ConnectionError,
     TimeoutError,
 )
+
+
+def _model_failure_note(exc: BaseException) -> str:
+    """Return a short, user-facing reason for an LLM-path failure.
+
+    Raw exception dumps (especially pydantic validation errors) are confusing
+    in the UI; the full traceback stays in the server log instead.
+    """
+    if isinstance(exc, ValidationError):
+        return "模型未返回符合要求的结构化回答"
+    text = " ".join(str(exc).split()).strip()
+    if not text:
+        return type(exc).__name__
+    return text[:160]
 
 
 LIBRARY_READER_PROMPT = """
@@ -157,8 +175,11 @@ LIBRARY_AGENT_PROMPT = """
 3. 需要论文整体方法、局限或历史证据时调用 get_library_paper_context。
 4. cited_source_ids 只能填写工具结果中真实出现的 source_id，按首次使用顺序排列。
 5. answer 中每个事实性结论后必须写 [[source_id]]；没有来源支撑就明确说材料不足。
+   数量统计、库内清单等概览类问题可在完成检索后直接概括，不得伪造引用。
 6. 不得把论文标题、DOI、library_id 或自行编造的编号当作 source_id。
 7. coverage_note 说明已覆盖的范围和仍缺失的证据。
+8. 完成检索后，必须调用结构化响应工具提交最终回答；即使以普通文本作答，
+   每个事实性结论后也必须保留 [[source_id]] 标记，系统才能恢复你的回答。
 """.strip()
 
 
@@ -1133,10 +1154,19 @@ class ResearchSupervisor:
                     ),
                 ]
             )
+            if result is None:
+                return (
+                    self._extractive_library_analysis(paper, chunks, "模型未返回结构化结果"),
+                    "extractive",
+                )
             analysis = LibraryPaperAnalysis.model_validate(result)
             return self._ground_library_analysis(analysis, pages, abstract), "agent"
         except Exception as exc:
-            return self._extractive_library_analysis(paper, chunks, str(exc)), "extractive"
+            logger.exception("Library reading-card analysis failed; using extractive card")
+            return (
+                self._extractive_library_analysis(paper, chunks, _model_failure_note(exc)),
+                "extractive",
+            )
 
     async def generate_library_reading_card(
         self,
@@ -1414,6 +1444,49 @@ class ResearchSupervisor:
             for line in factual_lines
         )
 
+    @staticmethod
+    def _salvage_library_agent_payload(result: Any) -> dict[str, Any] | None:
+        """Rebuild a `LibraryAgentResponse` payload from the final AI text.
+
+        Some models (and OpenAI-compatible relays) skip the structured-output
+        tool call and return the cited answer as plain text. If that text
+        carries `[[source_id]]` markers it still satisfies the traceability
+        contract, so recover it instead of degrading to extractive results.
+        """
+        if not isinstance(result, dict):
+            return None
+        for message in reversed(list(result.get("messages") or [])):
+            if isinstance(message, AIMessage):
+                content = message.content
+            elif isinstance(message, dict) and message.get("type") in ("ai", "assistant"):
+                content = message.get("content")
+            else:
+                continue
+            text = ResearchSupervisor._chat_chunk_text(content).strip()
+            if not text:
+                continue
+            markers = list(dict.fromkeys(re.findall(r"\[\[([^\]]+)\]\]", text)))
+            # Marker-less text is still returned: the caller's citation gate
+            # decides whether it qualifies as an uncited overview answer.
+            return {
+                "answer": text,
+                "cited_source_ids": markers,
+                "coverage_note": "结构化输出缺失，已从模型正文恢复回答。",
+            }
+        return None
+
+    @staticmethod
+    def _agent_run_used_tools(result: Any) -> bool:
+        """True when the agent run actually executed at least one tool call."""
+        if not isinstance(result, dict):
+            return False
+        for message in result.get("messages") or []:
+            if isinstance(message, ToolMessage):
+                return True
+            if isinstance(message, dict) and message.get("type") == "tool":
+                return True
+        return False
+
     async def answer_library_question(
         self,
         library_ids: list[str],
@@ -1422,7 +1495,35 @@ class ResearchSupervisor:
         """Run a scoped, tool-using Agent over selected papers or the full library."""
         fallback = self.service.library.answer_library_question(library_ids, question)
         if self.graph is None:
-            return {**fallback, "mode": "extractive"}
+            detail = " ".join(str(self.initialization_error or "").split())[:160]
+            return {
+                **fallback,
+                "mode": "extractive",
+                "coverage_note": (
+                    f"模型服务未初始化（{detail}），已返回本地检索结果。"
+                    if detail
+                    else "模型服务未初始化，已返回本地检索结果。"
+                ),
+            }
+        if not library_ids:
+            has_papers = await asyncio.to_thread(
+                self.repository.list_library_papers,
+                "",
+                saved_only=True,
+                include_archived=False,
+                limit=1,
+            )
+            if not has_papers:
+                # An empty library is a data situation, not an agent failure:
+                # skip the model call and explain what is actually missing.
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": (
+                        "文献库当前没有论文。请先在文献库中添加论文"
+                        "（或在候选审核中收藏论文）后再提问。"
+                    ),
+                }
         toolset = build_library_tools(
             self.service.library,
             allowed_library_ids=library_ids or None,
@@ -1474,6 +1575,21 @@ class ResearchSupervisor:
                 }
             )
             structured = result.get("structured_response") if isinstance(result, dict) else None
+            if structured is None:
+                structured = self._salvage_library_agent_payload(result)
+            if structured is None:
+                logger.warning(
+                    "Ask Library Agent returned neither structured_response nor a "
+                    "salvageable cited answer; falling back to extractive results."
+                )
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": (
+                        "Ask Library Agent 未返回结构化回答（模型可能不支持工具调用，"
+                        "或调用次数达到上限），已返回本地检索结果。"
+                    ),
+                }
             response = LibraryAgentResponse.model_validate(structured)
             cited_ids = list(dict.fromkeys(response.cited_source_ids))
             answer_markers = set(re.findall(r"\[\[([^\]]+)\]\]", response.answer))
@@ -1483,16 +1599,56 @@ class ResearchSupervisor:
                 if item in toolset.source_registry and item in answer_markers
             ]
             if answer_markers - set(valid_ids):
-                return {**fallback, "mode": "extractive"}
-            if (
-                not response.answer.strip()
-                or not valid_ids
-                or not self._library_answer_is_traceable(
-                    response.answer,
-                    set(valid_ids),
+                logger.warning(
+                    "Ask Library Agent cited unknown source ids: %s",
+                    sorted(answer_markers - set(valid_ids))[:5],
                 )
-            ):
-                return {**fallback, "mode": "extractive"}
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": (
+                        "AI 回答引用了不存在的来源标识，未通过校验，已返回本地检索结果。"
+                    ),
+                }
+            answer_text = response.answer.strip()
+            if not answer_text:
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": "AI 返回了空回答，已返回本地检索结果。",
+                }
+            if not valid_ids:
+                if not answer_markers and self._agent_run_used_tools(result):
+                    # Overview questions (counts, holdings, coverage) have no
+                    # passage to quote. Keep the model's answer when it did
+                    # consult the library tools, and label it as uncited.
+                    note = str(response.coverage_note or "").strip()
+                    suffix = "本回答为概览性质，未引用具体原文段落，请以文献库列表为准。"
+                    return {
+                        "question": question.strip(),
+                        "answer": answer_text,
+                        "citations": [],
+                        "used_library_ids": response.used_library_ids,
+                        "coverage_note": f"{note} {suffix}".strip(),
+                        "mode": "agent",
+                    }
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": (
+                        "AI 已作答，但回答缺少可追溯的文献引用（[[source_id]] 标记），"
+                        "未通过校验，已返回本地检索结果。"
+                    ),
+                }
+            if not self._library_answer_is_traceable(answer_text, set(valid_ids)):
+                return {
+                    **fallback,
+                    "mode": "extractive",
+                    "coverage_note": (
+                        "AI 回答中存在未标注引用来源的事实性结论，未通过校验，"
+                        "已返回本地检索结果。"
+                    ),
+                }
             citations: list[dict[str, Any]] = []
             answer = response.answer.strip()
             for index, source_id in enumerate(valid_ids, start=1):
@@ -1520,10 +1676,13 @@ class ResearchSupervisor:
                 "mode": "agent",
             }
         except Exception as exc:
+            logger.exception("Ask Library Agent failed; returning extractive results")
             return {
                 **fallback,
                 "mode": "extractive",
-                "coverage_note": f"Ask Library Agent 不可用，已返回本地检索结果：{str(exc)[:240]}",
+                "coverage_note": (
+                    f"Ask Library Agent 不可用，已返回本地检索结果：{_model_failure_note(exc)}"
+                ),
             }
 
     async def answer_project_question(
@@ -1689,6 +1848,11 @@ class ResearchSupervisor:
                     ),
                 ]
             )
+            if raw is None:
+                return {
+                    **fallback,
+                    "coverage_note": "模型未返回结构化回答，已展示范围内最相关的原始材料。",
+                }
             response = LibraryAgentResponse.model_validate(raw)
             cited_ids = list(dict.fromkeys(response.cited_source_ids))
             marker_ids = list(
@@ -1742,9 +1906,12 @@ class ResearchSupervisor:
                 "coverage_note": response.coverage_note,
             }
         except Exception as exc:
+            logger.exception("Project question answering failed; returning extractive materials")
             return {
                 **fallback,
-                "coverage_note": f"研究问答模型暂不可用，已返回范围内原始材料：{str(exc)[:240]}",
+                "coverage_note": (
+                    f"研究问答模型暂不可用，已返回范围内原始材料：{_model_failure_note(exc)}"
+                ),
             }
 
     @staticmethod
@@ -2077,6 +2244,11 @@ class ResearchSupervisor:
                     ),
                 ]
             )
+            if result is None:
+                return {
+                    **fallback,
+                    "coverage_note": "模型未返回结构化回答，已降级为本地证据。",
+                }
             response = PaperQuestionAnswer.model_validate(result)
             citations: list[dict[str, Any]] = []
             seen: set[tuple[int, str]] = set()
@@ -2185,9 +2357,10 @@ class ResearchSupervisor:
                 "coverage_note": coverage_note,
             }
         except Exception as exc:
+            logger.exception("Paper full-text question answering failed; using local evidence")
             return {
                 **fallback,
-                "coverage_note": f"全文 LLM 问答不可用，已降级为本地证据：{str(exc)[:240]}",
+                "coverage_note": f"全文 LLM 问答不可用，已降级为本地证据：{_model_failure_note(exc)}",
             }
 
     @staticmethod

@@ -9,6 +9,7 @@
     />
     <title>论文研读工作台</title>
     <link rel="icon" href="/ui-assets/favicon.svg" type="image/svg+xml" />
+    <script src="/ui-assets/theme-init.js"></script>
     <link rel="stylesheet" href="/ui-assets/styles.css" />
     <script src="/ui-assets/vendor/lucide.min.js" defer></script>
     <script src="/ui-assets/vendor/marked.umd.js" defer></script>
@@ -43,6 +44,16 @@
           <span class="status-dot" aria-hidden="true"></span>
           正在连接
         </span>
+        <button
+          id="themeToggle"
+          class="icon-button topbar-icon"
+          type="button"
+          aria-label="切换到夜间模式"
+          title="切换到夜间模式"
+        >
+          <i data-lucide="moon" class="theme-icon-moon" aria-hidden="true"></i>
+          <i data-lucide="sun" class="theme-icon-sun" aria-hidden="true"></i>
+        </button>
         <div class="menu-anchor">
           <button
             id="toolsMenuToggle"

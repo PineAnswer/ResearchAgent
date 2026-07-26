@@ -44,9 +44,48 @@
   --sidebar-expanded: 280px;
   --sidebar-collapsed: 72px;
   --inspector-width: 420px;
-  --ui-font: "Inter", "Segoe UI", "Microsoft YaHei", sans-serif;
-  --serif-font: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  /* 全站统一衬线体：正文、界面控件与标题共用同一衬线栈；代码块保留等宽字体。 */
+  --serif-font: "Noto Serif SC", "Songti SC", "SimSun", "Times New Roman", serif;
+  --ui-font: var(--serif-font);
+  --sans-font: var(--serif-font);
+  --display-font: var(--serif-font);
   --shadow-float: 0 16px 40px rgb(25 28 26 / 14%);
+}
+
+/* ---------- 夜间主题：核心色板（由 theme-init.js 与顶栏按钮切换 data-theme） ---------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #121614;
+  --paper: #1a1f1c;
+  --ink: #e7eae7;
+  --ink-soft: #c6ccc8;
+  --muted: #9aa39d;
+  --muted-light: #788179;
+  --line: #2b322e;
+  --line-strong: #3e4741;
+  --pine: #4e9c7f;
+  --pine-dark: #6cb497;
+  --pine-soft: #20302a;
+  --danger: #d98680;
+  --danger-soft: #372220;
+  --warning: #cfa75c;
+  --warning-soft: #332a19;
+  --blue: #8fa8a0;
+  --blue-soft: #212927;
+  --shadow-float: 0 16px 40px rgb(0 0 0 / 55%);
+}
+
+/* 主题切换按钮：日间显示月亮，夜间显示太阳 */
+.theme-icon-sun {
+  display: none;
+}
+
+[data-theme="dark"] .theme-icon-moon {
+  display: none;
+}
+
+[data-theme="dark"] .theme-icon-sun {
+  display: inline-block;
 }
 
 * {
@@ -237,7 +276,7 @@ h3,
   border-radius: 6px;
   color: var(--paper);
   background: var(--pine);
-  font-family: Georgia, serif;
+  font-family: var(--serif-font);
   font-size: 21px;
   line-height: 1;
 }
@@ -6842,4 +6881,311 @@ select:focus {
   .research-relation-note {
     grid-column: auto;
   }
+}
+
+/* ==========================================================================
+   夜间主题：对未走变量的硬编码颜色逐条覆盖。
+   PDF 页面本体（.pdf-page、页内高亮与批注锚点）保持白底阅读效果，不参与反色。
+   ========================================================================== */
+
+/* --- 顶栏、侧栏与通用控件 --- */
+[data-theme="dark"] .health-badge.is-error {
+  border-color: #5a2f2c;
+}
+
+[data-theme="dark"] .icon-button:hover {
+  background: #242b27;
+}
+
+[data-theme="dark"] .icon-button.bordered:hover,
+[data-theme="dark"] .secondary:hover {
+  border-color: #4a534d;
+}
+
+[data-theme="dark"] .sidebar {
+  background: #171c19;
+}
+
+[data-theme="dark"] .sidebar-research-library.is-active,
+[data-theme="dark"] .sidebar-search:focus-within,
+[data-theme="dark"] .start-task-card:hover,
+[data-theme="dark"] .strategy-option:has(input:checked),
+[data-theme="dark"] .candidate-card:hover,
+[data-theme="dark"] .project-list-item.is-selected {
+  border-color: #3f5a4e;
+}
+
+[data-theme="dark"] .sidebar-search {
+  background: rgb(255 255 255 / 5%);
+}
+
+[data-theme="dark"] .sidebar-search:focus-within {
+  box-shadow: 0 0 0 3px rgb(108 180 151 / 12%);
+}
+
+[data-theme="dark"] .project-bulk-bar,
+[data-theme="dark"] .projects-bulk-bar,
+[data-theme="dark"] .project-list-item.is-active {
+  border-color: #35403a;
+}
+
+[data-theme="dark"] .project-bulk-delete {
+  border-color: #6b3a37;
+}
+
+[data-theme="dark"] .project-list-menu-toggle[aria-expanded="true"] {
+  background: #2a3630;
+}
+
+[data-theme="dark"] .recent-history-popover {
+  background: rgb(26 31 28 / 98%);
+  box-shadow: 0 18px 38px rgb(0 0 0 / 45%);
+}
+
+[data-theme="dark"] .recent-history-item:focus-visible,
+[data-theme="dark"] .project-list-item:hover,
+[data-theme="dark"] .project-id:hover,
+[data-theme="dark"] .app-shell[data-sidebar="collapsed"] .sidebar-heading-label:hover,
+[data-theme="dark"] .app-shell[data-sidebar="collapsed"] .sidebar-heading-label:focus-visible,
+[data-theme="dark"] .app-shell[data-sidebar="collapsed"] .sidebar-heading-label[aria-expanded="true"] {
+  background: #242b27;
+}
+
+[data-theme="dark"] textarea::placeholder,
+[data-theme="dark"] input::placeholder {
+  color: #6f7873;
+}
+
+[data-theme="dark"] select:focus,
+[data-theme="dark"] .paper-chat-form textarea:focus,
+[data-theme="dark"] .evidence-citation:focus-visible {
+  box-shadow: 0 0 0 3px rgb(108 180 151 / 15%);
+}
+
+/* --- 玻璃拟态卡片：日间为白色半透明，夜间改为浅色低透明度浮层 --- */
+[data-theme="dark"] .start-task-card,
+[data-theme="dark"] .quality-filter-option,
+[data-theme="dark"] .strategy-option,
+[data-theme="dark"] .current-task,
+[data-theme="dark"] .run-panel,
+[data-theme="dark"] .review-search-summary,
+[data-theme="dark"] .filtered-candidates-panel,
+[data-theme="dark"] .research-workspace {
+  background: rgb(255 255 255 / 4%);
+}
+
+[data-theme="dark"] .start-task-card:hover,
+[data-theme="dark"] .candidate-card:hover {
+  box-shadow: 0 10px 24px rgb(0 0 0 / 35%);
+}
+
+/* --- 文献库 --- */
+[data-theme="dark"] .library-paper-badges .library-venue-badge {
+  color: #9dc3dd;
+  background: #1d2830;
+}
+
+[data-theme="dark"] .library-paper-badges .library-origin-badge {
+  color: #d4bb77;
+  background: #2e2817;
+}
+
+[data-theme="dark"] .library-recent-reading {
+  border-left-color: #4c7a65;
+  background: rgb(32 48 42 / 60%);
+}
+
+[data-theme="dark"] .library-evidence-card,
+[data-theme="dark"] .usage-guide-steps li,
+[data-theme="dark"] .aw-toc,
+[data-theme="dark"] .research-relation-item {
+  background: #1d2320;
+}
+
+/* --- 论文精读工作台（PDF 页面保持白底） --- */
+[data-theme="dark"] .paper-reader {
+  background: #0e1110;
+}
+
+[data-theme="dark"] .paper-reader-toolbar {
+  background: rgb(24 29 26 / 96%);
+}
+
+[data-theme="dark"] .paper-selection-bar {
+  border-bottom-color: #6a5a1e;
+  background: #302b12;
+}
+
+[data-theme="dark"] .paper-horizontal-scroller {
+  background: rgb(20 24 22 / 96%);
+  scrollbar-color: #4a534d #202623;
+}
+
+[data-theme="dark"] .paper-horizontal-scroller::-webkit-scrollbar-track {
+  background: #202623;
+}
+
+[data-theme="dark"] .paper-horizontal-scroller::-webkit-scrollbar-thumb {
+  border-color: #202623;
+  background: #4a534d;
+}
+
+[data-theme="dark"] .paper-chat-panel {
+  background: rgb(26 31 28 / 88%);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 35%);
+}
+
+[data-theme="dark"] .paper-page-link {
+  border-color: #3f5a4e;
+}
+
+[data-theme="dark"] .paper-annotation.is-target {
+  box-shadow: 0 0 0 3px rgb(108 180 151 / 20%);
+}
+
+[data-theme="dark"] .paper-annotation[role="button"]:hover {
+  border-color: #4a6a5c;
+}
+
+[data-theme="dark"] .paper-chat-bubble.is-user .paper-chat-bubble-body {
+  color: var(--canvas);
+}
+
+/* --- 候选审核 --- */
+[data-theme="dark"] .review-notice {
+  border-color: #6d5526;
+  color: #dfc07a;
+  background: #2f2712;
+}
+
+[data-theme="dark"] .candidate-card {
+  background: rgb(255 255 255 / 5%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 25%);
+}
+
+[data-theme="dark"] .candidate-card.is-excluded {
+  background: rgb(255 255 255 / 2%);
+}
+
+[data-theme="dark"] .candidate-year,
+[data-theme="dark"] .optional-label,
+[data-theme="dark"] .artifact-chip,
+[data-theme="dark"] .aw-ev-ref,
+[data-theme="dark"] .aw-markdown code {
+  background: #242b27;
+}
+
+[data-theme="dark"] .candidate-decision,
+[data-theme="dark"] .evidence-citation,
+[data-theme="dark"] .research-selection-card {
+  background: #20302a;
+}
+
+[data-theme="dark"] .candidate-rating-badge.is-q1 {
+  border-color: rgb(108 180 151 / 35%);
+}
+
+[data-theme="dark"] .candidate-rating-badge.is-nature {
+  border-color: rgb(217 134 128 / 35%);
+  color: #e09a94;
+  background: #33201e;
+}
+
+[data-theme="dark"] .candidate-identifiers {
+  background: rgb(255 255 255 / 3%);
+}
+
+[data-theme="dark"] .candidate-ranking-item {
+  border-color: rgb(108 180 151 / 28%);
+}
+
+[data-theme="dark"] .candidate-ranking-item.is-danger {
+  border-color: rgb(217 134 128 / 32%);
+}
+
+/* --- 弹层、遮罩与报告 --- */
+[data-theme="dark"] .usage-guide-backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+[data-theme="dark"] .usage-guide {
+  box-shadow: 0 24px 60px rgb(0 0 0 / 60%);
+}
+
+[data-theme="dark"] .inspector-backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+[data-theme="dark"] .project-inspector {
+  box-shadow: -12px 0 32px rgb(0 0 0 / 50%);
+}
+
+[data-theme="dark"] .aw-pre {
+  color: #c2c9c4;
+  background: #161b18;
+}
+
+[data-theme="dark"] .aw-markdown pre {
+  background: #161b18;
+}
+
+[data-theme="dark"] .aw-markdown th {
+  background: #202623;
+}
+
+[data-theme="dark"] .aw-gap {
+  background: #1c221f;
+}
+
+[data-theme="dark"] .evidence-citation {
+  border-color: #35403a;
+}
+
+[data-theme="dark"] .evidence-citation:focus-visible,
+[data-theme="dark"] .evidence-citation.warn:focus-visible {
+  color: var(--canvas);
+}
+
+[data-theme="dark"] .evidence-citation.ok {
+  border-color: #3a584c;
+}
+
+[data-theme="dark"] .evidence-citation.warn {
+  border-color: #5c3833;
+}
+
+[data-theme="dark"] .citation-hover-preview {
+  border-color: #3a4540;
+  background: rgb(26 31 28 / 98%);
+  box-shadow: 0 16px 36px rgb(0 0 0 / 50%);
+}
+
+/* --- 研究工作台与项目管理 --- */
+[data-theme="dark"] .research-workspace {
+  box-shadow: 0 10px 26px rgb(0 0 0 / 30%);
+}
+
+[data-theme="dark"] .research-selection-empty {
+  background: rgb(255 255 255 / 3%);
+}
+
+[data-theme="dark"] .research-selection-card {
+  border-color: #35403a;
+}
+
+[data-theme="dark"] .research-insight-badge.relation {
+  color: #c9bd9f;
+  background: #2b2820;
+}
+
+[data-theme="dark"] .research-relation-dialog {
+  box-shadow: 0 24px 60px rgb(0 0 0 / 60%);
+}
+
+[data-theme="dark"] .research-relation-dialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+[data-theme="dark"] .projects-manager-list .project-list-entry.is-archived {
+  background: rgb(255 255 255 / 3%);
 }

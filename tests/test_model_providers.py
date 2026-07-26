@@ -159,3 +159,17 @@ def test_claude_structured_output_uses_tool_strategy() -> None:
 
     assert isinstance(strategy, ToolStrategy)
     assert strategy.schema is LibraryAgentResponse
+
+
+def test_openai_structured_output_also_uses_tool_strategy() -> None:
+    """OpenAI-compatible relays commonly ignore native json_schema response
+    formats, which surfaces as a silent `structured_response=None`. Every
+    provider path must use the reliable tool-calling strategy instead."""
+    from research_agent.infrastructure.observable_chat_model import ObservableChatOpenAI
+
+    model = ObservableChatOpenAI(model="gpt-5.6", api_key="test-key")
+
+    strategy = structured_output_strategy(model, LibraryAgentResponse)
+
+    assert isinstance(strategy, ToolStrategy)
+    assert strategy.schema is LibraryAgentResponse

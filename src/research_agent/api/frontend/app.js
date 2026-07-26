@@ -443,6 +443,7 @@ const elements = {
 
 const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
 const USAGE_GUIDE_STORAGE_KEY = "research-agent.usage-guide-dismissed.v1";
+const THEME_STORAGE_KEY = "research-agent.theme";
 let projectPreviewAnchor = null;
 
 function iconNode(name) {
@@ -670,6 +671,36 @@ function maybeOpenUsageGuide() {
     // Show the guide when the browser does not expose persistent storage.
   }
   if (!dismissed) window.setTimeout(openUsageGuide, 0);
+}
+
+function applyTheme(theme, persist = false) {
+  const next = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  const toggle = document.getElementById("themeToggle");
+  if (toggle) {
+    const label = next === "dark" ? "切换到日间模式" : "切换到夜间模式";
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+  }
+  if (persist) {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      // Theme switching still works when browser storage is unavailable.
+    }
+  }
+}
+
+function initializeThemeToggle() {
+  // theme-init.js already applied the stored/system preference before paint;
+  // this call only syncs the toggle button label with that state.
+  applyTheme(document.documentElement.dataset.theme);
+  const toggle = document.getElementById("themeToggle");
+  if (!toggle) return;
+  toggle.addEventListener("click", () => {
+    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    applyTheme(next, true);
+  });
 }
 
 function readSidebarPreference() {
@@ -8231,6 +8262,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function initialize() {
+  initializeThemeToggle();
   initializeSidebar();
   showWorkspace("empty");
   refreshIcons();
