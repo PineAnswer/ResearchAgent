@@ -120,6 +120,33 @@ def test_research_chat_thread_scrolls_independently() -> None:
     assert "if (shouldFollowStream) scrollChatToBottom()" in script
 
 
+def test_research_workspace_supports_explicit_quotes_chat_sessions_and_source_notes() -> None:
+    script = Path("src/research_agent/api/frontend/app.js").read_text(encoding="utf-8")
+    styles = Path("src/research_agent/api/frontend/styles.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'cls: "research-selection-toolbar"' in script
+    assert '"引用到右侧对话"' in script
+    assert '"为选中文字添加笔记"' in script
+    assert '"取消引用并改为全局提问"' in script
+    assert "clearActiveSelection();" in script
+    assert "const chatId = state.researchChatId || newResearchChatId()" in script
+    assert "function researchChatSessions()" in script
+    assert "function researchChatHistoryFor(chatId)" in script
+    assert "function renderResearchChatArchives(container)" in script
+    assert '"每个对话独立保存，点击即可继续"' in script
+    assert "新建对话" in script
+    assert "researchConversationTitle(session)" in script
+    assert "researchConversationPreview(session)" in script
+    assert '"点击记录可返回并高亮原文"' in script
+    assert "if (note.selected_text) focusResearchSource(note)" in script
+    assert ".research-selection-toolbar {" in styles
+    assert ".research-selection-context[hidden]" in styles
+    assert ".research-chat-archive-preview {" in styles
+    assert "-webkit-line-clamp: 5" in styles
+
+
 def test_candidate_card_only_labels_simple_screening_reason() -> None:
     script = Path("src/research_agent/api/frontend/app.js").read_text(encoding="utf-8")
 
