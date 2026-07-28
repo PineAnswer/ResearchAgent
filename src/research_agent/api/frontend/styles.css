@@ -6755,7 +6755,7 @@ select:focus {
   gap: 3px;
 }
 
-.aw-section.is-note-target {
+[data-research-source="true"].is-note-target {
   border-radius: 8px;
   outline: 3px solid rgba(41, 96, 72, 0.18);
   background: rgba(228, 239, 233, 0.42);
