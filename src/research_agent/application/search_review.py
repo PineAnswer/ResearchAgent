@@ -73,30 +73,55 @@ def _default_candidate_reason(decision: str) -> str:
         return "论文主题与研究问题直接相关，建议纳入后续精读。"
     if decision == "exclude":
         return "论文主题与当前研究问题关联较弱，建议排除。"
-    return "标题和摘要信息不足，暂时无法确定相关性，建议人工判断。"
+    return "Agent 未提供筛选理由，建议人工判断。"
+
+
+def _fallback_reason_from_candidate(candidate: "PaperCandidate", *, decision: str) -> str:
+    title = str(candidate.title or "").strip()
+    abstract = str(candidate.abstract or "").strip()
+    first_sentence = ""
+    if abstract:
+        match = re.split(r"(?<=[.。！？\n])", abstract, maxsplit=1)
+        first_sentence = match[0].strip().rstrip(".").rstrip("。")
+    if first_sentence and len(first_sentence) >= 12:
+        if len(first_sentence) > 80:
+            first_sentence = first_sentence[:77].rstrip() + "…"
+        prefix = {"include": "入选：", "exclude": "排除：", "uncertain": ""}.get(decision, "")
+        return f"{prefix}{first_sentence}。"
+    if title:
+        short = title if len(title) <= 64 else title[:61].rstrip() + "…"
+        prefix = {
+            "include": "论文主题相关：",
+            "exclude": "论文关联较弱：",
+            "uncertain": "标题信息有限，建议人工判断：",
+        }.get(decision, "")
+        return f"{prefix}{short}"
+    return _default_candidate_reason(decision)
 
 
 def _compact_chinese_reason(reason: str, *, decision: str, limit: int = 64) -> str:
     normalized = " ".join(str(reason or "").split())
     normalized = re.sub(r"^(?:筛选依据|筛选理由|文章核心内容|核心内容)\s*[：:]\s*", "", normalized)
-    if not re.search(r"[\u3400-\u9fff]", normalized):
-        return _default_candidate_reason(decision)
+    if not re.search(r"[㐀-鿿]", normalized):
+        return ""
     sentence = re.split(r"(?<=[。！？；;])", normalized, maxsplit=1)[0].strip()
     if len(sentence) > limit:
         sentence = sentence[: limit - 1].rstrip("，,；;：:。！？ ") + "…"
     if sentence and sentence[-1] not in "。！？…":
         sentence += "。"
-    return sentence or _default_candidate_reason(decision)
-
+    return sentence
 
 def _candidate_reason(
-    candidate: PaperCandidate,
+    candidate: "PaperCandidate",
     *,
     decision: str,
     supplied_reason: str | None,
 ) -> str:
-    del candidate  # 理由由 Agent 提供；缺失或非中文时按筛选状态安全兜底。
-    return _compact_chinese_reason(supplied_reason or "", decision=decision)
+    if supplied_reason:
+        compact = _compact_chinese_reason(str(supplied_reason), decision=decision)
+        if compact:
+            return compact
+    return _fallback_reason_from_candidate(candidate, decision=decision)
 
 
 class SearchReviewService:
@@ -111,7 +136,7 @@ class SearchReviewService:
         max_queries_per_round: int = 3,
         search_limit: int = 10,
         min_papers: int = 1,
-        max_papers: int = 8,
+        max_papers: int = 10,
         venue_index: Any | None = None,
     ) -> None:
         self.service = service

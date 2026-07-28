@@ -9,7 +9,7 @@ def test_research_library_is_primary_navigation_with_smart_views() -> None:
 
     assert 'id="libraryToggle"' in markup
     assert 'id="researchLibraryToggle"' in markup
-    assert markup.index('id="libraryToggle"') < markup.index('id="researchLibraryToggle"')
+    assert markup.index('id="researchLibraryToggle"') < markup.index('id="libraryToggle"')
     assert 'id="allProjectsToggle"' not in markup
     assert "<h2>研究库</h2>" in markup
     assert 'data-project-status="active"' in markup

@@ -153,6 +153,8 @@ class ResearchRunLogger(BaseCallbackHandler):
         self._paper_order: dict[str, int] = {}
         self._paper_attempts: dict[str, int] = {}
         self._search_round = 0
+        self._total_raw_hits = 0
+        self._search_unique_counts: list[int] = []
         self.project_id: str | None = None
         self._run_record = {
             "run_id": self.run_id,
@@ -530,14 +532,22 @@ class ResearchRunLogger(BaseCallbackHandler):
                 for status in statuses
                 if isinstance(status, dict) and status.get("ok") is False
             )
+            raw_hits = sum(
+                int(s.get("count", 0))
+                for s in statuses
+                if isinstance(s, dict) and s.get("ok") is not False
+            )
+            self._total_raw_hits += raw_hits
+            self._search_unique_counts.append(len(papers))
             self.emit(
                 "search.results",
-                f"第{search_round}轮完成：合并去重后得到{len(papers)}篇候选论文",
+                f"第{search_round}轮检索完成",
                 {
                     "scope": "portfolio",
                     "round": search_round,
                     "queries": parsed.get("queries", inputs.get("queries", [])),
                     "count": len(papers),
+                    "raw_hits": raw_hits,
                     "partial_failures": failure_count,
                     "papers": papers,
                     "source_status": statuses,
@@ -592,16 +602,43 @@ class ResearchRunLogger(BaseCallbackHandler):
                 payload = artifact.get("payload", {})
                 iterations = payload.get("search_iteration_log", [])
                 candidates = payload.get("candidates", [])
+                rounds = len(iterations) or self._search_round
+                raw_total = self._total_raw_hits
+                unique_total = sum(self._search_unique_counts) if self._search_unique_counts else len(candidates)
+                decisions = payload.get("screening_decisions", {})
+                inc = sum(1 for v in decisions.values() if str(v).strip().casefold() in {"include", "included"})
+                exc = sum(1 for v in decisions.values() if str(v).strip().casefold() in {"exclude", "excluded"})
+                unc = len(decisions) - inc - exc
+                per_round = []
+                for entry in iterations:
+                    if isinstance(entry, dict) and entry.get("decisions"):
+                        per_round.append({
+                            "round": entry.get("round", 0),
+                            "decisions": str(entry["decisions"]),
+                        })
                 self.emit(
                     "search.summary",
-                    f"检索综合完成：共{len(iterations) or self._search_round}轮，形成{len(candidates)}篇候选论文",
+                    f"检索完成：{rounds} 轮共 {raw_total} 条命中 → 去重后 {unique_total} 篇 → 筛选后 {len(candidates)} 篇候选",
                     {
                         "scope": "portfolio",
-                        "rounds": len(iterations) or self._search_round,
+                        "rounds": rounds,
                         "candidate_count": len(candidates),
+                        "raw_hits": raw_total,
+                        "unique_count": unique_total,
                         "search_terms": payload.get("search_terms", []),
                         "search_iteration_log": iterations,
                         "coverage_gaps": payload.get("coverage_gaps", []),
+                    },
+                )
+                self.emit(
+                    "search.screening",
+                    f"初筛完成：纳入 {inc} 篇、排除 {exc} 篇、待定 {unc} 篇",
+                    {
+                        "scope": "portfolio",
+                        "include": inc,
+                        "exclude": exc,
+                        "uncertain": unc,
+                        "per_round": per_round,
                     },
                 )
                 return

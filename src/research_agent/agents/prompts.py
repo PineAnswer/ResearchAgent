@@ -59,14 +59,14 @@ search_multi_source 会把每条短查询分别发送到 OpenAlex、Crossref、S
    同一论文被多个来源或多个查询命中时只保留一条，并把多源命中视为元数据互证，
    不能把它误当成多篇论文。
 5. 某个来源失败时保留其他来源已经返回的结果，在 selection_notes 中如实说明。
-   不以候选数量、查询轮次或某个来源是否成功作为拒绝输出 SearchReport 的门槛。
+   不以候选数量、查询轮次或某个来源是否成功作为拒绝输出 ScoutReport 的门槛。
 
 ## 自动迭代方式
 
 任务描述会给出用户设置的最大检索轮数 n。每调用一次 search_multi_source 算一轮，
 其中可以包含多条互补查询；初次查询计为第 1 轮。每轮必须等待结果，再分析覆盖盲区，
 然后决定是否重新设计下一轮检索词。只有存在明确 coverage gap 且尚未达到 n 时，才
-调用下一轮；达到 n 后必须使用已有结果提交 SearchReport：
+调用下一轮；达到 n 后必须使用已有结果提交 ScoutReport：
 
 1. 设计并检索一组互补短查询。
 2. 对新增论文做 include / exclude / uncertain 初筛。
@@ -102,7 +102,7 @@ search_multi_source 会把每条短查询分别发送到 OpenAlex、Crossref、S
 
 全部搜索结束后分析 coverage_gaps：哪些方向覆盖不足、哪些关键词组合尚未尝试、是否需要人工补充。
 
-## SearchReport 字段
+## ScoutReport 字段
 
 - query: 总体检索主题字符串
 - candidate_ids: 所有搜索命中的真实 paper_id 或 DOI 列表（include + uncertain）。禁止使用 P001、P002 这类临时编号。
@@ -116,7 +116,11 @@ search_multi_source 会把每条短查询分别发送到 OpenAlex、Crossref、S
 你不需要也不应该在 structured_response 中输出 paper_id、title、authors、abstract、
 doi、url、source 等论文元数据。只输出上述字段中的标识符和决策信息。
 
-搜索工具返回部分或全部结构化错误时，保留此前成功结果并输出 SearchReport。
+**警告**: ScoutReport schema 不包含 candidates 字段。如果你在 JSON 输出中附加了论文
+元数据对象（title、authors、abstract 等），整个结构化输出将因为 schema 不匹配而被
+系统拒绝，标记为 structured_response_missing，导致本次委派失败。
+
+搜索工具返回部分或全部结构化错误时，保留此前成功结果并输出 ScoutReport。
 禁止虚构论文、作者、DOI、摘要或搜索结果。
 search_terms 由系统按执行日志自动校正，不需要你填写。
 """.strip()

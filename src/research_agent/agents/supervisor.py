@@ -147,18 +147,27 @@ PROJECT_QUESTION_PROMPT = """
 
 
 LIBRARY_AGENT_PROMPT = """
-你是可调用工具的 Ask Library Agent。你必须先拆解问题，再迭代检索文献库，必要时读取
-单篇上下文或追加更精确的段落检索。只允许依据工具返回的文献库材料回答，禁止使用外部
-知识补全事实。
+你是文献库研究助手。你拥有文献库的完整目录（附 library_id）和三件工具。
 
-工作规则：
-1. 先调用 search_library 判断相关论文和覆盖情况；不能直接作答。
-2. 再调用 retrieve_library_passages 获取能够支撑答案的原文，复杂问题可换角度迭代检索。
-3. 需要论文整体方法、局限或历史证据时调用 get_library_paper_context。
-4. cited_source_ids 只能填写工具结果中真实出现的 source_id，按首次使用顺序排列。
-5. answer 中每个事实性结论后必须写 [[source_id]]；没有来源支撑就明确说材料不足。
-6. 不得把论文标题、DOI、library_id 或自行编造的编号当作 source_id。
-7. coverage_note 说明已覆盖的范围和仍缺失的证据。
+## 工具
+
+- **search_library(query)**: 全文/元数据搜索文献库。适合定位特定主题、方法或关键词。
+- **retrieve_library_passages(query, library_ids)**: 从指定论文中获取带页码的段落实证。适合深入阅读和引用。
+- **get_library_paper_context(library_id)**: 获取单篇论文的方法、局限、历史证据等结构化上下文。
+
+## 工作方式
+
+1. **先判断问题性质**：
+   - 元问题（"库里有哪几类""这篇文章讲什么""覆盖了哪些方向"）→ 直接基于上方目录回答，不需要调用工具。
+   - 具体问题（"AIOps 现状如何""大模型和小模型各有什么优劣"）→ 从目录定位相关论文的 library_id，再调用 retrieve_library_passages 或 get_library_paper_context 深入阅读。
+
+2. 不要预设要查 N 篇。先搜一下看看有什么，再决定要不要深读。如果某个方向文献库覆盖不足，如实告知。
+
+3. **引用格式**：每引用一个工具返回的原文片段，在句中插入 [[source_id]]。所有 source_id 必须来自工具真实返回值，不得编造。
+
+4. 用中文回答。回答要有逻辑结构，不是片段堆砌。
+
+5. 回答末尾附一段 coverage_note，说明已覆盖范围和仍缺失的证据（格式：`<!-- coverage: ... -->`）。
 """.strip()
 
 
@@ -1396,33 +1405,16 @@ class ResearchSupervisor:
                 "mode": "failed",
             }
 
-    @staticmethod
-    def _library_answer_is_traceable(answer: str, source_ids: set[str]) -> bool:
-        factual_lines = []
-        for raw_line in answer.splitlines():
-            line = re.sub(r"^\s*(?:#{1,6}|[-*+] |\d+[.)]\s*)", "", raw_line).strip()
-            if len(line) < 8 or line.endswith(("：", ":")):
-                continue
-            if any(
-                phrase in line
-                for phrase in ("材料不足", "证据不足", "未检索到", "无法回答")
-            ):
-                continue
-            factual_lines.append(line)
-        return bool(factual_lines) and all(
-            any(f"[[{source_id}]]" in line for source_id in source_ids)
-            for line in factual_lines
-        )
-
     async def answer_library_question(
         self,
         library_ids: list[str],
         question: str,
     ) -> dict[str, Any]:
-        """Run a scoped, tool-using Agent over selected papers or the full library."""
+        """Run a tool-using Agent that first sees a library overview, then explores."""
         fallback = self.service.library.answer_library_question(library_ids, question)
         if self.graph is None:
             return {**fallback, "mode": "extractive"}
+        overview = self.service.library.build_library_overview(library_ids or None)
         toolset = build_library_tools(
             self.service.library,
             allowed_library_ids=library_ids or None,
@@ -1434,26 +1426,14 @@ class ResearchSupervisor:
             agent = create_agent(
                 model=model,
                 tools=toolset.tools,
-                system_prompt=LIBRARY_AGENT_PROMPT,
-                response_format=structured_output_strategy(model, LibraryAgentResponse),
+                system_prompt=(
+                    LIBRARY_AGENT_PROMPT
+                    + "\n\n## 文献库目录\n\n"
+                    + overview
+                ),
                 middleware=[
                     SerialToolExecutionMiddleware(),
-                    ModelCallLimitMiddleware(run_limit=10, exit_behavior="end"),
-                    ToolCallLimitMiddleware(
-                        tool_name="search_library",
-                        run_limit=3,
-                        exit_behavior="end",
-                    ),
-                    ToolCallLimitMiddleware(
-                        tool_name="retrieve_library_passages",
-                        run_limit=5,
-                        exit_behavior="end",
-                    ),
-                    ToolCallLimitMiddleware(
-                        tool_name="get_library_paper_context",
-                        run_limit=4,
-                        exit_behavior="end",
-                    ),
+                    ModelCallLimitMiddleware(run_limit=20, exit_behavior="end"),
                 ],
                 name="library-research-agent",
             )
@@ -1473,50 +1453,62 @@ class ResearchSupervisor:
                     ]
                 }
             )
-            structured = result.get("structured_response") if isinstance(result, dict) else None
-            response = LibraryAgentResponse.model_validate(structured)
-            cited_ids = list(dict.fromkeys(response.cited_source_ids))
-            answer_markers = set(re.findall(r"\[\[([^\]]+)\]\]", response.answer))
-            valid_ids = [
-                item
-                for item in cited_ids
-                if item in toolset.source_registry and item in answer_markers
-            ]
-            if answer_markers - set(valid_ids):
+            # Extract the agent's final text response
+            messages = result.get("messages", []) if isinstance(result, dict) else []
+            answer = ""
+            for msg in reversed(messages):
+                content = getattr(msg, "content", None)
+                if isinstance(content, str) and content.strip():
+                    answer = content.strip()
+                    break
+            if not answer:
                 return {**fallback, "mode": "extractive"}
-            if (
-                not response.answer.strip()
-                or not valid_ids
-                or not self._library_answer_is_traceable(
-                    response.answer,
-                    set(valid_ids),
-                )
-            ):
-                return {**fallback, "mode": "extractive"}
+
+            # Extract coverage note from HTML comment if present
+            coverage_match = re.search(
+                r"<!--\s*coverage\s*:\s*(.*?)\s*-->", answer, flags=re.DOTALL
+            )
+            coverage_note = coverage_match.group(1).strip() if coverage_match else ""
+            if coverage_match:
+                answer = answer[: coverage_match.start()].rstrip()
+
+            # Collect cited sources from [[source_id]] markers
+            marker_ids = list(dict.fromkeys(
+                re.findall(r"\[\[([^\]]+)\]\]", answer)
+            ))
             citations: list[dict[str, Any]] = []
-            answer = response.answer.strip()
-            for index, source_id in enumerate(valid_ids, start=1):
-                source = toolset.source_registry[source_id]
+            used_library_ids: list[str] = []
+            for index, source_id in enumerate(marker_ids, start=1):
+                source = toolset.source_registry.get(source_id)
+                if source is None:
+                    continue
                 answer = answer.replace(f"[[{source_id}]]", f"[{index}]")
                 quote = str(source.get("text") or "").strip()
+                lib_id = str(source.get("library_id") or "")
                 citations.append(
                     {
                         "citation": f"[{index}]",
                         "source_id": source_id,
                         "source_type": source.get("source_type"),
-                        "library_id": source.get("library_id"),
+                        "library_id": lib_id,
                         "title": source.get("title"),
                         "page": source.get("page"),
                         "attachment_id": source.get("attachment_id"),
                         "quote": quote[:800],
                     }
                 )
+                if lib_id and lib_id not in used_library_ids:
+                    used_library_ids.append(lib_id)
+
+            if not answer.strip():
+                return {**fallback, "mode": "extractive"}
+
             return {
                 "question": question.strip(),
                 "answer": answer,
                 "citations": citations,
-                "used_library_ids": response.used_library_ids,
-                "coverage_note": response.coverage_note,
+                "used_library_ids": used_library_ids,
+                "coverage_note": coverage_note,
                 "mode": "agent",
             }
         except Exception as exc:

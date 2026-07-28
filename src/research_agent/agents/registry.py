@@ -30,6 +30,7 @@ from research_agent.domain.models import (
     PaperCard,
     ReviewOutline,
     ReviewResult,
+    ScoutReport,
     SearchReport,
     SectionDraft,
     SynthesisReport,
@@ -100,7 +101,7 @@ def build_subagent_registry(
                 skill_contents["literature-search"],
             ),
             scout_tools,
-            SearchReport,
+            ScoutReport,
             scout_middleware,
         ),
         (

@@ -254,7 +254,7 @@ def test_supervisor_hides_unsafe_generic_write_tools(tmp_path, monkeypatch) -> N
     assert isinstance(scout_captured["middleware"][3], ExecutedSearchTrackingMiddleware)
     assert len(scout_captured["middleware"]) == 4
     assert isinstance(scout_captured["response_format"], dict)
-    assert scout_captured["response_format"]["title"] == "SearchReport"
+    assert scout_captured["response_format"]["title"] == "ScoutReport"
     synthesizer = next(
         config for config in agent_configs if config["name"] == "research-synthesizer"
     )

@@ -42,7 +42,7 @@ def _json_payload(value: Any) -> dict[str, Any]:
 
 
 SUBAGENT_SCHEMA_TOOLS = {
-    "literature-scout": "SearchReport",
+    "literature-scout": "ScoutReport",
     "paper-reader": "PaperCard",
     "research-synthesizer": "SynthesisReport",
     "evidence-reviewer": "ReviewResult",

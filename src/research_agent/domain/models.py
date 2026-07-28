@@ -102,6 +102,26 @@ class PaperCandidate(BaseModel):
     agent_screening_reason: str = ""
 
 
+class ScoutReport(BaseModel):
+    """Lightweight structured output for literature-scout.
+
+    The model MUST only output identifiers and decisions.  The system
+    automatically rebuilds the full ``candidates`` list from the raw
+    search-tool returns that are already captured in the execution trace.
+    Including full paper metadata (title, authors, abstract, etc.) in the
+    structured output will cause the payload to exceed token limits and
+    produce an unrecoverable ``structured_response_missing`` error.
+    """
+
+    query: str = ""
+    candidate_ids: list[str] = Field(default_factory=list)
+    screening_decisions: dict[str, str] = Field(default_factory=dict)
+    screening_reasons: dict[str, str] = Field(default_factory=dict)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    search_iteration_log: list[dict] = Field(default_factory=list)
+    selection_notes: list[str] = Field(default_factory=list)
+
+
 class SearchReport(BaseModel):
     query: str
     search_terms: list[str]

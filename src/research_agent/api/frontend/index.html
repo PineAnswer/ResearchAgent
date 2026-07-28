@@ -98,13 +98,13 @@
             <i data-lucide="file-plus-2" aria-hidden="true"></i>
             <span class="sidebar-label">开始新研究</span>
           </button>
-          <button id="libraryToggle" class="secondary sidebar-library" type="button" title="打开文献库">
-            <i data-lucide="library" aria-hidden="true"></i>
-            <span class="sidebar-label">文献库</span>
-          </button>
           <button id="researchLibraryToggle" class="secondary sidebar-research-library" type="button" title="打开研究库">
             <i data-lucide="folders" aria-hidden="true"></i>
             <span class="sidebar-label">研究库</span>
+          </button>
+          <button id="libraryToggle" class="secondary sidebar-library" type="button" title="打开文献库">
+            <i data-lucide="library" aria-hidden="true"></i>
+            <span class="sidebar-label">文献库</span>
           </button>
         </div>
 
@@ -121,17 +121,6 @@
             <i data-lucide="message-circle" aria-hidden="true"></i>
             <h2 class="sidebar-label">最近研究</h2>
           </button>
-          <div class="sidebar-heading-actions sidebar-label">
-            <button
-              id="refreshProjects"
-              class="icon-button"
-              type="button"
-              aria-label="刷新历史研究"
-              title="刷新历史研究"
-            >
-              <i data-lucide="refresh-cw" aria-hidden="true"></i>
-            </button>
-          </div>
         </div>
 
         <nav id="projectList" class="project-list" aria-live="polite">
@@ -694,7 +683,7 @@
 
         <section id="projectView" class="project-view" hidden>
           <header class="project-masthead">
-            <div class="project-masthead-copy">
+            <div class="project-masthead-left">
               <div class="project-meta">
                 <span id="stageBadge" class="stage-badge">创建</span>
                 <button id="copyProjectId" class="project-id" type="button" title="复制项目 ID">
@@ -702,32 +691,11 @@
                   <i data-lucide="copy" aria-hidden="true"></i>
                 </button>
               </div>
-              <h2 id="projectTopic"></h2>
-              <p id="projectQuestion" class="project-question"></p>
+              <h2 id="projectName" class="project-name-heading"></h2>
+              <p id="projectTopicLine" class="project-topic-line"></p>
             </div>
-            <div class="project-actions">
-              <button id="reloadProject" class="icon-button bordered" type="button" aria-label="刷新项目状态" title="刷新状态">
-                <i data-lucide="refresh-cw" aria-hidden="true"></i>
-              </button>
-              <button id="inspectorToggle" class="secondary icon-text-button" type="button" aria-controls="projectInspector" aria-expanded="false">
-                <i data-lucide="panel-right-open" aria-hidden="true"></i>
-                研究记录
-              </button>
-              <div class="menu-anchor">
-                <button id="projectMenuToggle" class="icon-button bordered" type="button" aria-label="打开项目操作" aria-haspopup="menu" aria-expanded="false" title="项目操作">
-                  <i data-lucide="ellipsis" aria-hidden="true"></i>
-                </button>
-                <div id="projectMenu" class="popover project-menu" role="menu" hidden>
-                  <button id="deleteProject" class="menu-item danger-menu-item" type="button" role="menuitem">
-                    <i data-lucide="trash-2" aria-hidden="true"></i>
-                    <span>删除项目</span>
-                  </button>
-                </div>
-              </div>
-            </div>
+            <ol id="stageStepper" class="stage-stepper" aria-label="研究进度"></ol>
           </header>
-
-          <ol id="stageStepper" class="stage-stepper" aria-label="研究进度"></ol>
 
           <section id="projectSummary" class="project-summary" hidden>
             <section id="primaryOutcome" class="primary-outcome" hidden></section>
@@ -774,18 +742,21 @@
           </section>
 
           <section id="reviewPanel" class="review-panel" hidden>
-            <div class="review-intro">
-              <div>
-                <h3>审核候选论文</h3>
-                <p>确认要进入精读的论文；如果结果偏离主题，可以手动加入 DOI 或调整候选集。</p>
+            <div class="review-status-bar">
+              <div class="review-status-stats">
+                <strong id="candidateCount">0</strong> <span>篇候选</span>
+                <span class="review-status-sep"></span>
+                <strong id="selectedCount">0</strong> <span>篇已选</span>
+                <span class="review-status-sep"></span>
+                <span id="reviewConstraints" class="review-constraints"></span>
               </div>
+              <button id="toggleSearchSummary" class="secondary compact-button" type="button" aria-expanded="true">
+                <i data-lucide="chevron-up" aria-hidden="true"></i>
+                检索详情
+              </button>
             </div>
 
-            <div class="review-search-summary" aria-label="当前候选集对应的检索信息">
-              <div class="review-summary-header">
-                <span class="review-summary-label">自动检索概览</span>
-                <p id="reviewConstraints" class="review-constraints"></p>
-              </div>
+            <div id="reviewSearchSummary" class="review-search-summary">
               <div id="reviewQueryRounds" class="review-query-rounds"></div>
             </div>
             <div id="reviewNotice" class="review-notice" role="status" hidden></div>
@@ -799,18 +770,18 @@
                   placeholder="按标题、作者或 DOI 筛选"
                 />
               </label>
-              <div class="review-stats" aria-label="候选集统计">
-                <div><strong id="candidateCount">0</strong><span>候选论文</span></div>
-                <div><strong id="selectedCount">0</strong><span>已选精读</span></div>
-              </div>
               <div class="selection-actions">
-                <button id="selectAll" class="text-button" type="button">全选本页</button>
-                <span aria-hidden="true"></span>
-                <button id="clearAll" class="text-button" type="button">取消本页</button>
-                <span aria-hidden="true"></span>
                 <button id="selectAllCandidates" class="text-button" type="button">全选全部</button>
-                <span aria-hidden="true"></span>
                 <button id="clearAllCandidates" class="text-button" type="button">取消全部</button>
+                <span aria-hidden="true" class="selection-actions-gap"></span>
+                <button id="selectAll" class="text-button" type="button">全选本页</button>
+                <button id="clearAll" class="text-button" type="button">取消本页</button>
+                <span class="toolbar-stats-inline">
+                  <strong id="toolbarCandidateCount">0</strong> 篇候选
+                  <span class="review-status-sep"></span>
+                  <strong id="toolbarSelectedCount">0</strong> 篇已选
+                </span>
+                <button id="acceptReview" class="primary compact-button" type="button">确认并开始研究</button>
               </div>
             </div>
 
@@ -882,7 +853,6 @@
                 <div>
                   <button id="undoReview" class="secondary" type="button" hidden>撤销上一步</button>
                   <button id="refineReview" class="secondary" type="button">更新候选集</button>
-                  <button id="acceptReview" class="primary" type="button">确认并开始研究</button>
                 </div>
               </div>
             </section>

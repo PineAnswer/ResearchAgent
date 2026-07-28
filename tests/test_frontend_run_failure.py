@@ -23,5 +23,5 @@ def test_frontend_shows_search_rounds_without_duplicate_elapsed_time() -> None:
     assert "第 ${data.round || 1} 轮检索" in script
     assert "检索词：${data.queries.join" in script
     assert "function sourceRoundSummary" in script
-    assert "检索综合完成：${data.rounds" in script
+    assert "检索完成：${data.rounds || 0} 轮共 ${raw} 条命中" in script
     assert ".activity-details" in styles

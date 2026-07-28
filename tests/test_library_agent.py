@@ -111,13 +111,16 @@ def test_ask_library_agent_searches_full_library_and_validates_citations(
                     )
                 )
                 source_id = passages[0]["source_id"]
+                from langchain_core.messages import AIMessage
                 return {
-                    "structured_response": {
-                        "answer": f"该文献强调回答应可追溯。 [[{source_id}]]",
-                        "cited_source_ids": [source_id],
-                        "used_library_ids": [paper.library_id],
-                        "coverage_note": "已检索整个文献库。",
-                    }
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                f"该文献强调回答应可追溯。 [[{source_id}]]\n\n"
+                                "<!-- coverage: 已检索整个文献库。 -->"
+                            )
+                        )
+                    ]
                 }
 
         return FakeAgent()
@@ -132,9 +135,10 @@ def test_ask_library_agent_searches_full_library_and_validates_citations(
     assert result["citations"][0]["library_id"] == paper.library_id
     assert result["citations"][0]["quote"].startswith("Every answer")
     assert result["answer"].endswith("[1]")
+    assert result["coverage_note"] == "已检索整个文献库。"
     assert {tool.name for tool in captured["tools"]} == {
         "search_library",
         "retrieve_library_passages",
         "get_library_paper_context",
     }
-    assert len(captured["middleware"]) == 5
+    assert len(captured["middleware"]) == 2

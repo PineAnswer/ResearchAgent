@@ -183,6 +183,7 @@ def test_run_logger_streams_structured_search_rounds_and_summary(tmp_path) -> No
         "search.results",
         "search.synthesizing",
         "search.summary",
+        "search.screening",
     ]
     assert portfolio[0]["data"]["round"] == 1
     assert portfolio[0]["data"]["queries"] == [
@@ -190,7 +191,9 @@ def test_run_logger_streams_structured_search_rounds_and_summary(tmp_path) -> No
         "small model anomaly detection",
     ]
     assert portfolio[1]["data"]["count"] == 1
-    assert portfolio[-1]["data"]["coverage_gaps"] == ["缺少在线推理研究"]
+    assert portfolio[3]["data"]["coverage_gaps"] == ["缺少在线推理研究"]
+    assert portfolio[4]["data"]["include"] == 0
+    assert portfolio[4]["data"]["exclude"] == 0
 
 
 def test_run_logger_labels_model_batches_as_serial_execution(tmp_path) -> None:

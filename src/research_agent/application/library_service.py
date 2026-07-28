@@ -1323,6 +1323,40 @@ class LibraryService:
             )
         return {"rows": rows}
 
+    def build_library_overview(
+        self, library_ids: list[str] | None = None
+    ) -> str:
+        """Generate a Markdown directory of the library for agent orientation.
+
+        Lists every paper with its library_id, title, year, authors, and a
+        short abstract excerpt so the agent can decide what to search for and
+        read before making any tool calls.
+        """
+        papers = self.repository.list_library_papers(limit=500)
+        if library_ids:
+            allowed = set(library_ids)
+            papers = [p for p in papers if p.library_id in allowed]
+        if not papers:
+            return "文献库为空。"
+        lines: list[str] = [
+            f"文献库共收录 {len(papers)} 篇论文：",
+            "",
+        ]
+        for paper in papers:
+            authors = ", ".join(paper.authors[:3])
+            if len(paper.authors) > 3:
+                authors += " 等"
+            year = f" ({paper.year})" if paper.year else ""
+            abstract = paper.abstract.strip()
+            if len(abstract) > 240:
+                abstract = abstract[:237].rstrip() + "…"
+            lines.append(
+                f"- **[{paper.library_id}]** {paper.title}{year} — {authors}"
+            )
+            if abstract:
+                lines.append(f"  {abstract}")
+        return "\n".join(lines)
+
     def answer_library_question(
         self, library_ids: list[str], question: str
     ) -> dict[str, Any]:
@@ -1349,10 +1383,16 @@ class LibraryService:
                     "quote": excerpt,
                 }
             )
-        answer = (
-            "\n\n".join(snippets)
-            or "文献库中暂时没有可用于回答的全文、摘要、笔记或证据。"
-        )
+        if snippets:
+            answer = (
+                f"根据关键词匹配，文献库中与「{clean_question}」最相关的材料如下："
+                + "\n\n"
+                + "\n\n".join(snippets)
+                + "\n\n"
+                + "> 当前为离线检索模式，未经过模型综合。如需更深入的分析，请确认模型服务正常后重新提问。"
+            )
+        else:
+            answer = "文献库中暂时没有可用于回答的全文、摘要、笔记或证据。"
         return {
             "question": clean_question,
             "answer": answer,

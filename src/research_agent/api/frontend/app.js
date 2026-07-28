@@ -18,7 +18,7 @@ const PROGRESS_STAGES = [
   { key: "create", label: "创建项目", stages: ["CREATED"] },
   {
     key: "search",
-    label: "检索与筛选",
+    label: "检索筛选",
     stages: ["SEARCHED", "SEARCH_REVIEW_PENDING", "SCREENED"],
   },
   { key: "extract", label: "精读论文", stages: ["EXTRACTED"] },
@@ -365,8 +365,8 @@ const elements = {
   projectView: byId("projectView"),
   stageBadge: byId("stageBadge"),
   projectIdLabel: byId("projectIdLabel"),
-  projectTopic: byId("projectTopic"),
-  projectQuestion: byId("projectQuestion"),
+  projectName: byId("projectName"),
+  projectTopicLine: byId("projectTopicLine"),
   copyProjectId: byId("copyProjectId"),
   reloadProject: byId("reloadProject"),
   inspectorToggle: byId("inspectorToggle"),
@@ -392,6 +392,10 @@ const elements = {
   selectedCount: byId("selectedCount"),
   reviewConstraints: byId("reviewConstraints"),
   reviewQueryRounds: byId("reviewQueryRounds"),
+  reviewSearchSummary: byId("reviewSearchSummary"),
+  toolbarCandidateCount: byId("toolbarCandidateCount"),
+  toolbarSelectedCount: byId("toolbarSelectedCount"),
+  toggleSearchSummary: byId("toggleSearchSummary"),
   supplementalQueries: byId("supplementalQueries"),
   reviewNotice: byId("reviewNotice"),
   candidateFilter: byId("candidateFilter"),
@@ -445,6 +449,12 @@ const SIDEBAR_STORAGE_KEY = "research-agent.sidebar-state";
 const USAGE_GUIDE_STORAGE_KEY = "research-agent.usage-guide-dismissed.v1";
 let projectPreviewAnchor = null;
 
+function escapeHTML(value) {
+  const div = document.createElement("div");
+  div.appendChild(document.createTextNode(value));
+  return div.innerHTML;
+}
+
 function iconNode(name) {
   const icon = document.createElement("i");
   icon.setAttribute("data-lucide", name);
@@ -483,7 +493,7 @@ function setPopover(toggle, popover, open) {
 
 function closeMenus() {
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
-  setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  if (elements.projectMenuToggle && elements.projectMenu) setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   closeConversationMenus();
   closeRecentHistoryPopover();
 }
@@ -726,7 +736,7 @@ function setInspectorTab(tab) {
 }
 
 function openInspector(tab = "process") {
-  if (!state.projectId) return;
+  if (!state.projectId || !elements.inspectorToggle) return;
   state.inspectorPreviousFocus = document.activeElement;
   state.inspectorOpen = true;
   setInspectorTab(tab);
@@ -858,7 +868,7 @@ function setBusy(busy) {
     elements.acceptReview,
     elements.reloadProject,
     elements.deleteProject,
-  ].forEach((button) => {
+  ].filter(Boolean).forEach((button) => {
     button.disabled = busy;
   });
   elements.continueResearch.disabled =
@@ -4409,18 +4419,23 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
   state.project = project;
   state.projectId = project.project_id;
   showWorkspace("project");
+  window.setTimeout(syncToolbarStickyTop, 0);
   elements.projectIdLabel.textContent = project.project_id;
-  const displayName = project.name || project.topic || "未命名研究";
-  elements.projectTopic.textContent = displayName;
-  elements.projectQuestion.textContent = project.research_question || "";
-  // Show topic as subtitle when name differs from topic
-  const existingSub = document.querySelector(".project-topic-subtitle");
-  if (existingSub) existingSub.remove();
-  if (project.name && project.topic && project.name !== project.topic) {
-    const topicSub = document.createElement("p");
-    topicSub.className = "project-topic-subtitle";
-    topicSub.textContent = `研究主题：${project.topic}`;
-    elements.projectTopic.after(topicSub);
+  const name = project.name || "";
+  const topic = project.topic || "未命名研究";
+  const question = project.research_question || "";
+  const nameEl = elements.projectName;
+  if (name) {
+    nameEl.textContent = name;
+    nameEl.hidden = false;
+  } else {
+    nameEl.hidden = true;
+  }
+  const topicLine = elements.projectTopicLine;
+  if (question && topic !== question) {
+    topicLine.innerHTML = `<strong>${escapeHTML(topic)}</strong>：${escapeHTML(question)}`;
+  } else {
+    topicLine.textContent = question || topic;
   }
   const needsReviewRevision =
     project.stage === "REVIEWED"
@@ -5018,17 +5033,12 @@ function renderNarrativeReviewHTML(payload) {
   }
   // Section bodies
   sections.forEach((s, index) => {
-    const cited = (s.cited_evidence||[]);
     parts.push(h('div',{cls:'aw-section', id:`${anchorPrefix}-${s.section_id||index}`}, [
       h('h4',{cls:'aw-section-heading'},s.heading||''),
       renderMarkdown(
         stripDuplicateLeadingMarkdownHeading(s.content || "", s.heading || ""),
         "aw-content aw-markdown",
       ),
-      cited.length ? h('div',{cls:'aw-cited'}, [
-        h('span',{cls:'muted'},'引用: '),
-        ...cited.map(eid => renderEvidenceCitation(eid)),
-      ]) : null,
       // Subsections
       ...(s.subsections||[]).map(sub => h('div',{cls:'aw-subsection'}, [
         h('h5',{},sub.heading||''),
@@ -5227,11 +5237,10 @@ function effectiveRecoveryStage(snapshot) {
   return "REVIEWED";
 }
 
-function metricCard(label, value, hint = "") {
+function metricCard(label, value, _hint = "") {
   return h("div", { cls: "summary-card" }, [
     h("strong", {}, String(value)),
     h("span", {}, label),
-    hint ? h("small", {}, hint) : null,
   ]);
 }
 
@@ -5782,8 +5791,12 @@ function renderProjectSummary(snapshot) {
       project.stage,
     );
   }
+  // COMPLETED: hide task prompt and metric strip, narrative review speaks for itself
+  const isCompleted = project.stage === "COMPLETED";
+  elements.currentTask.hidden = isCompleted;
   elements.nextActionTitle.textContent = title;
   elements.nextActionText.textContent = text;
+  elements.resultHighlights.hidden = isCompleted || metrics.length === 0;
 
   const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
   const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
@@ -5806,7 +5819,7 @@ function renderProjectSummary(snapshot) {
   elements.resultHighlights.replaceChildren(
     ...metrics.map(([label, value, hint]) => metricCard(label, value, hint)),
   );
-  elements.resultHighlights.hidden = metrics.length === 0;
+  if (!isCompleted) elements.resultHighlights.hidden = metrics.length === 0;
 
   renderOutcome(snapshot);
 }
@@ -6071,7 +6084,7 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
     state.activeRunId = null;
     setBusy(false);
   }
-  elements.currentTask.hidden = continuationMode(snapshot) === "screening";
+  elements.currentTask.hidden = snapshot.project?.stage === "COMPLETED" || continuationMode(snapshot) === "screening";
   elements.runPanel.hidden = !keepRunPanel;
 }
 
@@ -6255,60 +6268,37 @@ function renderCandidateCards() {
     heading.append(title, meta);
     head.append(checkbox, heading);
 
-    const venue = document.createElement("div");
-    venue.className = "candidate-venue";
-    const venueHeading = document.createElement("div");
-    venueHeading.className = "candidate-venue-heading";
-    const venueType = document.createElement("span");
-    venueType.className = "candidate-venue-type";
-    venueType.textContent = candidate.venue_type === "conference"
-      ? "会议"
-      : candidate.venue_type === "journal"
-        ? "期刊"
-        : "出版物";
-    const venueName = document.createElement("strong");
-    venueName.textContent = candidate.venue || "期刊或会议信息未返回";
-    venueHeading.append(venueType, venueName);
+    const body = document.createElement("div");
+    body.className = "candidate-body";
 
-    const ratingBadges = document.createElement("div");
-    ratingBadges.className = "candidate-rating-badges";
-    const addRatingBadge = (text, className = "") => {
-      if (!text) return;
-      const badge = document.createElement("span");
-      badge.className = `candidate-rating-badge ${className}`.trim();
-      badge.textContent = text;
-      ratingBadges.append(badge);
-    };
-    if (candidate.ccf_rank) {
-      addRatingBadge(`CCF-${candidate.ccf_rank} · ${candidate.ccf_year || "年份未知"}版`, "is-ccf");
+    const venueEl = document.createElement("div");
+    venueEl.className = "candidate-venue";
+    const venueName = (candidate.venue || "").trim();
+    const hasRating = candidate.ccf_rank || candidate.sci_quartile || candidate.impact_factor != null;
+    if (venueName || hasRating) {
+      const venueLine = document.createElement("div");
+      venueLine.className = "candidate-venue-line";
+      if (venueName) {
+        const nameSpan = document.createElement("strong");
+        nameSpan.textContent = venueName;
+        venueLine.append(nameSpan);
+      }
+      const badges = [];
+      if (candidate.ccf_rank) badges.push(`CCF-${candidate.ccf_rank}`);
+      if (candidate.sci_quartile) badges.push(`SCI ${candidate.sci_quartile}`);
+      if (candidate.impact_factor != null) badges.push(`IF ${Number(candidate.impact_factor).toFixed(2).replace(/\\.00$/, "")}`);
+      if (badges.length) {
+        const badgeWrap = document.createElement("span");
+        badgeWrap.className = "candidate-venue-badges";
+        badges.forEach((b) => {
+          const pill = document.createElement("span");
+          pill.textContent = b;
+          badgeWrap.append(pill);
+        });
+        venueLine.append(document.createTextNode(" "), badgeWrap);
+      }
+      venueEl.append(venueLine);
     }
-    if (candidate.sci_quartile) {
-      addRatingBadge(
-        `JCR ${candidate.sci_quartile}${candidate.index_name ? ` · ${candidate.index_name}` : ""}`,
-        candidate.sci_quartile === "Q1" ? "is-q1" : "",
-      );
-    }
-    if (candidate.nature_portfolio) addRatingBadge("Nature Portfolio", "is-nature");
-    if (candidate.impact_factor != null) {
-      addRatingBadge(`IF ${candidate.impact_factor} · ${candidate.impact_factor_year || "年份未知"}`);
-    }
-
-    const venueExplanation = document.createElement("p");
-    venueExplanation.className = "candidate-venue-explanation";
-    venueExplanation.textContent = candidate.venue_rating_explanation
-      || "评级库未提供可靠匹配，不推断分区、影响因子或会议评级。";
-    const ratingSourceUrl = safeHttpUrl(candidate.venue_rating_source_url);
-    if (ratingSourceUrl) {
-      const sourceLink = document.createElement("a");
-      sourceLink.href = ratingSourceUrl;
-      sourceLink.target = "_blank";
-      sourceLink.rel = "noopener noreferrer";
-      sourceLink.textContent = candidate.venue_rating_source_label || "查看评级来源";
-      venueExplanation.append(document.createTextNode(" · "), sourceLink);
-    }
-    venue.append(venueHeading);
-    if (ratingBadges.childElementCount) venue.append(ratingBadges);
-    venue.append(venueExplanation);
 
     const authors = document.createElement("p");
     authors.className = "candidate-authors";
@@ -6410,10 +6400,10 @@ function renderCandidateCards() {
     libraryButton.addEventListener("click", () => saveCandidateToLibrary(candidate));
     identifiers.append(libraryButton);
 
-    const body = document.createElement("div");
-    body.className = "candidate-body";
+    if (venueEl.childElementCount) body.append(venueEl);
+    body.append(authorsRow);
     if (ranking.childElementCount) body.append(ranking);
-    body.append(authorsRow, venue, reason);
+    body.append(reason);
     body.append(abstractSection);
     card.append(head, body, identifiers);
     elements.candidateGrid.append(card);
@@ -6500,6 +6490,8 @@ function updateReviewStats(delta = 0) {
   )).length;
   const selectedCount = persistedSelected + manualSelected;
   elements.selectedCount.textContent = String(selectedCount);
+  if (elements.toolbarCandidateCount) elements.toolbarCandidateCount.textContent = String(candidateTotal);
+  if (elements.toolbarSelectedCount) elements.toolbarSelectedCount.textContent = String(selectedCount);
   const systemLimit = state.review?.candidate_set?.max_papers ?? 8;
   elements.paperCapacity.textContent = `已选 ${selectedCount} 篇 / 系统最多 ${systemLimit} 篇`;
 }
@@ -6922,6 +6914,7 @@ function renderReviewQueryRounds(snapshot) {
 
 function renderReview(review, { preserveManual = false } = {}) {
   state.review = review;
+  window.setTimeout(syncToolbarStickyTop, 0);
   if (!preserveManual) {
     state.manualCandidates = new Map();
     state.reviewSelectionDirty = false;
@@ -7242,19 +7235,26 @@ function runtimeEventIdentity(event, index = 0) {
 
 function sourceRoundSummary(statuses = []) {
   const summary = new Map();
+  let rawTotal = 0;
   statuses.forEach((status) => {
     const source = status?.source;
     if (!source) return;
     const current = summary.get(source) || { count: 0, failed: false };
     if (status.ok === false) current.failed = true;
-    else current.count += Number(status.count || 0);
+    else {
+      const count = Number(status.count || 0);
+      current.count += count;
+      rawTotal += count;
+    }
     summary.set(source, current);
   });
-  return [...summary.entries()].map(([source, value]) => (
+  const lines = [...summary.entries()].map(([source, value]) => (
     value.failed && value.count === 0
       ? `${source}：本轮跳过`
       : `${source}：${value.count} 篇${value.failed ? "（部分查询跳过）" : ""}`
   ));
+  if (rawTotal > 0) lines.push(`合计：${rawTotal} 条原始命中`);
+  return lines;
 }
 
 function appendRuntimeEvent(event, index = 0) {
@@ -7274,24 +7274,44 @@ function appendRuntimeEvent(event, index = 0) {
       kind: "progress",
     };
   } else if (event.type === "search.results") {
+    const sourceLines = sourceRoundSummary(data.source_status);
     activity = {
-      message: `第 ${data.round || 1} 轮检索完成：去重后 ${data.count || 0} 篇`,
-      details: sourceRoundSummary(data.source_status),
+      message: `第 ${data.round || 1} 轮检索完成`,
+      details: sourceLines,
       kind: "complete",
     };
   } else if (event.type === "search.synthesizing") {
     activity = {
       message: `第 ${data.round || 1} 轮综合分析`,
-      details: [`正在比较 ${data.candidate_count || 0} 篇候选论文并检查覆盖盲区`],
+      details: ["正在分析覆盖盲区并对新增论文进行初筛"],
       kind: "progress",
     };
   } else if (event.type === "search.summary") {
+    const raw = data.raw_hits || 0;
+    const unique = data.unique_count || data.candidate_count || 0;
+    const final = data.candidate_count || 0;
     activity = {
-      message: `检索综合完成：${data.rounds || 0} 轮，共 ${data.candidate_count || 0} 篇候选论文`,
+      message: `检索完成：${data.rounds || 0} 轮共 ${raw} 条命中 → 去重后 ${unique} 篇 → 筛选后 ${final} 篇候选`,
       details: [
         data.search_terms?.length ? `综合检索词：${data.search_terms.join("；")}` : "",
         data.coverage_gaps?.length ? `仍需关注：${data.coverage_gaps.join("；")}` : "覆盖分析已完成",
       ],
+      kind: "complete",
+    };
+  } else if (event.type === "search.screening") {
+    const inc = data.include || 0;
+    const exc = data.exclude || 0;
+    const unc = data.uncertain || 0;
+    const perRound = data.per_round || [];
+    const details = [
+      `纳入 ${inc} 篇 · 排除 ${exc} 篇 · 待定 ${unc} 篇`,
+    ];
+    perRound.forEach((entry) => {
+      details.push(`第 ${entry.round} 轮：${entry.decisions}`);
+    });
+    activity = {
+      message: "初筛结果",
+      details,
       kind: "complete",
     };
   }
@@ -8029,7 +8049,7 @@ elements.newProjectForm.addEventListener("submit", async (event) => {
   toggleNewProject(false);
   await startResearch(name, topic, question, reviewLimits);
 });
-elements.refreshProjects.addEventListener("click", loadProjects);
+if (elements.refreshProjects) elements.refreshProjects.addEventListener("click", loadProjects);
 elements.toggleProjectSelection.addEventListener("click", () => {
   setProjectSelectionMode(!state.projectSelectionMode);
 });
@@ -8045,8 +8065,28 @@ elements.projectLookupForm.addEventListener("submit", (event) => {
   closeMenus();
   loadProject(projectId);
 });
-elements.reloadProject.addEventListener("click", () => loadProject(state.projectId, false, true));
-elements.deleteProject.addEventListener("click", deleteCurrentProject);
+// Keep sticky elements offset in sync with masthead height
+function syncToolbarStickyTop() {
+  const masthead = document.querySelector(".project-masthead");
+  if (!masthead) return;
+  const topPx = masthead.offsetHeight;
+  document.querySelectorAll(".review-toolbar, .metric-strip").forEach((el) => {
+    el.style.top = topPx + "px";
+  });
+}
+window.addEventListener("resize", syncToolbarStickyTop);
+window.addEventListener("scroll", syncToolbarStickyTop, { passive: true });
+// Run after any DOM mutation that might change masthead height
+if (typeof ResizeObserver !== "undefined") {
+  const stickyObserver = new ResizeObserver(() => syncToolbarStickyTop());
+  window.setTimeout(() => {
+    const masthead = document.querySelector(".project-masthead");
+    if (masthead) stickyObserver.observe(masthead);
+  }, 500);
+}
+
+if (elements.reloadProject) elements.reloadProject.addEventListener("click", () => loadProject(state.projectId, false, true));
+if (elements.deleteProject) elements.deleteProject.addEventListener("click", deleteCurrentProject);
 elements.copyProjectId.addEventListener("click", async () => {
   if (!state.projectId) return;
   try {
@@ -8055,6 +8095,14 @@ elements.copyProjectId.addEventListener("click", async () => {
   } catch {
     notify("复制失败，请手动选择项目 ID", true);
   }
+});
+elements.toggleSearchSummary.addEventListener("click", () => {
+  const hidden = elements.reviewSearchSummary.hidden;
+  elements.reviewSearchSummary.hidden = !hidden;
+  elements.toggleSearchSummary.setAttribute("aria-expanded", String(hidden));
+  const icon = elements.toggleSearchSummary.querySelector("i");
+  if (icon) icon.setAttribute("data-lucide", hidden ? "chevron-up" : "chevron-down");
+  refreshIcons();
 });
 elements.candidateFilter.addEventListener("input", () => {
   window.clearTimeout(state.reviewSearchTimer);
@@ -8129,7 +8177,7 @@ elements.brandHome.addEventListener("click", clearProjectView);
 elements.homeToggle.addEventListener("click", clearProjectView);
 elements.toolsMenuToggle.addEventListener("click", () => {
   const open = elements.toolsMenu.hidden;
-  setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  if (elements.projectMenuToggle && elements.projectMenu) setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   setPopover(elements.toolsMenuToggle, elements.toolsMenu, open);
   if (open) elements.toolsMenu.querySelector("a, button, input")?.focus();
 });
@@ -8137,27 +8185,31 @@ elements.usageGuideOpen.addEventListener("click", openUsageGuide);
 elements.usageGuideClose.addEventListener("click", () => closeUsageGuide());
 elements.usageGuideDismiss.addEventListener("click", () => closeUsageGuide());
 elements.usageGuideBackdrop.addEventListener("click", () => closeUsageGuide());
-elements.projectMenuToggle.addEventListener("click", () => {
-  const open = elements.projectMenu.hidden;
-  setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
-  setPopover(elements.projectMenuToggle, elements.projectMenu, open);
-  if (open) elements.deleteProject.focus();
-});
-elements.inspectorToggle.addEventListener("click", () => {
-  if (state.inspectorOpen) closeInspector();
-  else openInspector("process");
-});
-elements.closeInspector.addEventListener("click", () => closeInspector());
-elements.inspectorBackdrop.addEventListener("click", () => closeInspector());
-elements.processTab.addEventListener("click", () => setInspectorTab("process"));
-elements.artifactsTab.addEventListener("click", () => setInspectorTab("artifacts"));
+if (elements.projectMenuToggle && elements.projectMenu) {
+  elements.projectMenuToggle.addEventListener("click", () => {
+    const open = elements.projectMenu.hidden;
+    setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
+    setPopover(elements.projectMenuToggle, elements.projectMenu, open);
+    if (open && elements.deleteProject) elements.deleteProject.focus();
+  });
+}
+if (elements.inspectorToggle) {
+  elements.inspectorToggle.addEventListener("click", () => {
+    if (state.inspectorOpen) closeInspector();
+    else openInspector("process");
+  });
+  elements.closeInspector.addEventListener("click", () => closeInspector());
+  elements.inspectorBackdrop.addEventListener("click", () => closeInspector());
+  elements.processTab.addEventListener("click", () => setInspectorTab("process"));
+  elements.artifactsTab.addEventListener("click", () => setInspectorTab("artifacts"));
+}
 
 document.addEventListener("click", (event) => {
   if (!elements.toolsMenuToggle.closest(".menu-anchor").contains(event.target)) {
     setPopover(elements.toolsMenuToggle, elements.toolsMenu, false);
   }
-  if (!elements.projectMenuToggle.closest(".menu-anchor").contains(event.target)) {
-    setPopover(elements.projectMenuToggle, elements.projectMenu, false);
+  if (elements.projectMenuToggle && !elements.projectMenuToggle.closest(".menu-anchor").contains(event.target)) {
+    if (elements.projectMenuToggle && elements.projectMenu) setPopover(elements.projectMenuToggle, elements.projectMenu, false);
   }
   if (!event.target.closest(".project-list-entry")) closeConversationMenus();
   const recentPopover = document.getElementById("recentHistoryPopover");
@@ -8224,7 +8276,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const toolsWereOpen = !elements.toolsMenu.hidden;
-  const projectMenuWasOpen = !elements.projectMenu.hidden;
+  const projectMenuWasOpen = elements.projectMenuToggle && elements.projectMenu && !elements.projectMenu.hidden;
   closeMenus();
   if (projectMenuWasOpen) elements.projectMenuToggle.focus();
   else if (toolsWereOpen) elements.toolsMenuToggle.focus();
