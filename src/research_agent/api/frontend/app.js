@@ -314,7 +314,6 @@ const elements = {
   libraryImportTags: byId("libraryImportTags"),
   importLibrary: byId("importLibrary"),
   cancelNewProject: byId("cancelNewProject"),
-  cancelNewProjectSecondary: byId("cancelNewProjectSecondary"),
   emptyNewProject: byId("emptyNewProject"),
   emptyResearchLibrary: byId("emptyResearchLibrary"),
   emptyOpenLibrary: byId("emptyOpenLibrary"),
@@ -3364,7 +3363,7 @@ function projectConversation(project) {
 }
 
 function projectDisplayTitle(project) {
-  return project?.name || projectConversation(project)?.title || project?.topic || "未命名研究";
+  return projectConversation(project)?.title || project?.name || project?.topic || "未命名研究";
 }
 
 function projectListDisplayStage(project) {
@@ -4421,7 +4420,7 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
   showWorkspace("project");
   window.setTimeout(syncToolbarStickyTop, 0);
   elements.projectIdLabel.textContent = project.project_id;
-  const name = project.name || "";
+  const name = projectDisplayTitle(project);
   const topic = project.topic || "未命名研究";
   const question = project.research_question || "";
   const nameEl = elements.projectName;
@@ -5793,11 +5792,6 @@ function renderProjectSummary(snapshot) {
   }
   // COMPLETED: hide task prompt and metric strip, narrative review speaks for itself
   const isCompleted = project.stage === "COMPLETED";
-  elements.currentTask.hidden = isCompleted;
-  elements.nextActionTitle.textContent = title;
-  elements.nextActionText.textContent = text;
-  elements.resultHighlights.hidden = isCompleted || metrics.length === 0;
-
   const latestSearch = latestArtifact(snapshot, "SearchReport")?.payload;
   const latestScreening = latestArtifact(snapshot, "ScreeningDecision")?.payload;
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
@@ -5816,6 +5810,11 @@ function renderProjectSummary(snapshot) {
     ["证据摘录", countFindings(snapshot), "可追踪的研究证据"],
     ["综述章节", narrative?.sections?.length || 0, "最终正文"],
   ].filter(([, value]) => metricsAvailable && value > 0);
+
+  elements.currentTask.hidden = isCompleted;
+  elements.nextActionTitle.textContent = title;
+  elements.nextActionText.textContent = text;
+  elements.resultHighlights.hidden = isCompleted || metrics.length === 0;
   elements.resultHighlights.replaceChildren(
     ...metrics.map(([label, value, hint]) => metricCard(label, value, hint)),
   );
@@ -8017,7 +8016,6 @@ elements.cancelResearchRelation.addEventListener("click", () => {
   elements.researchRelationDialog.close();
 });
 elements.cancelNewProject.addEventListener("click", () => toggleNewProject(false));
-elements.cancelNewProjectSecondary.addEventListener("click", () => toggleNewProject(false));
 elements.newProjectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const name = elements.nameInput.value.trim();

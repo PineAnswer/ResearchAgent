@@ -166,7 +166,6 @@
           <header class="workspace-heading">
             <div>
               <h2>新建研究</h2>
-              <p>明确研究边界，可选择性继承前序研究的检索词与发现。</p>
             </div>
             <button id="cancelNewProject" class="icon-button bordered" type="button" aria-label="关闭新建研究" title="关闭">
               <i data-lucide="x" aria-hidden="true"></i>
@@ -204,15 +203,14 @@
                 <textarea
                   id="questionInput"
                   name="research_question"
-                  rows="4"
+                  rows="1"
                   placeholder="例如：利用大模型和小模型进行异常检测有哪些研究？"
                   required
                 ></textarea>
               </label>
             </div>
 
-            <fieldset class="brief-settings">
-              <legend>检索范围</legend>
+            <fieldset class="brief-settings brief-search-row">
               <label class="field" for="initialMaxSearchRounds">
                 <span>检索词迭代轮次</span>
                 <input id="initialMaxSearchRounds" type="number" min="1" max="10" value="3"
@@ -269,19 +267,6 @@
                 <option value="2001">2001</option>
                 <option value="2000">2000</option>
               </datalist>
-              <div class="research-option-grid">
-                <label class="quality-filter-option" for="initialPreferLibrarySearch">
-                  <input id="initialPreferLibrarySearch" type="checkbox" />
-                  <span>
-                    <strong>优先搜索我的文献库</strong>
-                    <small>先在本地文献、笔记和已索引 PDF 中查找，再用外部来源补充</small>
-                  </span>
-                </label>
-              </div>
-            </fieldset>
-
-            <fieldset class="brief-settings brief-inherit">
-              <legend>继承前序研究（可选）</legend>
               <label class="field" for="inheritProjectSelect">
                 <span>前序研究</span>
                 <select id="inheritProjectSelect">
@@ -296,7 +281,13 @@
             </fieldset>
 
             <div class="brief-actions">
-              <button id="cancelNewProjectSecondary" class="secondary" type="button">取消</button>
+              <label class="quality-filter-option" for="initialPreferLibrarySearch">
+                <input id="initialPreferLibrarySearch" type="checkbox" />
+                <span>
+                  <strong>优先搜索我的文献库</strong>
+                  <small>先在本地文献、笔记和已索引 PDF 中查找，再用外部来源补充</small>
+                </span>
+              </label>
               <button class="primary" type="submit">
                 开始研究
                 <i data-lucide="arrow-right" aria-hidden="true"></i>

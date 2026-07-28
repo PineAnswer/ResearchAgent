@@ -2119,21 +2119,19 @@ h3,
   font-weight: 650;
 }
 
-.field-name input {
-  height: 42px;
-  font-size: 16px;
+.field-name input,
+.field-topic input,
+.field-question textarea {
+  height: 48px;
+  min-height: 48px;
+  font-family: var(--serif-font);
+  font-size: 20px;
 }
 
 .field-name small {
   color: var(--muted);
   font-size: 11px;
   font-weight: 400;
-}
-
-.field-topic input {
-  height: 48px;
-  font-family: var(--serif-font);
-  font-size: 20px;
 }
 
 input,
@@ -2184,11 +2182,7 @@ select:focus {
 }
 
 .field-question textarea {
-  height: 96px;
-  min-height: 96px;
-  font-family: var(--serif-font);
-  font-size: 17px;
-  line-height: 1.65;
+  line-height: 1.45;
 }
 
 .brief-settings {
@@ -2199,6 +2193,15 @@ select:focus {
   padding: 16px 0 0;
   border: 0;
   border-top: 1px solid var(--line);
+}
+
+.brief-search-row {
+  grid-template-columns: minmax(120px, 0.85fr) minmax(104px, 0.7fr) minmax(104px, 0.7fr) minmax(190px, 1.25fr);
+  align-items: end;
+}
+
+#inheritanceNoteField {
+  grid-column: 1 / -1;
 }
 
 .brief-settings legend {
@@ -2219,11 +2222,11 @@ select:focus {
 
 .quality-filter-option {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 64px;
-  padding: 10px 12px;
+  min-height: 40px;
+  padding: 7px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   background: rgb(255 255 255 / 42%);
@@ -2234,7 +2237,7 @@ select:focus {
   flex: 0 0 auto;
   width: 17px;
   height: 17px;
-  margin: 2px 0 0;
+  margin: 0;
   accent-color: var(--pine);
 }
 
@@ -2313,11 +2316,19 @@ select:focus {
 
 .brief-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
+}
+
+.brief-actions .quality-filter-option {
+  flex: 1 1 280px;
+  max-width: 360px;
+  margin-right: auto;
 }
 
 .project-masthead {
@@ -3800,7 +3811,7 @@ select:focus {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 650;
   color: var(--ink-soft);
 }
@@ -3814,8 +3825,8 @@ select:focus {
 .paper-chat-context-hint {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .paper-chat-context-preview {
@@ -3845,24 +3856,48 @@ select:focus {
   border-radius: 16px 4px 16px 16px;
   color: #fff;
   background: var(--pine);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.65;
   white-space: pre-wrap;
 }
 
 .paper-chat-bubble.is-assistant .paper-chat-bubble-body {
   color: var(--ink);
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 16px;
+  line-height: 1.75;
 }
 
 .paper-chat-bubble-body .aw-markdown {
   font-size: inherit;
 }
 
+.paper-chat-bubble.is-assistant .aw-markdown p,
+.paper-chat-bubble.is-assistant .aw-markdown li {
+  font-size: 16px;
+  line-height: 1.82;
+}
+
+.paper-chat-bubble.is-assistant .aw-markdown h1 {
+  font-size: 22px;
+}
+
+.paper-chat-bubble.is-assistant .aw-markdown h2 {
+  font-size: 20px;
+}
+
+.paper-chat-bubble.is-assistant .aw-markdown h3 {
+  font-size: 18px;
+}
+
+.paper-chat-bubble.is-assistant .aw-markdown h4,
+.paper-chat-bubble.is-assistant .aw-markdown h5,
+.paper-chat-bubble.is-assistant .aw-markdown h6 {
+  font-size: 17px;
+}
+
 .paper-answer-working {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .paper-answer-working svg {
@@ -3873,7 +3908,7 @@ select:focus {
 
 .paper-chat-save {
   margin-top: 10px;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .paper-chat-form {
@@ -3886,13 +3921,13 @@ select:focus {
 }
 
 .paper-chat-form textarea {
-  min-height: 60px;
+  min-height: 72px;
   padding: 10px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   font-family: var(--ui-font);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 15px;
+  line-height: 1.6;
   resize: none;
 }
 
@@ -6420,12 +6455,11 @@ select:focus {
     gap: 12px;
   }
 
-  .field-topic input {
-    height: 44px;
-  }
-
+  .field-name input,
+  .field-topic input,
   .field-question textarea {
-    min-height: 104px;
+    height: 48px;
+    min-height: 48px;
   }
 
   .brief-settings {

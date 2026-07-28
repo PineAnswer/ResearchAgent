@@ -187,12 +187,15 @@ class ResearchService:
         pinned: bool | None = None,
         archived: bool | None = None,
     ):
-        return self.repository.update_conversation(
+        conversation = self.repository.update_conversation(
             conversation_id,
             title=title,
             pinned=pinned,
             archived=archived,
         )
+        if title is not None:
+            self._export_snapshot(conversation.project_id)
+        return conversation
 
     def delete_conversation(self, conversation_id: str) -> None:
         conversation = self.repository.get_conversation(conversation_id)

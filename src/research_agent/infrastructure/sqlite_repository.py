@@ -949,6 +949,13 @@ class SqliteResearchRepository:
             raise ValueError("Conversation title cannot be empty")
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
+            project_row = connection.execute(
+                """
+                SELECT payload_json FROM projects
+                WHERE project_id = ? AND user_id = ?
+                """,
+                (conversation.project_id, conversation.user_id),
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE conversations
@@ -981,6 +988,23 @@ class SqliteResearchRepository:
                     conversation.user_id,
                 ),
             )
+            if clean_title is not None and project_row is not None:
+                project = ResearchProject.model_validate_json(project_row["payload_json"])
+                project.name = clean_title
+                project.updated_at = datetime.fromisoformat(now)
+                connection.execute(
+                    """
+                    UPDATE projects
+                    SET payload_json = ?, updated_at = ?
+                    WHERE project_id = ? AND user_id = ?
+                    """,
+                    (
+                        project.model_dump_json(),
+                        now,
+                        project.project_id,
+                        conversation.user_id,
+                    ),
+                )
         return self.get_conversation(conversation_id)
 
     @staticmethod

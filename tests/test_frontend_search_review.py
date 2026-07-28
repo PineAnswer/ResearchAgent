@@ -53,10 +53,22 @@ def test_new_research_form_uses_compact_question_field() -> None:
     )
 
     assert 'id="questionInput"' in markup
-    assert 'rows="3"' in markup
+    assert 'rows="1"' in markup
     question_styles = styles.split(".field-question textarea {", 1)[1].split("}", 1)[0]
-    assert "height: 96px" in question_styles
-    assert "min-height: 96px" in question_styles
+    assert "height: 48px" in question_styles
+    assert "min-height: 48px" in question_styles
+
+
+def test_project_summary_initializes_metrics_before_use() -> None:
+    script = Path("src/research_agent/api/frontend/app.js").read_text(encoding="utf-8")
+    summary = script.split("function renderProjectSummary(snapshot) {", 1)[1].split(
+        "// ── Main render",
+        1,
+    )[0]
+
+    assert summary.index("const metrics = [") < summary.index(
+        "elements.resultHighlights.hidden = isCompleted || metrics.length === 0"
+    )
 
 
 def test_search_review_uses_server_pagination_and_persisted_selection() -> None:

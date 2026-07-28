@@ -97,3 +97,19 @@ def test_delete_project_removes_project_artifacts_and_events(tmp_path) -> None:
     assert repository.list_events(project.project_id) == []
     with pytest.raises(ProjectNotFound):
         repository.delete_project(project.project_id)
+
+
+def test_renaming_conversation_updates_project_name(tmp_path) -> None:
+    repository = SqliteResearchRepository(tmp_path / "test.db")
+    conversation, project = repository.create_conversation(
+        "topic",
+        "question",
+        name="initial name",
+    )
+
+    repository.update_conversation(conversation.conversation_id, title="renamed project")
+
+    updated_project = repository.get_project(project.project_id)
+    updated_conversation = repository.get_conversation(conversation.conversation_id)
+    assert updated_project.name == "renamed project"
+    assert updated_conversation.title == "renamed project"
