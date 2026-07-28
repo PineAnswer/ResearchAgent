@@ -228,10 +228,13 @@ const state = {
   paperActiveTab: "ask",
   researchSelection: "",
   researchSelectionAnchor: null,
+  researchSelectionDraft: null,
   researchNotes: [],
   researchNotesProjectId: null,
   researchLastAnswer: null,
   researchChatHistory: [],
+  researchChatId: null,
+  researchActiveRecordId: null,
   researchChatBusy: false,
   researchChatAbortController: null,
   researchWorkspaceTab: "ask",
@@ -4462,10 +4465,15 @@ function clearProjectView() {
   state.candidates = [];
   state.selectedIds = new Set();
   state.researchSelection = "";
+  state.researchSelectionAnchor = null;
+  state.researchSelectionDraft = null;
   state.researchNotes = [];
   state.researchNotesProjectId = null;
   state.researchLastAnswer = null;
   state.researchChatHistory = [];
+  state.researchChatId = null;
+  state.researchActiveRecordId = null;
+  removeResearchSelectionToolbar();
   closeInspector({ restoreFocus: false });
   closeMenus();
   showWorkspace("empty");
@@ -4637,10 +4645,15 @@ function renderStageBadge(project) {
 function renderProjectHeader(project, events = state.snapshot?.events || []) {
   if (state.projectId && state.projectId !== project.project_id) {
     state.researchSelection = "";
+    state.researchSelectionAnchor = null;
+    state.researchSelectionDraft = null;
     state.researchLastAnswer = null;
     state.researchChatHistory = [];
+    state.researchChatId = null;
+    state.researchActiveRecordId = null;
     state.researchNotes = [];
     state.researchNotesProjectId = null;
+    removeResearchSelectionToolbar();
   }
   state.project = project;
   state.projectId = project.project_id;
@@ -5485,6 +5498,102 @@ function researchNoteLabel(kind) {
   return { note: "笔记", annotation: "批注", qa: "问答" }[kind] || "记录";
 }
 
+function removeResearchSelectionToolbar({ clearDraft = false } = {}) {
+  document.querySelector(".research-selection-toolbar")?.remove();
+  if (clearDraft) state.researchSelectionDraft = null;
+}
+
+function newResearchChatId() {
+  return window.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function researchChatSessions() {
+  const grouped = new Map();
+  state.researchNotes
+    .filter((note) => note.kind === "qa" && note.question)
+    .forEach((note) => {
+      const chatId = note.chat_id || note.note_id;
+      if (!grouped.has(chatId)) grouped.set(chatId, []);
+      grouped.get(chatId).push(note);
+    });
+  return [...grouped.entries()]
+    .map(([chatId, notes]) => {
+      notes.sort((left, right) => (
+        new Date(left.created_at || left.updated_at || 0).getTime()
+        - new Date(right.created_at || right.updated_at || 0).getTime()
+      ));
+      const updatedAt = notes.reduce((latest, note) => {
+        const value = new Date(note.updated_at || note.created_at || 0).getTime();
+        return Math.max(latest, Number.isFinite(value) ? value : 0);
+      }, 0);
+      return { chatId, notes, updatedAt };
+    })
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function researchConversationTitle(session) {
+  const firstQuestion = session?.notes?.[0]?.question || "新对话";
+  const clean = firstQuestion.replace(/\s+/g, " ").replace(/[。！？!?]+$/g, "").trim();
+  return clean.length > 34 ? `${clean.slice(0, 34)}…` : clean || "新对话";
+}
+
+function researchConversationPreview(session) {
+  return session?.notes
+    ?.flatMap((note) => [note.question || "", note.answer || ""])
+    .filter(Boolean)
+    .join("\n") || "还没有对话内容";
+}
+
+function researchChatHistoryFor(chatId) {
+  const session = researchChatSessions().find((item) => item.chatId === chatId);
+  if (!session) return [];
+  return session.notes.flatMap((note) => [
+    {
+      role: "user",
+      content: note.question,
+      noteId: note.note_id,
+      chatId: session.chatId,
+      selectedText: note.selected_text || "",
+      sourceSectionId: note.source_section_id || "",
+      sourceOffset: note.source_offset,
+    },
+    {
+      role: "assistant",
+      content: note.answer || "",
+      noteId: note.note_id,
+      chatId: session.chatId,
+    },
+  ]).slice(-40);
+}
+
+function setActiveResearchChat(chatId, { render = true, focusNoteId = "" } = {}) {
+  if (state.researchChatBusy) {
+    notify("当前回答仍在生成，请先暂停或等待完成", true);
+    return;
+  }
+  state.researchChatId = chatId || newResearchChatId();
+  state.researchChatHistory = researchChatHistoryFor(state.researchChatId);
+  state.researchSelection = "";
+  state.researchSelectionAnchor = null;
+  state.researchSelectionDraft = null;
+  removeResearchSelectionToolbar();
+  state.researchWorkspaceTab = "ask";
+  state.researchWorkspaceOpen = true;
+  if (!render || !state.snapshot) return;
+  renderOutcome(state.snapshot);
+  requestAnimationFrame(() => {
+    activateResearchWorkspaceTab("ask");
+    const target = focusNoteId
+      ? elements.primaryOutcome.querySelector(
+          `.research-chat-bubble[data-note-id="${CSS.escape(focusNoteId)}"]`,
+        )
+      : null;
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    target?.classList.add("is-note-target");
+    if (target) window.setTimeout(() => target.classList.remove("is-note-target"), 1800);
+  });
+}
+
 function activateResearchWorkspaceTab(tab) {
   state.researchWorkspaceTab = tab;
   document.querySelectorAll("[data-research-tab]").forEach((button) => {
@@ -5543,14 +5652,19 @@ function focusResearchSource(note) {
 
 function focusResearchRecord(note) {
   if (note.kind === "qa") {
-    activateResearchWorkspaceTab("ask");
-    const bubble = elements.primaryOutcome.querySelector(
-      `.research-chat-bubble[data-note-id="${CSS.escape(note.note_id)}"]`,
-    );
-    bubble?.scrollIntoView({ behavior: "smooth", block: "center" });
-    bubble?.classList.add("is-note-target");
-    window.setTimeout(() => bubble?.classList.remove("is-note-target"), 1800);
+    setActiveResearchChat(note.chat_id || note.note_id, {
+      focusNoteId: note.note_id,
+    });
+    return;
   }
+  activateResearchWorkspaceTab("notes");
+  state.researchActiveRecordId = note.note_id;
+  const card = elements.primaryOutcome.querySelector(
+    `.research-note[data-note-id="${CSS.escape(note.note_id)}"]`,
+  );
+  card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  card?.classList.add("is-note-target");
+  window.setTimeout(() => card?.classList.remove("is-note-target"), 1800);
   if (note.selected_text) focusResearchSource(note);
 }
 
@@ -5576,10 +5690,9 @@ async function editResearchNote(note) {
   state.researchNotes = state.researchNotes.map((item) => (
     item.note_id === note.note_id ? payload.data : item
   ));
-  const message = state.researchChatHistory.find((item) => (
-    item.noteId === note.note_id && item.role === "assistant"
-  ));
-  if (message && note.kind === "qa") message.content = content.trim();
+  if (note.kind === "qa") {
+    state.researchChatHistory = researchChatHistoryFor(state.researchChatId);
+  }
   if (note.kind === "qa" && state.snapshot) {
     renderOutcome(state.snapshot);
     activateResearchWorkspaceTab("notes");
@@ -5593,19 +5706,15 @@ async function editResearchNote(note) {
 
 function renderResearchNotesList(container) {
   container.replaceChildren();
-  if (!state.researchNotes.length) {
-    container.append(h("p", { cls: "muted small" }, "还没有笔记或批注。"));
+  const notes = state.researchNotes.filter((note) => note.kind !== "qa");
+  if (!notes.length) {
+    container.append(h("p", { cls: "muted small research-record-empty" }, "还没有选段笔记或批注。"));
     return;
   }
-  state.researchNotes.forEach((note) => {
-    const body = note.kind === "qa"
-      ? [
-          h("p", { cls: "research-note-question" }, note.question || ""),
-          renderMarkdown(note.answer || "", "aw-markdown"),
-        ]
-      : [h("p", {}, note.content || "")];
+  notes.forEach((note) => {
     const article = h("article", {
-      cls: `research-note research-note-${note.kind}`,
+      cls: `research-note research-note-${note.kind}${state.researchActiveRecordId === note.note_id ? " is-active" : ""}`,
+      "data-note-id": note.note_id,
       tabindex: "0",
       role: "button",
       onClick: () => focusResearchRecord(note),
@@ -5639,12 +5748,37 @@ function renderResearchNotesList(container) {
         ]),
       ]),
       note.selected_text ? h("blockquote", {}, note.selected_text) : null,
-      ...body,
+      h("p", {}, note.content || ""),
       h("small", { cls: "muted" }, formatDate(note.updated_at)),
     ]);
     container.append(article);
   });
   refreshIcons();
+}
+
+function renderResearchChatArchives(container) {
+  container.replaceChildren();
+  const sessions = researchChatSessions();
+  if (!sessions.length) {
+    container.append(h("p", { cls: "muted small research-record-empty" }, "还没有已保存的对话。"));
+    return;
+  }
+  sessions.forEach((session) => {
+    const latest = session.notes[session.notes.length - 1];
+    const card = h("button", {
+      type: "button",
+      cls: `research-chat-archive${state.researchChatId === session.chatId ? " is-active" : ""}`,
+      onClick: () => setActiveResearchChat(session.chatId),
+    }, [
+      h("span", { cls: "research-chat-archive-head" }, [
+        h("strong", {}, researchConversationTitle(session)),
+        h("small", {}, formatDate(latest?.updated_at || latest?.created_at)),
+      ]),
+      h("span", { cls: "research-chat-archive-preview" }, researchConversationPreview(session)),
+      h("span", { cls: "research-chat-archive-meta" }, `${session.notes.length} 轮对话`),
+    ]);
+    container.append(card);
+  });
 }
 
 async function loadResearchNotes(projectId = state.projectId) {
@@ -5653,24 +5787,11 @@ async function loadResearchNotes(projectId = state.projectId) {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/notes`);
     if (projectId !== state.projectId) return;
     state.researchNotes = payload.data || [];
-    const savedQa = state.researchNotes
-      .filter((note) => note.kind === "qa" && note.question && note.answer)
-      .slice()
-      .reverse();
-    state.researchChatHistory = savedQa.flatMap((note) => [
-      {
-        role: "user",
-        content: note.question,
-        noteId: note.note_id,
-        chatId: note.chat_id || note.note_id,
-      },
-      {
-        role: "assistant",
-        content: note.answer,
-        noteId: note.note_id,
-        chatId: note.chat_id || note.note_id,
-      },
-    ]).slice(-40);
+    const sessions = researchChatSessions();
+    if (!state.researchChatId) {
+      state.researchChatId = sessions[0]?.chatId || newResearchChatId();
+    }
+    state.researchChatHistory = researchChatHistoryFor(state.researchChatId);
     state.researchNotesProjectId = projectId;
     if (elements.primaryOutcome.querySelector(".research-workspace") && state.snapshot) {
       renderOutcome(state.snapshot);
@@ -5678,6 +5799,8 @@ async function loadResearchNotes(projectId = state.projectId) {
     }
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
+    const archives = elements.primaryOutcome.querySelector(".research-chat-archives");
+    if (archives) renderResearchChatArchives(archives);
   } catch (error) {
     notify(`研究笔记载入失败：${error.message}`, true);
   }
@@ -5691,9 +5814,7 @@ async function deleteResearchNote(noteId) {
     });
     state.researchNotes = state.researchNotes.filter((note) => note.note_id !== noteId);
     if (deleted?.kind === "qa") {
-      state.researchChatHistory = state.researchChatHistory.filter(
-        (message) => message.noteId !== noteId,
-      );
+      state.researchChatHistory = researchChatHistoryFor(state.researchChatId);
       if (state.snapshot) {
         renderOutcome(state.snapshot);
         activateResearchWorkspaceTab("notes");
@@ -5703,6 +5824,8 @@ async function deleteResearchNote(noteId) {
     }
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
+    const archives = elements.primaryOutcome.querySelector(".research-chat-archives");
+    if (archives) renderResearchChatArchives(archives);
     notify("记录已删除");
   } catch (error) {
     notify(`删除失败：${error.message}`, true);
@@ -5719,6 +5842,8 @@ async function saveResearchRecord(record, button = null) {
     state.researchNotes = [payload.data, ...state.researchNotes];
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
+    const archives = elements.primaryOutcome.querySelector(".research-chat-archives");
+    if (archives) renderResearchChatArchives(archives);
     notify(record.kind === "qa" ? "问答已保存" : record.kind === "annotation" ? "批注已保存" : "笔记已保存");
     return payload.data;
   } catch (error) {
@@ -5796,74 +5921,73 @@ function renderResearchWorkspace(narrative, reviewElement) {
   let noteSelection = null;
   let noteSave = null;
   let noteInput = null;
+  let noteHint = null;
   let question = null;
   const selectionContext = h("div", { cls: "research-selection-context", "aria-live": "polite" });
+  const clearActiveSelection = () => {
+    state.researchSelection = "";
+    state.researchSelectionAnchor = null;
+    state.researchSelectionDraft = null;
+    window.getSelection()?.removeAllRanges();
+  };
+  const renderNoteComposer = () => {
+    if (!noteSelection || !noteSave || !noteInput || !noteHint) return;
+    const hasSelection = Boolean(state.researchSelection);
+    noteSelection.hidden = !hasSelection;
+    noteSelection.textContent = state.researchSelection;
+    noteHint.hidden = hasSelection;
+    noteInput.disabled = !hasSelection;
+    noteSave.disabled = !hasSelection;
+    noteSave.textContent = "保存选段笔记";
+  };
   const renderSelectionContext = () => {
     selectionContext.replaceChildren();
-    selectionContext.classList.toggle("has-selection", Boolean(state.researchSelection));
+    const hasSelection = Boolean(state.researchSelection);
+    selectionContext.hidden = !hasSelection;
+    selectionContext.classList.toggle("has-selection", hasSelection);
     if (!state.researchSelection) {
-      selectionContext.append(
-        h("div", { cls: "research-selection-empty" }, [
-          iconNode("mouse-pointer-2"),
-          h("div", {}, [
-            h("strong", {}, "引用综述原文"),
-            h("small", {}, "在左侧划选文字，聊天时会自动带入"),
-          ]),
-        ]),
-      );
-      refreshIcons();
+      if (question) {
+        question.placeholder = state.researchChatHistory.length
+          ? "继续当前对话…"
+          : "输入问题，基于当前综述与研究证据回答…";
+      }
       return;
     }
     const clearSelection = h("button", {
-      cls: "icon-button research-selection-clear",
+      cls: "secondary research-selection-cancel",
       type: "button",
-      title: "移除引用上下文",
-      "aria-label": "移除引用上下文",
+      title: "取消引用并改为全局提问",
+      "aria-label": "取消引用并改为全局提问",
       onClick: () => {
-        state.researchSelection = "";
-        state.researchSelectionAnchor = null;
-        window.getSelection()?.removeAllRanges();
-        if (noteSelection) noteSelection.textContent = "未选择综述原文，将保存为普通笔记。";
-        if (noteSave) noteSave.textContent = "保存笔记";
+        clearActiveSelection();
         renderSelectionContext();
+        renderNoteComposer();
+        question?.focus();
       },
-    }, iconNode("x"));
+    }, [iconNode("x"), " 取消引用"]);
     selectionContext.append(
       h("div", { cls: "research-selection-card" }, [
         h("div", { cls: "research-selection-card-head" }, [
-          h("span", { cls: "research-selection-label" }, [iconNode("quote"), " 已引用选段"]),
+          h("span", { cls: "research-selection-label" }, [iconNode("quote"), " 已引用综述原文"]),
           h("span", { cls: "research-selection-count" }, `${state.researchSelection.length} 字`),
           clearSelection,
         ]),
         h("p", { cls: "research-selection-preview" }, state.researchSelection),
-        h("div", { cls: "research-selection-actions" }, [
-          h("button", {
-            type: "button",
-            cls: "secondary",
-            onClick: () => {
-              state.researchWorkspaceOpen = true;
-              setResearchWorkspaceOpen(true);
-              switchTab("ask");
-              question?.focus();
-            },
-          }, [iconNode("message-circle-question"), " 引用提问"]),
-          h("button", {
-            type: "button",
-            cls: "secondary",
-            onClick: () => {
-              state.researchWorkspaceOpen = true;
-              setResearchWorkspaceOpen(true);
-              switchTab("notes");
-              noteInput?.focus();
-            },
-          }, [iconNode("message-square-plus"), " 添加批注"]),
-        ]),
       ]),
     );
+    if (question) question.placeholder = "针对已引用的综述原文提问…";
     refreshIcons();
   };
-  renderSelectionContext();
-  question = h("textarea", { rows: "3", maxlength: "4000", placeholder: state.researchChatHistory.length ? "继续追问…" : "输入问题…", "aria-label": "研究问题" });
+  question = h("textarea", {
+    rows: "3",
+    maxlength: "4000",
+    placeholder: state.researchSelection
+      ? "针对已引用的综述原文提问…"
+      : state.researchChatHistory.length
+        ? "继续当前对话…"
+        : "输入问题，基于当前综述与研究证据回答…",
+    "aria-label": "研究问题",
+  });
   const submit = h("button", { type: "submit", cls: "primary" }, state.researchChatBusy ? "暂停" : "发送");
   const chatThread = h("div", { cls: "research-chat-thread", "aria-live": "polite" });
   const isChatNearBottom = () => (
@@ -5881,6 +6005,24 @@ function renderResearchWorkspace(narrative, reviewElement) {
     } else {
       body.textContent = message.content || "";
     }
+    const citation = message.role === "user" && message.selectedText
+      ? h("button", {
+          type: "button",
+          cls: "research-chat-citation",
+          title: "定位到引用原文",
+          onClick: (event) => {
+            event.stopPropagation();
+            focusResearchSource({
+              selected_text: message.selectedText,
+              source_section_id: message.sourceSectionId || "",
+              source_offset: message.sourceOffset,
+            });
+          },
+        }, [
+          iconNode("quote"),
+          h("span", {}, message.selectedText),
+        ])
+      : null;
     const bubble = h("article", {
       cls: `research-chat-bubble is-${message.role}`,
       "data-note-id": message.noteId || "",
@@ -5889,7 +6031,7 @@ function renderResearchWorkspace(narrative, reviewElement) {
         const note = state.researchNotes.find((item) => item.note_id === message.noteId);
         if (note?.selected_text) focusResearchSource(note);
       },
-    }, [body]);
+    }, [citation, body]);
     chatThread.append(bubble);
     scrollChatToBottom();
     return { bubble, body };
@@ -5909,14 +6051,28 @@ function renderResearchWorkspace(narrative, reviewElement) {
     const selectionAnchor = state.researchSelectionAnchor
       ? { ...state.researchSelectionAnchor }
       : {};
-    const chatId = window.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const requestHistory = state.researchChatHistory.filter((message) => !message.failed).slice(-40);
-    const userMessage = { role: "user", content: cleanQuestion, chatId };
+    const chatId = state.researchChatId || newResearchChatId();
+    state.researchChatId = chatId;
+    const requestHistory = state.researchChatHistory
+      .filter((message) => !message.failed)
+      .slice(-40)
+      .map((message) => ({ role: message.role, content: message.content }));
+    const userMessage = {
+      role: "user",
+      content: cleanQuestion,
+      chatId,
+      selectedText,
+      sourceSectionId: selectionAnchor.source_section_id || "",
+      sourceOffset: selectionAnchor.source_offset,
+    };
     const assistantMessage = { role: "assistant", content: "", chatId };
     state.researchChatHistory.push(userMessage, assistantMessage);
     appendChatBubble(userMessage);
     const assistantBubble = appendChatBubble(assistantMessage, { streaming: true });
     question.value = "";
+    clearActiveSelection();
+    renderSelectionContext();
+    renderNoteComposer();
     try {
       state.researchChatBusy = true;
       state.researchChatAbortController = new AbortController();
@@ -5991,8 +6147,11 @@ function renderResearchWorkspace(narrative, reviewElement) {
         userMessage.noteId = saved.note_id;
         assistantMessage.noteId = saved.note_id;
         assistantBubble.bubble.dataset.noteId = saved.note_id;
+        const session = researchChatSessions().find((item) => item.chatId === chatId);
+        const title = panel.querySelector(".research-chat-session-title");
+        if (session && title) title.textContent = researchConversationTitle(session);
       }
-      question.placeholder = "继续追问…";
+      question.placeholder = "继续当前对话…";
     } catch (error) {
       assistantMessage.content = error.name === "AbortError"
         ? "回答已暂停，可重新发送问题继续。"
@@ -6008,17 +6167,34 @@ function renderResearchWorkspace(narrative, reviewElement) {
       question.focus();
     }
   });
-  askPane.append(selectionContext, chatThread, form);
+  const activeSession = researchChatSessions().find((session) => session.chatId === state.researchChatId);
+  const chatHeading = h("div", { cls: "research-chat-session-head" }, [
+    h("div", {}, [
+      h("small", {}, "当前对话"),
+      h("strong", { cls: "research-chat-session-title" }, activeSession ? researchConversationTitle(activeSession) : "新对话"),
+    ]),
+    h("button", {
+      type: "button",
+      cls: "secondary",
+      onClick: () => setActiveResearchChat(newResearchChatId()),
+    }, [iconNode("square-pen"), " 新建对话"]),
+  ]);
+  renderSelectionContext();
+  askPane.append(chatHeading, selectionContext, chatThread, form);
 
-  noteSelection = h("blockquote", { cls: "research-note-selection" }, state.researchSelection || "未选择综述原文，将保存为普通笔记。" );
+  noteHint = h("p", { cls: "research-note-hint" }, [
+    iconNode("mouse-pointer-2"),
+    " 请先在左侧综述中选择文字，再点击选区旁的笔记图标。",
+  ]);
+  noteSelection = h("blockquote", { cls: "research-note-selection" }, state.researchSelection || "");
   noteInput = h("textarea", { rows: "4", maxlength: "20000", placeholder: "记录判断、疑问或后续线索…", "aria-label": "研究笔记" });
-  noteSave = h("button", { type: "button", cls: "primary" }, state.researchSelection ? "保存批注" : "保存笔记");
+  noteSave = h("button", { type: "button", cls: "primary" }, "保存选段笔记");
   noteSave.addEventListener("click", async () => {
     const content = noteInput.value.trim();
-    if (!content) return;
+    if (!content || !state.researchSelection) return;
     const annotatedText = state.researchSelection;
     const saved = await saveResearchRecord({
-      kind: annotatedText ? "annotation" : "note",
+      kind: "annotation",
       selected_text: annotatedText,
       source_section_id: state.researchSelectionAnchor?.source_section_id || "",
       source_offset: Number.isInteger(state.researchSelectionAnchor?.source_offset)
@@ -6026,17 +6202,124 @@ function renderResearchWorkspace(narrative, reviewElement) {
         : null,
       content,
     }, noteSave);
-    if (saved) noteInput.value = "";
+    if (saved) {
+      noteInput.value = "";
+      clearActiveSelection();
+      renderSelectionContext();
+      renderNoteComposer();
+    }
   });
   const list = h("div", { cls: "research-notes-list" });
   renderResearchNotesList(list);
-  notesPane.append(noteSelection, noteInput, noteSave, list);
+  const archives = h("div", { cls: "research-chat-archives" });
+  renderResearchChatArchives(archives);
+  const notesScroll = h("div", { cls: "research-records-scroll" }, [
+    h("section", { cls: "research-record-group" }, [
+      h("header", {}, [
+        h("div", {}, [
+          h("strong", {}, "对话记录"),
+          h("small", {}, "每个对话独立保存，点击即可继续"),
+        ]),
+        h("button", {
+          type: "button",
+          cls: "secondary",
+          onClick: () => setActiveResearchChat(newResearchChatId()),
+        }, [iconNode("square-pen"), " 新建"]),
+      ]),
+      archives,
+    ]),
+    h("section", { cls: "research-record-group" }, [
+      h("header", {}, [
+        h("div", {}, [
+          h("strong", {}, "选段笔记"),
+          h("small", {}, "点击记录可返回并高亮原文"),
+        ]),
+      ]),
+      h("div", { cls: "research-note-composer" }, [
+        noteHint,
+        noteSelection,
+        noteInput,
+        noteSave,
+      ]),
+      list,
+    ]),
+  ]);
+  notesPane.append(notesScroll);
+  renderNoteComposer();
   switchTab(state.researchWorkspaceTab);
 
+  const activateSelectionDraft = (mode) => {
+    const draft = state.researchSelectionDraft;
+    if (!draft?.text) return;
+    state.researchSelection = draft.text;
+    state.researchSelectionAnchor = {
+      source_section_id: draft.source_section_id || "",
+      source_offset: draft.source_offset,
+    };
+    state.researchSelectionDraft = null;
+    removeResearchSelectionToolbar();
+    window.getSelection()?.removeAllRanges();
+    state.researchWorkspaceOpen = true;
+    setResearchWorkspaceOpen(true);
+    renderSelectionContext();
+    renderNoteComposer();
+    if (mode === "note") {
+      switchTab("notes");
+      noteInput?.focus();
+    } else {
+      switchTab("ask");
+      question?.focus();
+    }
+  };
+  const showSelectionToolbar = (draft, range) => {
+    removeResearchSelectionToolbar();
+    const toolbar = h("div", {
+      cls: "research-selection-toolbar",
+      role: "toolbar",
+      "aria-label": "选中文字操作",
+      "data-research-selection-toolbar": "true",
+      onPointerdown: (event) => event.preventDefault(),
+    }, [
+      h("button", {
+        type: "button",
+        title: "引用到右侧对话",
+        "aria-label": "引用到右侧对话",
+        onClick: () => activateSelectionDraft("ask"),
+      }, [iconNode("quote"), h("span", {}, "引用")]),
+      h("button", {
+        type: "button",
+        title: "为选中文字添加笔记",
+        "aria-label": "为选中文字添加笔记",
+        onClick: () => activateSelectionDraft("note"),
+      }, [iconNode("notebook-pen"), h("span", {}, "笔记")]),
+    ]);
+    document.body.append(toolbar);
+    const rects = [...range.getClientRects()];
+    const anchorRect = rects[rects.length - 1] || range.getBoundingClientRect();
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const left = Math.min(
+      window.innerWidth - toolbarRect.width - 12,
+      Math.max(12, anchorRect.right - toolbarRect.width),
+    );
+    const below = anchorRect.bottom + 8;
+    const top = below + toolbarRect.height <= window.innerHeight - 12
+      ? below
+      : Math.max(12, anchorRect.top - toolbarRect.height - 8);
+    toolbar.style.left = `${Math.round(left)}px`;
+    toolbar.style.top = `${Math.round(top)}px`;
+    window.addEventListener("scroll", () => removeResearchSelectionToolbar({ clearDraft: true }), {
+      capture: true,
+      once: true,
+    });
+    refreshIcons();
+  };
   const captureSelection = () => {
     const selected = window.getSelection();
     const text = selected?.toString().trim().slice(0, 12000) || "";
-    if (!text || !selected?.anchorNode || !reviewElement.contains(selected.anchorNode)) return;
+    if (!text || !selected?.anchorNode || !reviewElement.contains(selected.anchorNode)) {
+      removeResearchSelectionToolbar({ clearDraft: true });
+      return;
+    }
     const range = selected.getRangeAt(0);
     const section = (range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? range.commonAncestorContainer
@@ -6053,18 +6336,15 @@ function renderResearchWorkspace(narrative, reviewElement) {
         sourceOffset = null;
       }
     }
-    state.researchSelection = text;
-    state.researchSelectionAnchor = {
+    state.researchSelectionDraft = {
+      text,
       source_section_id: section?.id || "",
       source_offset: sourceOffset,
     };
-    setResearchWorkspaceOpen(true);
-    renderSelectionContext();
-    noteSelection.textContent = text;
-    noteSave.textContent = "保存批注";
+    showSelectionToolbar(state.researchSelectionDraft, range);
   };
-  reviewElement.addEventListener("mouseup", () => window.setTimeout(captureSelection, 0));
   reviewElement.addEventListener("pointerup", () => window.setTimeout(captureSelection, 0));
+  reviewElement.addEventListener("keyup", () => window.setTimeout(captureSelection, 0));
   panel.append(
     h("header", {}, [
       h("div", {}, [h("strong", {}, "研究工作台"), h("small", {}, "多轮聊天、批注与笔记")]),
@@ -6141,6 +6421,7 @@ function setResearchWorkspaceOpen(open) {
 }
 
 function renderOutcome(snapshot) {
+  removeResearchSelectionToolbar({ clearDraft: true });
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
   const review = latestArtifact(snapshot, "ReviewResult")?.payload;
   const insufficient = snapshot?.project?.stage === "INCONCLUSIVE"
