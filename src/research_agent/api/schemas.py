@@ -200,6 +200,9 @@ class ProjectAssistantRequest(BaseModel):
 class ResearchNoteRequest(BaseModel):
     kind: Literal["note", "annotation", "qa"] = "note"
     selected_text: str = Field(default="", max_length=12000)
+    source_section_id: str = Field(default="", max_length=240)
+    source_offset: int | None = Field(default=None, ge=0)
+    chat_id: str = Field(default="", max_length=160)
     content: str = Field(default="", max_length=20000)
     question: str = Field(default="", max_length=4000)
     answer: str = Field(default="", max_length=30000)

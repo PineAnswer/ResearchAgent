@@ -6,10 +6,11 @@ def test_frontend_exposes_failed_run_and_retry_state() -> None:
 
     assert "function latestFailedRun(snapshot)" in script
     assert '["failed", "interrupted"].includes(latestRun?.status)' in script
-    assert 'title = "研究任务运行失败"' in script
-    assert 'elements.stageBadge.textContent = "运行失败"' in script
+    assert 'title = interrupted ? "研究任务已安全暂停" : "研究任务运行失败"' in script
+    assert 'elements.stageBadge.textContent = interrupted ? "可继续" : "运行失败"' in script
     assert 'return "retry"' in script
     assert 'elements.continueButtonLabel.textContent = "重新运行"' in script
+    assert "本轮已安全暂停，已保存的阶段成果可以直接继续" in script
     assert "研究执行失败：${failedRun.error" in script
 
 

@@ -1112,6 +1112,106 @@ class ResearchService:
         }
         return {"mode": "narrative", "project": project, "context": context}
 
+    def assemble_synthesis_report(self, project_id: str):
+        """Build a conservative synthesis from persisted PaperCards.
+
+        This is a recovery path for providers that finish the expensive paper
+        reading stage but fail to return the final structured SynthesisReport.
+        Every statement is copied from an already-saved card or explicitly
+        labelled as a follow-up question; no new empirical claim is invented.
+        """
+        project = self.repository.get_project(project_id)
+        if project.stage is not ResearchStage.EXTRACTED:
+            raise WorkflowPrerequisiteError(
+                "Synthesis assembly requires the project to be at EXTRACTED"
+            )
+
+        artifacts = self.repository.list_artifacts(project_id)
+        cards = self._latest_paper_cards(artifacts)
+        if not cards:
+            raise WorkflowPrerequisiteError(
+                "Synthesis assembly requires at least one saved PaperCard"
+            )
+
+        consensus: list[dict[str, Any]] = []
+        method_comparison: list[dict[str, Any]] = []
+        gaps: list[dict[str, Any]] = []
+        seen_claims: set[str] = set()
+        seen_gaps: set[str] = set()
+
+        for paper_id, card in cards.items():
+            findings = [
+                item for item in card.get("findings", [])
+                if isinstance(item, dict) and str(item.get("evidence_id", "")).strip()
+            ]
+            for finding in findings:
+                statement = str(finding.get("claim", "")).strip()
+                if not statement or statement.casefold() in seen_claims:
+                    continue
+                seen_claims.add(statement.casefold())
+                consensus.append(
+                    {
+                        "statement": statement,
+                        "evidence_ids": [str(finding["evidence_id"])],
+                    }
+                )
+                if len(consensus) >= 30:
+                    break
+
+            methods = [
+                str(item).strip()
+                for item in card.get("methods", [])
+                if str(item).strip()
+            ]
+            evidence_ids = [
+                str(item["evidence_id"]) for item in findings[:6]
+            ]
+            if methods:
+                method_comparison.append(
+                    {
+                        "statement": (
+                            f"{card.get('title') or paper_id} 使用的方法包括："
+                            + "；".join(methods[:8])
+                        ),
+                        "evidence_ids": evidence_ids,
+                    }
+                )
+
+            for limitation in card.get("limitations", []):
+                description = str(limitation).strip()
+                if not description or description.casefold() in seen_gaps:
+                    continue
+                seen_gaps.add(description.casefold())
+                gaps.append(
+                    {
+                        "description": description,
+                        "supporting_paper_ids": [str(card.get("paper_id") or paper_id)],
+                        "conflicting_paper_ids": [],
+                        "evidence_ids": evidence_ids[:3],
+                        "confidence": "MEDIUM" if evidence_ids else "LOW",
+                        "proposed_hypothesis": (
+                            "该局限所指向的问题需要通过新增实验或更完整的全文证据进一步检验。"
+                        ),
+                    }
+                )
+                if len(gaps) >= 20:
+                    break
+
+        payload = {
+            "topic": project.topic,
+            "consensus": consensus,
+            "conflicts": [],
+            "method_comparison": method_comparison,
+            "gaps": gaps,
+        }
+        return self.save_artifact_and_transition(
+            project_id,
+            "SynthesisReport",
+            payload,
+            ResearchStage.SYNTHESIZED,
+            actor="research-synthesizer-fallback",
+        )
+
     def assemble_narrative_review(self, project_id: str):
         """Build a valid review from persisted drafts when editor formatting fails."""
         project = self.repository.get_project(project_id)

@@ -31,6 +31,15 @@ const PROGRESS_STAGES = [
   { key: "complete", label: "完成", stages: ["COMPLETED"] },
 ];
 
+const PROGRESS_STAGE_ICONS = {
+  create: "folder-plus",
+  search: "search",
+  extract: "book-open-text",
+  synthesize: "network",
+  write: "pen-line",
+  complete: "check",
+};
+
 const STAGE_LABELS = Object.fromEntries(STAGES);
 STAGE_LABELS.INCONCLUSIVE = "等待补充文献";
 STAGE_LABELS.OUTLINED = "提纲设计";
@@ -212,13 +221,26 @@ const state = {
   paperCurrentPage: null,
   paperProgressTimer: null,
   paperChatHistory: [],
+  paperChatBusy: false,
+  paperChatAbortController: null,
+  paperChatPanelOpen: true,
+  paperChatPanelWidth: 430,
+  paperActiveTab: "ask",
   researchSelection: "",
+  researchSelectionAnchor: null,
   researchNotes: [],
   researchNotesProjectId: null,
   researchLastAnswer: null,
   researchChatHistory: [],
+  researchChatBusy: false,
+  researchChatAbortController: null,
   researchWorkspaceTab: "ask",
   researchWorkspaceWidth: 430,
+  researchWorkspaceOpen: true,
+  currentWorkspaceView: null,
+  navigationStack: [],
+  restoringNavigation: false,
+  libraryDetailOpen: false,
   paperRenderSession: 0,
   runStartedAt: null,
   runClockTimer: null,
@@ -243,6 +265,7 @@ const byId = (id) => document.getElementById(id);
 const elements = {
   appShell: byId("appShell"),
   sidebarToggle: byId("sidebarToggle"),
+  navigationBack: byId("navigationBack"),
   brandHome: byId("brandHome"),
   homeToggle: byId("homeToggle"),
   healthBadge: byId("healthBadge"),
@@ -260,6 +283,9 @@ const elements = {
   paperWorkspaceBack: byId("paperWorkspaceBack"),
   paperWorkspaceTitle: byId("paperWorkspaceTitle"),
   paperWorkspaceMeta: byId("paperWorkspaceMeta"),
+  paperPanelToggle: byId("paperPanelToggle"),
+  paperPanelClose: byId("paperPanelClose"),
+  paperChatResizer: byId("paperChatResizer"),
   generateReadingCard: byId("generateReadingCard"),
   exportReadingReport: byId("exportReadingReport"),
   paperPageStatus: byId("paperPageStatus"),
@@ -291,6 +317,7 @@ const elements = {
   libraryList: byId("libraryList"),
   libraryCount: byId("libraryCount"),
   libraryDetail: byId("libraryDetail"),
+  libraryLayout: byId("libraryLayout"),
   librarySmartViews: byId("librarySmartViews"),
   libraryCollections: byId("libraryCollections"),
   newCollection: byId("newCollection"),
@@ -465,7 +492,98 @@ function refreshIcons() {
   if (window.lucide?.createIcons) window.lucide.createIcons();
 }
 
-function showWorkspace(view) {
+function navigationSnapshot() {
+  return {
+    view: state.currentWorkspaceView,
+    projectId: state.projectId,
+    selectedLibraryId: state.selectedLibraryId,
+    libraryView: state.libraryView,
+    libraryCollectionId: state.libraryCollectionId,
+    libraryDetailOpen: state.libraryDetailOpen,
+    paperLibraryId: state.paperWorkspace?.paper?.library_id || null,
+    paperAttachmentId: state.paperWorkspace?.workspace_attachment?.attachment_id || null,
+    paperPage: nearestVisiblePaperPage?.() || state.paperCurrentPage || 1,
+    paperTab: state.paperActiveTab,
+    paperPanelOpen: state.paperChatPanelOpen,
+    researchWorkspaceOpen: state.researchWorkspaceOpen,
+    scrollY: window.scrollY,
+    paperScrollLeft: elements.paperPdfPages?.scrollLeft || 0,
+  };
+}
+
+function updateNavigationBack() {
+  if (!elements.navigationBack) return;
+  elements.navigationBack.hidden = state.navigationStack.length === 0;
+  elements.navigationBack.disabled = state.navigationStack.length === 0;
+}
+
+function pushNavigationSnapshot(snapshot = navigationSnapshot()) {
+  if (!snapshot.view || state.restoringNavigation) return;
+  const previous = state.navigationStack[state.navigationStack.length - 1];
+  const signature = JSON.stringify([
+    snapshot.view,
+    snapshot.projectId,
+    snapshot.selectedLibraryId,
+    snapshot.paperLibraryId,
+    snapshot.paperTab,
+    Math.round((snapshot.scrollY || 0) / 20),
+  ]);
+  if (previous?._signature === signature) return;
+  state.navigationStack.push({ ...snapshot, _signature: signature });
+  if (state.navigationStack.length > 30) state.navigationStack.shift();
+  updateNavigationBack();
+}
+
+async function restorePreviousNavigation() {
+  const snapshot = state.navigationStack.pop();
+  updateNavigationBack();
+  if (!snapshot) return;
+  state.restoringNavigation = true;
+  try {
+    if (snapshot.view === "project" && snapshot.projectId) {
+      state.researchWorkspaceOpen = snapshot.researchWorkspaceOpen !== false;
+      await loadProject(snapshot.projectId, false, true);
+      setResearchWorkspaceOpen(state.researchWorkspaceOpen);
+    } else if (snapshot.view === "library") {
+      state.libraryView = snapshot.libraryView || "all";
+      state.libraryCollectionId = snapshot.libraryCollectionId || null;
+      state.selectedLibraryId = snapshot.selectedLibraryId || null;
+      state.libraryDetailOpen = Boolean(snapshot.libraryDetailOpen && snapshot.selectedLibraryId);
+      showWorkspace("library", { record: false });
+      await loadLibrary();
+      if (state.libraryDetailOpen && state.selectedLibraryId) {
+        await selectLibraryPaper(state.selectedLibraryId, { recordNavigation: false });
+      }
+    } else if (snapshot.view === "paper" && snapshot.paperLibraryId) {
+      state.paperChatPanelOpen = snapshot.paperPanelOpen !== false;
+      await openPaperWorkspace(
+        snapshot.paperLibraryId,
+        snapshot.paperAttachmentId,
+        false,
+        snapshot.paperPage || 1,
+      );
+      setPaperTab(snapshot.paperTab || "ask");
+      elements.paperPdfPages.scrollLeft = snapshot.paperScrollLeft || 0;
+    } else {
+      showWorkspace(snapshot.view || "empty", { record: false });
+    }
+    window.requestAnimationFrame(() => window.scrollTo({ top: snapshot.scrollY || 0 }));
+  } finally {
+    state.restoringNavigation = false;
+    updateNavigationBack();
+  }
+}
+
+function showWorkspace(view, { record = true } = {}) {
+  if (
+    record
+    && state.currentWorkspaceView
+    && state.currentWorkspaceView !== view
+    && !state.restoringNavigation
+  ) {
+    pushNavigationSnapshot();
+  }
+  state.currentWorkspaceView = view;
   elements.emptyState.hidden = view !== "empty";
   elements.createView.hidden = view !== "create";
   elements.libraryView.hidden = view !== "library";
@@ -483,6 +601,7 @@ function showWorkspace(view) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  updateNavigationBack();
 }
 
 function setPopover(toggle, popover, open) {
@@ -1384,7 +1503,10 @@ function renderLibraryList() {
   state.libraryPapers.forEach((paper) => {
     const row = document.createElement("div");
     row.className = "library-paper-row";
-    row.classList.toggle("is-active", paper.library_id === state.selectedLibraryId);
+    row.classList.toggle(
+      "is-active",
+      state.libraryDetailOpen && paper.library_id === state.selectedLibraryId,
+    );
     row.classList.toggle("has-folder-action", Boolean(state.libraryCollectionId));
 
     const checkbox = document.createElement("input");
@@ -1491,9 +1613,26 @@ function renderLibraryList() {
 function renderLibraryDetail(detail) {
   const paper = detail.paper;
   elements.libraryDetail.replaceChildren();
+  state.libraryDetailOpen = true;
+  elements.libraryLayout.classList.add("has-detail");
+  elements.libraryDetail.hidden = false;
 
   const header = document.createElement("header");
   header.className = "library-detail-header";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "icon-button library-detail-close";
+  close.title = "关闭文献详情";
+  close.setAttribute("aria-label", "关闭文献详情");
+  close.append(iconNode("x"));
+  close.addEventListener("click", () => {
+    state.libraryDetailOpen = false;
+    state.selectedLibraryId = null;
+    elements.libraryLayout.classList.remove("has-detail");
+    elements.libraryDetail.hidden = true;
+    elements.libraryDetail.replaceChildren();
+    renderLibraryList();
+  });
   const eyebrow = document.createElement("p");
   eyebrow.className = "eyebrow";
   eyebrow.textContent = "Paper detail";
@@ -1502,7 +1641,7 @@ function renderLibraryDetail(detail) {
   const meta = document.createElement("p");
   meta.className = "library-detail-meta";
   meta.textContent = libraryPaperMeta(paper);
-  header.append(eyebrow, title, meta);
+  header.append(eyebrow, title, meta, close);
 
   const controls = document.createElement("div");
   controls.className = "library-detail-controls";
@@ -2044,6 +2183,7 @@ function renderLibraryDetail(detail) {
 }
 
 function setPaperTab(tab) {
+  state.paperActiveTab = tab;
   document.querySelectorAll("[data-paper-tab]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.paperTab === tab);
   });
@@ -2266,7 +2406,7 @@ function renderPaperAnnotations() {
       answer.textContent = annotation.answer;
       item.append(answer);
     }
-    if (["note", "qa"].includes(annotation.kind)) {
+    if (["highlight", "note", "qa"].includes(annotation.kind)) {
       item.tabIndex = 0;
       item.setAttribute("role", "button");
       item.setAttribute("aria-label", `定位批注 ${annotationNumber}`);
@@ -2354,6 +2494,8 @@ function drawPaperHighlights() {
       mark.style.width = `${rect.width * 100}%`;
       mark.style.height = `${rect.height * 100}%`;
       mark.title = annotation.content || annotation.question || annotation.selected_text || "论文批注";
+      mark.setAttribute("aria-label", "定位到这条论文标记");
+      mark.addEventListener("click", () => focusPaperAnnotation(annotation));
       page.append(mark);
     });
     if (!isComment) return;
@@ -2418,12 +2560,38 @@ async function deletePaperAnnotation(annotationId) {
 function updatePaperHorizontalScroller() {
   const scrollWidth = elements.paperPdfPages.scrollWidth;
   const clientWidth = elements.paperPdfPages.clientWidth;
-  const needsHorizontalScroll = scrollWidth - clientWidth > 2;
-  elements.paperHorizontalScroller.hidden = !needsHorizontalScroll;
+  const hasPages = Boolean(elements.paperPdfPages.querySelector(".pdf-page"));
+  elements.paperHorizontalScroller.hidden = !hasPages;
   elements.paperHorizontalScrollContent.style.width = `${Math.max(scrollWidth, clientWidth)}px`;
-  if (needsHorizontalScroll) {
+  if (hasPages) {
     elements.paperHorizontalScroller.scrollLeft = elements.paperPdfPages.scrollLeft;
   }
+}
+
+function setPaperPanelOpen(open) {
+  state.paperChatPanelOpen = Boolean(open);
+  elements.paperWorkspaceView.classList.toggle("is-panel-closed", !state.paperChatPanelOpen);
+  elements.paperChatPanel.hidden = !state.paperChatPanelOpen;
+  elements.paperChatResizer.hidden = !state.paperChatPanelOpen;
+  elements.paperPanelToggle.setAttribute("aria-expanded", String(state.paperChatPanelOpen));
+  elements.paperPanelToggle.title = state.paperChatPanelOpen ? "收起研读面板" : "打开研读面板";
+  elements.paperPanelToggle.replaceChildren(
+    iconNode(state.paperChatPanelOpen ? "panel-right-close" : "panel-right-open"),
+  );
+  refreshIcons();
+  window.requestAnimationFrame(updatePaperHorizontalScroller);
+}
+
+function applyPaperPanelWidth(width) {
+  const min = 360;
+  const max = Math.max(min, Math.min(760, window.innerWidth - 540));
+  state.paperChatPanelWidth = Math.round(Math.max(min, Math.min(max, width)));
+  elements.paperWorkspaceView.style.setProperty(
+    "--paper-chat-panel-width",
+    `${state.paperChatPanelWidth}px`,
+  );
+  elements.paperChatResizer.setAttribute("aria-valuenow", String(state.paperChatPanelWidth));
+  window.requestAnimationFrame(updatePaperHorizontalScroller);
 }
 
 function syncPaperHorizontalScroll(source, target) {
@@ -2508,19 +2676,27 @@ function renderPaperChat() {
 
   // Context card
   const contextDiv = h("div", { cls: "paper-chat-context" });
-  contextDiv.append(
-    h("div", { cls: "paper-chat-context-head" }, [
-      h("span", {}, [iconNode(selection ? "text-select" : "book-open"), ` ${selection ? "选段提问" : "论文全文"}`]),
-      h("button", {
-        cls: "icon-button",
-        type: "button",
-        title: selection ? "改为询问全文" : "",
-        "aria-label": selection ? "改为询问全文" : "",
-        hidden: !selection,
-        onClick: () => { clearPaperSelection(); renderPaperChat(); },
-      }, iconNode("x")),
+  const contextHead = h("div", { cls: "paper-chat-context-head" }, [
+    h("span", {}, [
+      iconNode(selection ? "text-select" : "book-open"),
+      ` ${selection ? "选段提问" : "论文全文"}`,
     ]),
-  );
+  ]);
+  if (selection) {
+    contextHead.append(h("button", {
+      cls: "icon-button paper-chat-clear-selection",
+      type: "button",
+      title: "取消选段，改为全文提问",
+      "aria-label": "取消选段，改为全文提问",
+      onClick: () => {
+        clearPaperSelection();
+        renderPaperChat();
+        elements.paperChatArea.querySelector("textarea")?.focus();
+        notify("已取消选段，接下来将基于论文全文回答");
+      },
+    }, iconNode("x")));
+  }
+  contextDiv.append(contextHead);
   if (selection) {
     contextDiv.append(h("p", { cls: "paper-chat-context-preview" }, `第 ${selection.page} 页选中文本：${selection.text.slice(0, 120)}`));
   } else {
@@ -2557,12 +2733,19 @@ function renderPaperChat() {
     placeholder: state.paperChatHistory.length ? "继续追问…" : "输入问题，例如：作者的核心假设是什么？",
     "aria-label": "论文问题",
   });
-  const submit = h("button", { type: "submit", cls: "primary" }, "发送");
+  const submit = h("button", { type: "submit", cls: "primary" }, state.paperChatBusy ? "暂停" : "发送");
   const form = h("form", { cls: "paper-chat-form" }, [question, submit]);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.paperChatBusy) {
+      state.paperChatAbortController?.abort();
+      return;
+    }
     const cleanQuestion = question.value.trim();
     if (!cleanQuestion) return;
+    const requestSelection = state.paperSelection
+      ? { ...state.paperSelection, rects: [...(state.paperSelection.rects || [])] }
+      : null;
     const requestHistory = state.paperChatHistory.filter((m) => !m.failed).slice(-40);
     const userMessage = { role: "user", content: cleanQuestion };
     const assistantMessage = { role: "assistant", content: "" };
@@ -2571,9 +2754,11 @@ function renderPaperChat() {
     const assistantBubble = appendChatBubble(assistantMessage, { streaming: true });
     question.value = "";
     try {
-      submit.disabled = true;
+      state.paperChatBusy = true;
+      state.paperChatAbortController = new AbortController();
+      submit.textContent = "暂停";
       refreshIcons();
-      const sel = state.paperSelection;
+      const sel = requestSelection;
       const response = await fetch(
         `/api/library/papers/${encodeURIComponent(libraryId)}/workspace/question/stream`,
         {
@@ -2589,8 +2774,10 @@ function renderPaperChat() {
             suffix: sel?.suffix || "",
             history: requestHistory,
           }),
+          signal: state.paperChatAbortController.signal,
         },
       );
+      clearPaperSelection();
       if (!response.ok) {
         let payload = null;
         try { payload = await response.json(); } catch { payload = null; }
@@ -2632,22 +2819,35 @@ function renderPaperChat() {
         type: "button",
         cls: "quiet-button paper-chat-save",
         onClick: async () => {
-          await annotatePaperNote(
-            `Q: ${userMessage.content}\nA: ${assistantMessage.content}`,
-            "qa",
-          );
+          await savePaperAnnotation("qa", {
+            page: requestSelection?.page || null,
+            selected_text: requestSelection?.text || "",
+            prefix: requestSelection?.prefix || "",
+            suffix: requestSelection?.suffix || "",
+            rects: requestSelection?.rects || [],
+            question: userMessage.content,
+            answer: assistantMessage.content,
+          });
+          notify("问答已保存为论文批注");
         },
       }, [iconNode("bookmark-plus"), " 保存为批注"]);
       assistantBubble.body.append(saveBtn);
       refreshIcons();
     } catch (error) {
-      assistantMessage.content = `回答失败：${error.message}`;
+      assistantMessage.content = error.name === "AbortError"
+        ? "回答已暂停，可重新发送问题继续。"
+        : `回答失败：${error.message}`;
       assistantMessage.failed = true;
       assistantBubble.body.replaceChildren(
-        h("p", { cls: "aw-error" }, `回答失败：${error.message}`),
+        h("p", { cls: error.name === "AbortError" ? "muted" : "aw-error" }, assistantMessage.content),
       );
     } finally {
-      submit.disabled = false;
+      state.paperChatBusy = false;
+      state.paperChatAbortController = null;
+      submit.textContent = "发送";
+      if (state.paperActiveTab === "ask" && !elements.paperAskPanel.hidden) {
+        renderPaperChat();
+      }
       refreshIcons();
     }
   });
@@ -2840,6 +3040,8 @@ async function openPaperWorkspace(
   resumePage = null,
 ) {
   showWorkspace("paper");
+  applyPaperPanelWidth(state.paperChatPanelWidth);
+  setPaperPanelOpen(state.paperChatPanelOpen);
   elements.paperWorkspaceTitle.textContent = "正在加载论文…";
   elements.paperPdfPages.innerHTML = '<div class="paper-pdf-placeholder"><p>正在准备论文全文…</p></div>';
   elements.paperHorizontalScroller.hidden = true;
@@ -2927,8 +3129,18 @@ async function openPaperWorkspace(
   }
 }
 
-async function selectLibraryPaper(libraryId) {
+async function selectLibraryPaper(libraryId, { recordNavigation = true } = {}) {
+  if (
+    recordNavigation
+    && state.currentWorkspaceView === "library"
+    && (state.selectedLibraryId !== libraryId || !state.libraryDetailOpen)
+  ) {
+    pushNavigationSnapshot();
+  }
   state.selectedLibraryId = libraryId;
+  state.libraryDetailOpen = true;
+  elements.libraryLayout.classList.add("has-detail");
+  elements.libraryDetail.hidden = false;
   renderLibraryList();
   try {
     const payload = await api(`/api/library/papers/${encodeURIComponent(libraryId)}`);
@@ -2958,10 +3170,18 @@ async function loadLibrary() {
       !state.libraryPapers.some((paper) => paper.library_id === state.selectedLibraryId)
     ) {
       state.selectedLibraryId = null;
+      state.libraryDetailOpen = false;
     }
+    elements.libraryLayout.classList.toggle(
+      "has-detail",
+      Boolean(state.libraryDetailOpen && state.selectedLibraryId),
+    );
+    elements.libraryDetail.hidden = !(state.libraryDetailOpen && state.selectedLibraryId);
     renderLibraryNavigation();
     renderLibraryList();
-    if (state.selectedLibraryId) await selectLibraryPaper(state.selectedLibraryId);
+    if (state.libraryDetailOpen && state.selectedLibraryId) {
+      await selectLibraryPaper(state.selectedLibraryId, { recordNavigation: false });
+    }
   } catch (error) {
     notify(`文献库载入失败：${error.message}`, true);
   }
@@ -4389,9 +4609,16 @@ function renderStepper(stage, events = [], actualStage = stage) {
     } else if (index === current) {
       item.title = `当前阶段：${group.label}（${STAGE_LABELS[progress.activeStage] || progress.activeStage}）`;
     }
-    item.textContent = group.label;
+    const marker = document.createElement("span");
+    marker.className = "stage-step-marker";
+    marker.append(iconNode(PROGRESS_STAGE_ICONS[group.key] || "circle"));
+    const label = document.createElement("span");
+    label.className = "stage-step-label";
+    label.textContent = group.label;
+    item.append(marker, label);
     elements.stageStepper.append(item);
   });
+  refreshIcons();
 }
 
 function renderStageBadge(project) {
@@ -5258,6 +5485,112 @@ function researchNoteLabel(kind) {
   return { note: "笔记", annotation: "批注", qa: "问答" }[kind] || "记录";
 }
 
+function activateResearchWorkspaceTab(tab) {
+  state.researchWorkspaceTab = tab;
+  document.querySelectorAll("[data-research-tab]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.researchTab === tab);
+  });
+  document.querySelectorAll("[data-research-pane]").forEach((pane) => {
+    pane.hidden = pane.dataset.researchPane !== tab;
+  });
+}
+
+function researchTextRange(note) {
+  const narrative = elements.primaryOutcome.querySelector(".narrative-review");
+  if (!narrative || !note?.selected_text) return null;
+  const root = (
+    note.source_section_id
+      ? narrative.querySelector(`#${CSS.escape(note.source_section_id)}`)
+      : null
+  ) || narrative;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let raw = "";
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node.parentElement?.closest("button, code, pre")) continue;
+    nodes.push({ node, start: raw.length, end: raw.length + (node.textContent || "").length });
+    raw += node.textContent || "";
+  }
+  const expected = Number.isInteger(note.source_offset) ? note.source_offset : 0;
+  let start = raw.indexOf(note.selected_text, Math.max(0, expected - 12));
+  if (start < 0) start = raw.indexOf(note.selected_text);
+  if (start < 0) return null;
+  const end = start + note.selected_text.length;
+  const startEntry = nodes.find((entry) => start >= entry.start && start <= entry.end);
+  const endEntry = [...nodes].reverse().find((entry) => end >= entry.start && end <= entry.end);
+  if (!startEntry || !endEntry) return null;
+  const range = document.createRange();
+  range.setStart(startEntry.node, Math.max(0, start - startEntry.start));
+  range.setEnd(endEntry.node, Math.max(0, end - endEntry.start));
+  return { range, root };
+}
+
+function focusResearchSource(note) {
+  const located = researchTextRange(note);
+  if (!located) {
+    notify("原文位置已变化，已保留引用文字但无法精确定位", true);
+    return;
+  }
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(located.range);
+  const section = located.root.closest?.(".aw-section") || located.root;
+  section.scrollIntoView({ behavior: "smooth", block: "center" });
+  section.classList.add("is-note-target");
+  window.setTimeout(() => section.classList.remove("is-note-target"), 1800);
+}
+
+function focusResearchRecord(note) {
+  if (note.kind === "qa") {
+    activateResearchWorkspaceTab("ask");
+    const bubble = elements.primaryOutcome.querySelector(
+      `.research-chat-bubble[data-note-id="${CSS.escape(note.note_id)}"]`,
+    );
+    bubble?.scrollIntoView({ behavior: "smooth", block: "center" });
+    bubble?.classList.add("is-note-target");
+    window.setTimeout(() => bubble?.classList.remove("is-note-target"), 1800);
+  }
+  if (note.selected_text) focusResearchSource(note);
+}
+
+async function editResearchNote(note) {
+  const initial = note.kind === "qa" ? note.answer : note.content;
+  const content = window.prompt(note.kind === "qa" ? "修改回答记录" : "修改笔记", initial || "");
+  if (content === null || content.trim() === initial) return;
+  const request = {
+    kind: note.kind,
+    selected_text: note.selected_text || "",
+    source_section_id: note.source_section_id || "",
+    source_offset: note.source_offset,
+    chat_id: note.chat_id || "",
+    content: note.kind === "qa" ? note.content || "" : content.trim(),
+    question: note.question || "",
+    answer: note.kind === "qa" ? content.trim() : note.answer || "",
+    citations: note.citations || [],
+  };
+  const payload = await api(
+    `/api/projects/${encodeURIComponent(state.projectId)}/notes/${encodeURIComponent(note.note_id)}`,
+    { method: "PATCH", body: JSON.stringify(request) },
+  );
+  state.researchNotes = state.researchNotes.map((item) => (
+    item.note_id === note.note_id ? payload.data : item
+  ));
+  const message = state.researchChatHistory.find((item) => (
+    item.noteId === note.note_id && item.role === "assistant"
+  ));
+  if (message && note.kind === "qa") message.content = content.trim();
+  if (note.kind === "qa" && state.snapshot) {
+    renderOutcome(state.snapshot);
+    activateResearchWorkspaceTab("notes");
+    notify("记录已更新");
+    return;
+  }
+  const list = elements.primaryOutcome.querySelector(".research-notes-list");
+  if (list) renderResearchNotesList(list);
+  notify("记录已更新");
+}
+
 function renderResearchNotesList(container) {
   container.replaceChildren();
   if (!state.researchNotes.length) {
@@ -5271,20 +5604,45 @@ function renderResearchNotesList(container) {
           renderMarkdown(note.answer || "", "aw-markdown"),
         ]
       : [h("p", {}, note.content || "")];
-    container.append(h("article", { cls: `research-note research-note-${note.kind}` }, [
+    const article = h("article", {
+      cls: `research-note research-note-${note.kind}`,
+      tabindex: "0",
+      role: "button",
+      onClick: () => focusResearchRecord(note),
+      onKeydown: (event) => {
+        if (!["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        focusResearchRecord(note);
+      },
+    }, [
       h("header", {}, [
         h("span", {}, researchNoteLabel(note.kind)),
-        h("button", {
-          cls: "icon-button",
-          type: "button",
-          title: "删除记录",
-          onClick: () => deleteResearchNote(note.note_id),
-        }, iconNode("trash-2")),
+        h("span", { cls: "research-note-actions" }, [
+          h("button", {
+            cls: "icon-button",
+            type: "button",
+            title: "修改记录",
+            onClick: (event) => {
+              event.stopPropagation();
+              void editResearchNote(note);
+            },
+          }, iconNode("pencil")),
+          h("button", {
+            cls: "icon-button",
+            type: "button",
+            title: "删除记录",
+            onClick: (event) => {
+              event.stopPropagation();
+              void deleteResearchNote(note.note_id);
+            },
+          }, iconNode("trash-2")),
+        ]),
       ]),
       note.selected_text ? h("blockquote", {}, note.selected_text) : null,
       ...body,
       h("small", { cls: "muted" }, formatDate(note.updated_at)),
-    ]));
+    ]);
+    container.append(article);
   });
   refreshIcons();
 }
@@ -5295,7 +5653,29 @@ async function loadResearchNotes(projectId = state.projectId) {
     const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/notes`);
     if (projectId !== state.projectId) return;
     state.researchNotes = payload.data || [];
+    const savedQa = state.researchNotes
+      .filter((note) => note.kind === "qa" && note.question && note.answer)
+      .slice()
+      .reverse();
+    state.researchChatHistory = savedQa.flatMap((note) => [
+      {
+        role: "user",
+        content: note.question,
+        noteId: note.note_id,
+        chatId: note.chat_id || note.note_id,
+      },
+      {
+        role: "assistant",
+        content: note.answer,
+        noteId: note.note_id,
+        chatId: note.chat_id || note.note_id,
+      },
+    ]).slice(-40);
     state.researchNotesProjectId = projectId;
+    if (elements.primaryOutcome.querySelector(".research-workspace") && state.snapshot) {
+      renderOutcome(state.snapshot);
+      return;
+    }
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
   } catch (error) {
@@ -5305,10 +5685,22 @@ async function loadResearchNotes(projectId = state.projectId) {
 
 async function deleteResearchNote(noteId) {
   try {
+    const deleted = state.researchNotes.find((note) => note.note_id === noteId);
     await api(`/api/projects/${encodeURIComponent(state.projectId)}/notes/${encodeURIComponent(noteId)}`, {
       method: "DELETE",
     });
     state.researchNotes = state.researchNotes.filter((note) => note.note_id !== noteId);
+    if (deleted?.kind === "qa") {
+      state.researchChatHistory = state.researchChatHistory.filter(
+        (message) => message.noteId !== noteId,
+      );
+      if (state.snapshot) {
+        renderOutcome(state.snapshot);
+        activateResearchWorkspaceTab("notes");
+        notify("记录已删除");
+        return;
+      }
+    }
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
     notify("记录已删除");
@@ -5328,7 +5720,7 @@ async function saveResearchRecord(record, button = null) {
     const list = elements.primaryOutcome.querySelector(".research-notes-list");
     if (list) renderResearchNotesList(list);
     notify(record.kind === "qa" ? "问答已保存" : record.kind === "annotation" ? "批注已保存" : "笔记已保存");
-    return true;
+    return payload.data;
   } catch (error) {
     notify(`保存失败：${error.message}`, true);
     return false;
@@ -5372,10 +5764,25 @@ function renderResearchWorkspace(narrative, reviewElement) {
     type: "button",
     onClick: (event) => toggleResearchFavorite(event.currentTarget),
   }, [iconNode(conversation?.pinned ? "bookmark-check" : "bookmark"), ` ${conversation?.pinned ? "已收藏" : "收藏研究"}`]);
-  const askTab = h("button", { type: "button", cls: state.researchWorkspaceTab === "ask" ? "is-active" : "" }, "聊天");
-  const notesTab = h("button", { type: "button", cls: state.researchWorkspaceTab === "notes" ? "is-active" : "" }, "批注 / 笔记");
-  const askPane = h("section", { cls: "research-workspace-pane" });
-  const notesPane = h("section", { cls: "research-workspace-pane" });
+  const closeWorkspace = h("button", {
+    cls: "icon-button research-workspace-close",
+    type: "button",
+    title: "收起研究工作台",
+    "aria-label": "收起研究工作台",
+    onClick: () => setResearchWorkspaceOpen(false),
+  }, iconNode("x"));
+  const askTab = h("button", {
+    type: "button",
+    cls: state.researchWorkspaceTab === "ask" ? "is-active" : "",
+    "data-research-tab": "ask",
+  }, "聊天");
+  const notesTab = h("button", {
+    type: "button",
+    cls: state.researchWorkspaceTab === "notes" ? "is-active" : "",
+    "data-research-tab": "notes",
+  }, "批注 / 笔记");
+  const askPane = h("section", { cls: "research-workspace-pane", "data-research-pane": "ask" });
+  const notesPane = h("section", { cls: "research-workspace-pane", "data-research-pane": "notes" });
   const switchTab = (tab) => {
     state.researchWorkspaceTab = tab;
     askTab.classList.toggle("is-active", tab === "ask");
@@ -5388,6 +5795,8 @@ function renderResearchWorkspace(narrative, reviewElement) {
 
   let noteSelection = null;
   let noteSave = null;
+  let noteInput = null;
+  let question = null;
   const selectionContext = h("div", { cls: "research-selection-context", "aria-live": "polite" });
   const renderSelectionContext = () => {
     selectionContext.replaceChildren();
@@ -5412,6 +5821,7 @@ function renderResearchWorkspace(narrative, reviewElement) {
       "aria-label": "移除引用上下文",
       onClick: () => {
         state.researchSelection = "";
+        state.researchSelectionAnchor = null;
         window.getSelection()?.removeAllRanges();
         if (noteSelection) noteSelection.textContent = "未选择综述原文，将保存为普通笔记。";
         if (noteSave) noteSave.textContent = "保存笔记";
@@ -5426,13 +5836,35 @@ function renderResearchWorkspace(narrative, reviewElement) {
           clearSelection,
         ]),
         h("p", { cls: "research-selection-preview" }, state.researchSelection),
+        h("div", { cls: "research-selection-actions" }, [
+          h("button", {
+            type: "button",
+            cls: "secondary",
+            onClick: () => {
+              state.researchWorkspaceOpen = true;
+              setResearchWorkspaceOpen(true);
+              switchTab("ask");
+              question?.focus();
+            },
+          }, [iconNode("message-circle-question"), " 引用提问"]),
+          h("button", {
+            type: "button",
+            cls: "secondary",
+            onClick: () => {
+              state.researchWorkspaceOpen = true;
+              setResearchWorkspaceOpen(true);
+              switchTab("notes");
+              noteInput?.focus();
+            },
+          }, [iconNode("message-square-plus"), " 添加批注"]),
+        ]),
       ]),
     );
     refreshIcons();
   };
   renderSelectionContext();
-  const question = h("textarea", { rows: "3", maxlength: "4000", placeholder: state.researchChatHistory.length ? "继续追问…" : "输入问题…", "aria-label": "研究问题" });
-  const submit = h("button", { type: "submit", cls: "primary" }, "发送");
+  question = h("textarea", { rows: "3", maxlength: "4000", placeholder: state.researchChatHistory.length ? "继续追问…" : "输入问题…", "aria-label": "研究问题" });
+  const submit = h("button", { type: "submit", cls: "primary" }, state.researchChatBusy ? "暂停" : "发送");
   const chatThread = h("div", { cls: "research-chat-thread", "aria-live": "polite" });
   const isChatNearBottom = () => (
     chatThread.scrollHeight - chatThread.scrollTop - chatThread.clientHeight <= 48
@@ -5449,7 +5881,15 @@ function renderResearchWorkspace(narrative, reviewElement) {
     } else {
       body.textContent = message.content || "";
     }
-    const bubble = h("article", { cls: `research-chat-bubble is-${message.role}` }, [body]);
+    const bubble = h("article", {
+      cls: `research-chat-bubble is-${message.role}`,
+      "data-note-id": message.noteId || "",
+      onClick: () => {
+        if (!message.noteId) return;
+        const note = state.researchNotes.find((item) => item.note_id === message.noteId);
+        if (note?.selected_text) focusResearchSource(note);
+      },
+    }, [body]);
     chatThread.append(bubble);
     scrollChatToBottom();
     return { bubble, body };
@@ -5459,17 +5899,28 @@ function renderResearchWorkspace(narrative, reviewElement) {
   const form = h("form", { cls: "research-question-form" }, [question, submit]);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.researchChatBusy) {
+      state.researchChatAbortController?.abort();
+      return;
+    }
     const cleanQuestion = question.value.trim();
     if (!cleanQuestion) return;
+    const selectedText = state.researchSelection;
+    const selectionAnchor = state.researchSelectionAnchor
+      ? { ...state.researchSelectionAnchor }
+      : {};
+    const chatId = window.crypto?.randomUUID?.() || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const requestHistory = state.researchChatHistory.filter((message) => !message.failed).slice(-40);
-    const userMessage = { role: "user", content: cleanQuestion };
-    const assistantMessage = { role: "assistant", content: "" };
+    const userMessage = { role: "user", content: cleanQuestion, chatId };
+    const assistantMessage = { role: "assistant", content: "", chatId };
     state.researchChatHistory.push(userMessage, assistantMessage);
     appendChatBubble(userMessage);
     const assistantBubble = appendChatBubble(assistantMessage, { streaming: true });
     question.value = "";
     try {
-      submit.disabled = true;
+      state.researchChatBusy = true;
+      state.researchChatAbortController = new AbortController();
+      submit.textContent = "暂停";
       refreshIcons();
       const response = await fetch(`/api/projects/${encodeURIComponent(state.projectId)}/assistant/stream`, {
         method: "POST",
@@ -5477,9 +5928,10 @@ function renderResearchWorkspace(narrative, reviewElement) {
         body: JSON.stringify({
           scope: "project",
           question: cleanQuestion,
-          selected_text: state.researchSelection,
+          selected_text: selectedText,
           history: requestHistory,
         }),
+        signal: state.researchChatAbortController.signal,
       });
       if (!response.ok) {
         let payload = null;
@@ -5523,29 +5975,43 @@ function renderResearchWorkspace(narrative, reviewElement) {
       if (streamError) throw new Error(streamError);
       if (!assistantMessage.content.trim()) throw new Error("模型没有返回内容");
       state.researchChatHistory = state.researchChatHistory.slice(-40);
-      const save = h("button", { type: "button", cls: "secondary research-save-answer" }, "保存这组问答");
-      save.addEventListener("click", () => saveResearchRecord({
+      const saved = await saveResearchRecord({
         kind: "qa",
-        selected_text: state.researchSelection,
+        selected_text: selectedText,
+        source_section_id: selectionAnchor.source_section_id || "",
+        source_offset: Number.isInteger(selectionAnchor.source_offset)
+          ? selectionAnchor.source_offset
+          : null,
+        chat_id: chatId,
         question: cleanQuestion,
         answer: assistantMessage.content,
         citations: [],
-      }, save));
-      assistantBubble.bubble.append(save);
+      });
+      if (saved) {
+        userMessage.noteId = saved.note_id;
+        assistantMessage.noteId = saved.note_id;
+        assistantBubble.bubble.dataset.noteId = saved.note_id;
+      }
       question.placeholder = "继续追问…";
     } catch (error) {
-      assistantMessage.content = `回答失败：${error.message}`;
+      assistantMessage.content = error.name === "AbortError"
+        ? "回答已暂停，可重新发送问题继续。"
+        : `回答失败：${error.message}`;
       assistantMessage.failed = true;
-      assistantBubble.body.replaceChildren(h("p", { cls: "error-text" }, assistantMessage.content));
+      assistantBubble.body.replaceChildren(h("p", {
+        cls: error.name === "AbortError" ? "muted" : "error-text",
+      }, assistantMessage.content));
     } finally {
-      submit.disabled = false;
+      state.researchChatBusy = false;
+      state.researchChatAbortController = null;
+      submit.textContent = "发送";
       question.focus();
     }
   });
   askPane.append(selectionContext, chatThread, form);
 
   noteSelection = h("blockquote", { cls: "research-note-selection" }, state.researchSelection || "未选择综述原文，将保存为普通笔记。" );
-  const noteInput = h("textarea", { rows: "4", maxlength: "20000", placeholder: "记录判断、疑问或后续线索…", "aria-label": "研究笔记" });
+  noteInput = h("textarea", { rows: "4", maxlength: "20000", placeholder: "记录判断、疑问或后续线索…", "aria-label": "研究笔记" });
   noteSave = h("button", { type: "button", cls: "primary" }, state.researchSelection ? "保存批注" : "保存笔记");
   noteSave.addEventListener("click", async () => {
     const content = noteInput.value.trim();
@@ -5554,6 +6020,10 @@ function renderResearchWorkspace(narrative, reviewElement) {
     const saved = await saveResearchRecord({
       kind: annotatedText ? "annotation" : "note",
       selected_text: annotatedText,
+      source_section_id: state.researchSelectionAnchor?.source_section_id || "",
+      source_offset: Number.isInteger(state.researchSelectionAnchor?.source_offset)
+        ? state.researchSelectionAnchor.source_offset
+        : null,
       content,
     }, noteSave);
     if (saved) noteInput.value = "";
@@ -5563,17 +6033,43 @@ function renderResearchWorkspace(narrative, reviewElement) {
   notesPane.append(noteSelection, noteInput, noteSave, list);
   switchTab(state.researchWorkspaceTab);
 
-  reviewElement.addEventListener("mouseup", () => {
+  const captureSelection = () => {
     const selected = window.getSelection();
     const text = selected?.toString().trim().slice(0, 12000) || "";
     if (!text || !selected?.anchorNode || !reviewElement.contains(selected.anchorNode)) return;
+    const range = selected.getRangeAt(0);
+    const section = (range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement
+    )?.closest?.(".aw-section");
+    let sourceOffset = null;
+    if (section) {
+      const prefixRange = document.createRange();
+      prefixRange.selectNodeContents(section);
+      try {
+        prefixRange.setEnd(range.startContainer, range.startOffset);
+        sourceOffset = prefixRange.toString().length;
+      } catch {
+        sourceOffset = null;
+      }
+    }
     state.researchSelection = text;
+    state.researchSelectionAnchor = {
+      source_section_id: section?.id || "",
+      source_offset: sourceOffset,
+    };
+    setResearchWorkspaceOpen(true);
     renderSelectionContext();
     noteSelection.textContent = text;
     noteSave.textContent = "保存批注";
-  });
+  };
+  reviewElement.addEventListener("mouseup", () => window.setTimeout(captureSelection, 0));
+  reviewElement.addEventListener("pointerup", () => window.setTimeout(captureSelection, 0));
   panel.append(
-    h("header", {}, [h("div", {}, [h("strong", {}, "研究工作台"), h("small", {}, "多轮聊天、批注与笔记")]), favorite]),
+    h("header", {}, [
+      h("div", {}, [h("strong", {}, "研究工作台"), h("small", {}, "多轮聊天、批注与笔记")]),
+      h("div", { cls: "research-workspace-header-actions" }, [favorite, closeWorkspace]),
+    ]),
     h("nav", { cls: "research-workspace-tabs" }, [askTab, notesTab]),
     askPane,
     notesPane,
@@ -5626,6 +6122,24 @@ function createResearchWorkspaceResizer(layout) {
   return handle;
 }
 
+function setResearchWorkspaceOpen(open) {
+  state.researchWorkspaceOpen = Boolean(open);
+  const layout = elements.primaryOutcome.querySelector(".research-review-layout");
+  const workspace = layout?.querySelector(".research-workspace");
+  const resizer = layout?.querySelector(".research-workspace-resizer");
+  const reopen = layout?.querySelector(".research-workspace-reopen");
+  workspace?.classList.toggle("is-collapsed", !state.researchWorkspaceOpen);
+  if (workspace) workspace.hidden = !state.researchWorkspaceOpen;
+  if (resizer) resizer.hidden = !state.researchWorkspaceOpen;
+  if (reopen) reopen.hidden = state.researchWorkspaceOpen;
+  layout?.classList.toggle("is-workspace-closed", !state.researchWorkspaceOpen);
+  elements.projectView.classList.toggle(
+    "has-research-workspace",
+    Boolean(layout && state.researchWorkspaceOpen),
+  );
+  refreshIcons();
+}
+
 function renderOutcome(snapshot) {
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
   const review = latestArtifact(snapshot, "ReviewResult")?.payload;
@@ -5637,7 +6151,10 @@ function renderOutcome(snapshot) {
   const savedDrafts = currentSectionDrafts(snapshot);
   elements.primaryOutcome.replaceChildren();
   elements.projectSummary.classList.remove("has-outcome");
-  elements.projectView.classList.toggle("has-research-workspace", Boolean(narrative));
+  elements.projectView.classList.toggle(
+    "has-research-workspace",
+    Boolean(narrative && state.researchWorkspaceOpen),
+  );
 
   if (narrative) {
     elements.primaryOutcome.hidden = false;
@@ -5661,12 +6178,21 @@ function renderOutcome(snapshot) {
     const reviewElement = renderNarrativeReviewHTML(narrative);
     const researchLayout = h("div", { cls: "research-review-layout" });
     const workspace = renderResearchWorkspace(narrative, reviewElement);
+    const reopenWorkspace = h("button", {
+      cls: "secondary research-workspace-reopen",
+      type: "button",
+      title: "打开研究工作台",
+      "aria-label": "打开研究工作台",
+      onClick: () => setResearchWorkspaceOpen(true),
+    }, [iconNode("panel-right-open"), " 研究工作台"]);
     researchLayout.append(
       reviewElement,
       createResearchWorkspaceResizer(researchLayout),
       workspace,
+      reopenWorkspace,
     );
     elements.primaryOutcome.append(researchLayout);
+    setResearchWorkspaceOpen(state.researchWorkspaceOpen);
     if (state.researchNotesProjectId !== state.projectId) {
       state.researchNotes = [];
       loadResearchNotes(state.projectId);
@@ -5768,9 +6294,12 @@ function renderProjectSummary(snapshot) {
   const needsRecovery = continuationMode(snapshot) === "recovery";
   if (failedRun) {
     const detail = failedRun.error || failedRun.message || "后台执行遇到异常。";
-    title = "研究任务运行失败";
-    text = `已保留成功写入的阶段数据，可以点击下方按钮重试。错误详情：${detail}`;
-    elements.stageBadge.textContent = "运行失败";
+    const interrupted = failedRun.status === "interrupted";
+    title = interrupted ? "研究任务已安全暂停" : "研究任务运行失败";
+    text = interrupted
+      ? `已经保存候选论文、精读卡和证据等阶段成果，可直接从当前阶段继续，不会重新消耗前序步骤。暂停详情：${detail}`
+      : `已保留成功写入的阶段数据，可以点击下方按钮重试。错误详情：${detail}`;
+    elements.stageBadge.textContent = interrupted ? "可继续" : "运行失败";
     elements.stageBadge.className = "stage-badge is-warning";
   } else if (needsRecovery) {
     const completion = narrativeCompletion(snapshot);
@@ -6089,6 +6618,14 @@ function applyProjectSnapshot(snapshot, { keepRunPanel = false, renderInspector 
 
 async function loadProject(projectId, quiet = false, force = false) {
   if (!projectId) return;
+  if (
+    state.currentWorkspaceView === "project"
+    && state.projectId
+    && projectId !== state.projectId
+    && !state.restoringNavigation
+  ) {
+    pushNavigationSnapshot();
+  }
   const loadSession = ++state.projectLoadSession;
   state.projectLoadController?.abort();
   state.projectLoadController = null;
@@ -6297,6 +6834,12 @@ function renderCandidateCards() {
         venueLine.append(document.createTextNode(" "), badgeWrap);
       }
       venueEl.append(venueLine);
+      if (candidate.venue_rating_explanation) {
+        const explanation = document.createElement("p");
+        explanation.className = "candidate-venue-explanation";
+        explanation.textContent = candidate.venue_rating_explanation;
+        venueEl.append(explanation);
+      }
     }
 
     const authors = document.createElement("p");
@@ -7480,7 +8023,12 @@ async function pollRunningProject() {
       await loadProjects();
       const failedRun = latestFailedRun(payload.data);
       if (failedRun) {
-        notify(`研究执行失败：${failedRun.error || failedRun.message || "未知错误"}`, true);
+        notify(
+          failedRun.status === "interrupted"
+            ? "本轮已安全暂停，已保存的阶段成果可以直接继续"
+            : `研究执行失败：${failedRun.error || failedRun.message || "未知错误"}`,
+          failedRun.status !== "interrupted",
+        );
       } else {
         notify("本阶段已经完成，界面已自动更新");
       }
@@ -7881,6 +8429,33 @@ elements.paperWorkspaceBack.addEventListener("click", async () => {
   showWorkspace("library");
   if (state.selectedLibraryId) await selectLibraryPaper(state.selectedLibraryId);
 });
+elements.paperPanelToggle.addEventListener("click", () => {
+  setPaperPanelOpen(!state.paperChatPanelOpen);
+});
+elements.paperPanelClose.addEventListener("click", () => setPaperPanelOpen(false));
+elements.paperChatResizer.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  elements.paperChatResizer.classList.add("is-dragging");
+  elements.paperChatResizer.setPointerCapture?.(event.pointerId);
+  const onMove = (moveEvent) => {
+    applyPaperPanelWidth(window.innerWidth - 40 - moveEvent.clientX);
+  };
+  const onUp = () => {
+    elements.paperChatResizer.classList.remove("is-dragging");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp, { once: true });
+});
+elements.paperChatResizer.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  event.preventDefault();
+  applyPaperPanelWidth(
+    state.paperChatPanelWidth + (event.key === "ArrowLeft" ? 24 : -24),
+  );
+});
+elements.paperChatResizer.addEventListener("dblclick", () => applyPaperPanelWidth(430));
 document.querySelectorAll("[data-paper-tab]").forEach((button) => {
   button.addEventListener("click", () => setPaperTab(button.dataset.paperTab));
 });
@@ -8162,6 +8737,9 @@ elements.sidebarToggle.addEventListener("click", () => {
   const next = elements.appShell.dataset.sidebar === "expanded" ? "collapsed" : "expanded";
   applySidebarState(next, true);
 });
+elements.navigationBack.addEventListener("click", () => {
+  void restorePreviousNavigation();
+});
 elements.recentHistoryToggle.addEventListener("click", (event) => {
   event.stopPropagation();
   if (elements.appShell.dataset.sidebar !== "collapsed") return;
@@ -8282,7 +8860,9 @@ document.addEventListener("keydown", (event) => {
 
 async function initialize() {
   initializeSidebar();
-  showWorkspace("empty");
+  showWorkspace("empty", { record: false });
+  applyPaperPanelWidth(state.paperChatPanelWidth);
+  setPaperPanelOpen(state.paperChatPanelOpen);
   refreshIcons();
   maybeOpenUsageGuide();
   await Promise.all([checkHealth(), loadProjects()]);
