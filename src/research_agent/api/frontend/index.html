@@ -30,6 +30,16 @@
         >
           <i data-lucide="panel-left-close" aria-hidden="true"></i>
         </button>
+        <button
+          id="navigationBack"
+          class="icon-button topbar-icon navigation-back"
+          type="button"
+          aria-label="返回上一个界面"
+          title="返回上一个界面"
+          hidden
+        >
+          <i data-lucide="arrow-left" aria-hidden="true"></i>
+        </button>
         <button id="brandHome" class="brand brand-home" type="button" aria-label="返回首页" title="返回首页">
           <span class="brand-mark" aria-hidden="true">研</span>
           <div class="brand-copy">
@@ -487,7 +497,7 @@
             </div>
           </details>
 
-          <div class="library-layout">
+          <div id="libraryLayout" class="library-layout">
             <aside class="library-navigator" aria-label="文献库导航">
               <div class="library-nav-heading">
                 <span>智能视图</span>
@@ -531,7 +541,7 @@
               </div>
               <div id="libraryList" class="library-list" aria-live="polite"></div>
             </section>
-            <aside id="libraryDetail" class="library-detail" aria-label="文献详情">
+            <aside id="libraryDetail" class="library-detail" aria-label="文献详情" hidden>
               <div class="library-detail-empty">
                 <i data-lucide="book-open" aria-hidden="true"></i>
                 <p>选择一篇文献查看详情</p>
@@ -575,6 +585,16 @@
               <h2 id="paperWorkspaceTitle">论文研读</h2>
               <p id="paperWorkspaceMeta"></p>
             </div>
+            <button
+              id="paperPanelToggle"
+              class="secondary paper-panel-toggle"
+              type="button"
+              aria-expanded="true"
+              aria-controls="paperChatPanel"
+            >
+              <i data-lucide="panel-right-close" aria-hidden="true"></i>
+              <span>收起研读工具</span>
+            </button>
           </header>
 
           <div class="paper-workspace-layout">
@@ -630,6 +650,16 @@
               </div>
             </section>
 
+            <div
+              id="paperChatResizer"
+              class="paper-chat-resizer"
+              role="separator"
+              tabindex="0"
+              aria-label="调整论文与研读工具宽度"
+              aria-orientation="vertical"
+            >
+              <span aria-hidden="true"></span>
+            </div>
             <aside id="paperChatPanel" class="paper-chat-panel" aria-label="论文聊天与批注">
               <header class="paper-chat-panel-header">
                 <div class="paper-chat-tabs" role="tablist">
@@ -637,6 +667,15 @@
                   <button type="button" data-paper-tab="annotations">批注</button>
                   <button type="button" data-paper-tab="card">精读卡</button>
                 </div>
+                <button
+                  id="paperPanelClose"
+                  class="icon-button"
+                  type="button"
+                  aria-label="收起研读工具"
+                  title="收起研读工具"
+                >
+                  <i data-lucide="x" aria-hidden="true"></i>
+                </button>
               </header>
 
               <section id="paperAskPanel" class="paper-chat-pane">

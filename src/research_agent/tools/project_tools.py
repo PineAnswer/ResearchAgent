@@ -239,13 +239,21 @@ def build_project_tools(
                 artifact = service.save_artifact(project_id, "PaperCard", payload)
                 project = service.get_project(project_id)
             elif subagent_type == "research-synthesizer":
-                artifact, project = service.save_artifact_and_transition(
-                    project_id,
-                    "SynthesisReport",
-                    payload,
-                    ResearchStage.SYNTHESIZED,
-                    actor="research-synthesizer",
-                )
+                if payload.get("_subagent_error"):
+                    artifact, project = service.assemble_synthesis_report(project_id)
+                    deterministic_fallback = True
+                else:
+                    try:
+                        artifact, project = service.save_artifact_and_transition(
+                            project_id,
+                            "SynthesisReport",
+                            payload,
+                            ResearchStage.SYNTHESIZED,
+                            actor="research-synthesizer",
+                        )
+                    except (ValidationError, WorkflowPrerequisiteError, ValueError):
+                        artifact, project = service.assemble_synthesis_report(project_id)
+                        deterministic_fallback = True
             elif subagent_type == "evidence-reviewer":
                 review = ReviewResult.model_validate(payload)
                 artifact, project = service.save_artifact_and_transition(

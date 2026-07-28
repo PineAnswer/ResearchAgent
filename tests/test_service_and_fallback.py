@@ -1092,6 +1092,52 @@ def test_deterministic_narrative_assembly_preserves_saved_drafts(tmp_path) -> No
     assert artifact.payload["word_count"] > 0
 
 
+def test_deterministic_synthesis_assembly_preserves_saved_evidence(tmp_path) -> None:
+    service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
+    project = service.create_project("visual geolocation", "Which methods are supported?")
+    for stage in (
+        ResearchStage.SEARCHED,
+        ResearchStage.SEARCH_REVIEW_PENDING,
+        ResearchStage.SCREENED,
+        ResearchStage.EXTRACTED,
+    ):
+        project = service.repository.transition(project.project_id, stage, actor="test")
+    service.repository.save_artifact(
+        project.project_id,
+        "PaperCard",
+        {
+            "paper_id": "P1",
+            "title": "Evidence Paper",
+            "research_question": project.research_question,
+            "methods": ["cross-view retrieval"],
+            "datasets": ["Dataset A"],
+            "findings": [
+                {
+                    "evidence_id": "P1:E1",
+                    "paper_id": "P1",
+                    "claim": "Cross-view retrieval improves place matching.",
+                    "quote": "The reported experiment improves place matching.",
+                    "page": 3,
+                }
+            ],
+            "limitations": ["Evaluation covers only one region."],
+        },
+    )
+
+    artifact, updated = service.assemble_synthesis_report(project.project_id)
+
+    assert updated.stage is ResearchStage.SYNTHESIZED
+    assert artifact.kind == "SynthesisReport"
+    assert artifact.payload["consensus"] == [
+        {
+            "statement": "Cross-view retrieval improves place matching.",
+            "evidence_ids": ["P1:E1"],
+        }
+    ]
+    assert artifact.payload["method_comparison"][0]["evidence_ids"] == ["P1:E1"]
+    assert artifact.payload["gaps"][0]["supporting_paper_ids"] == ["P1"]
+
+
 def test_agent_context_omits_search_history_and_keeps_current_writing_inputs(tmp_path) -> None:
     service = ResearchService(SqliteResearchRepository(tmp_path / "test.db"))
     project = _create_reviewed_project(service)

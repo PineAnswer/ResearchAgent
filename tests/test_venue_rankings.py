@@ -222,7 +222,7 @@ def test_frontend_exposes_year_round_and_venue_rating_controls() -> None:
     assert "Array.isArray(snapshot.project_library)" in script
     assert "function preserveExistingProjectOrder" in script
     assert "loadProjects({ preserveOrder: true })" in script
-    assert "const previousScrollTop = elements.projectList.scrollTop" in script
+    assert "const previousScrollTop = elements.projectsManagerList.scrollTop" in script
     assert "function artifactDisplayLabel" in script
     assert "function captureSelectedTextRects" in script
     assert "function focusPaperAnnotation" in script
@@ -232,7 +232,7 @@ def test_frontend_exposes_year_round_and_venue_rating_controls() -> None:
     assert "function queuePaperReadingProgress" in script
     assert "collection_membership" in script
     assert 'grid-template-columns: 1fr' in styles
-    assert '.app-shell[data-sidebar="collapsed"] .project-list-menu-toggle' in styles
+    assert '.app-shell[data-sidebar="collapsed"] #projectList .project-list-menu-toggle' in styles
     assert "const runFinished = syncRunningSnapshot(payload.data)" in script
     assert "仅 CCF-A、一区和 Nature 子刊" not in html
     assert "candidate.venue_rating_explanation" in script
@@ -244,6 +244,14 @@ def test_frontend_exposes_year_round_and_venue_rating_controls() -> None:
     assert ".recent-history-popover" in styles
     assert ".paper-horizontal-scroller" in styles
     assert ".paper-annotation-marker" in styles
+    assert "取消选段，改为全文提问" in script
+    assert 'cls: "icon-button paper-chat-clear-selection"' in script
+    assert "已取消选段，接下来将基于论文全文回答" in script
+    assert ".paper-chat-clear-selection" in styles
+    assert "position: absolute" in styles
+    assert "grid-template-columns: 190px minmax(440px, 1.22fr) minmax(340px, 0.78fr)" in styles
+    assert ".library-paper-row.is-active" in styles
+    assert "overflow-wrap: anywhere" in styles
     assert ".library-recent-reading" in styles
     assert ".library-folder-pin" in styles
     assert ".sidebar-search input:focus" in styles

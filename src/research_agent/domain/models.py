@@ -414,6 +414,9 @@ class ResearchNote(BaseModel):
     project_id: str
     kind: Literal["note", "annotation", "qa"] = "note"
     selected_text: str = ""
+    source_section_id: str = ""
+    source_offset: int | None = None
+    chat_id: str = ""
     content: str = ""
     question: str = ""
     answer: str = ""
