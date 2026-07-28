@@ -4664,6 +4664,7 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
   const topic = project.topic || "未命名研究";
   const question = project.research_question || "";
   const nameEl = elements.projectName;
+  nameEl.dataset.researchSource = "true";
   if (name) {
     nameEl.textContent = name;
     nameEl.hidden = false;
@@ -4671,6 +4672,7 @@ function renderProjectHeader(project, events = state.snapshot?.events || []) {
     nameEl.hidden = true;
   }
   const topicLine = elements.projectTopicLine;
+  topicLine.dataset.researchSource = "true";
   if (question && topic !== question) {
     topicLine.innerHTML = `<strong>${escapeHTML(topic)}</strong>：${escapeHTML(question)}`;
   } else {
@@ -5248,7 +5250,7 @@ function renderNarrativeReviewHTML(payload) {
   const parts = [];
   // Title + abstract
   if (payload.title) {
-    parts.push(h('h3',{cls:'aw-review-title'},payload.title));
+    parts.push(h('h3',{cls:'aw-review-title', id:'research-review-title', 'data-research-source':'true'},payload.title));
   }
   if (payload.abstract) {
     parts.push(h('div',{cls:'aw-abstract'}, [
@@ -5265,14 +5267,14 @@ function renderNarrativeReviewHTML(payload) {
   // Sections with TOC
   const sections = payload.sections || [];
   if (sections.length > 1) {
-    parts.push(h('div',{cls:'aw-toc'}, [
+    parts.push(h('div',{cls:'aw-toc', id:'research-review-toc', 'data-research-source':'true'}, [
       h('strong',{},'目录'),
       h('ol',{}, sections.map((s, index) => h('li',{}, h('a',{href:`#${anchorPrefix}-${s.section_id||index}`},s.heading||'')))),
     ]));
   }
   // Section bodies
   sections.forEach((s, index) => {
-    parts.push(h('div',{cls:'aw-section', id:`${anchorPrefix}-${s.section_id||index}`}, [
+    parts.push(h('div',{cls:'aw-section', id:`${anchorPrefix}-${s.section_id||index}`, 'data-research-source':'true'}, [
       h('h4',{cls:'aw-section-heading'},s.heading||''),
       renderMarkdown(
         stripDuplicateLeadingMarkdownHeading(s.content || "", s.heading || ""),
@@ -5303,7 +5305,7 @@ function renderNarrativeReviewHTML(payload) {
       ]))),
     ]));
   }
-  return h('div',{cls:'artifact-html narrative-review'}, parts);
+  return h('div',{cls:'artifact-html narrative-review', 'data-research-source':'true'}, parts);
 }
 
 function renderGenericArtifactHTML(payload) {
@@ -5605,19 +5607,20 @@ function activateResearchWorkspaceTab(tab) {
 }
 
 function researchTextRange(note) {
-  const narrative = elements.primaryOutcome.querySelector(".narrative-review");
-  if (!narrative || !note?.selected_text) return null;
+  if (!note?.selected_text) return null;
+  const sourceBlocks = [...elements.projectView.querySelectorAll('[data-research-source="true"]')];
   const root = (
     note.source_section_id
-      ? narrative.querySelector(`#${CSS.escape(note.source_section_id)}`)
+      ? elements.projectView.querySelector(`#${CSS.escape(note.source_section_id)}`)
       : null
-  ) || narrative;
+  ) || sourceBlocks.find((block) => (block.textContent || "").includes(note.selected_text));
+  if (!root) return null;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes = [];
   let raw = "";
   while (walker.nextNode()) {
     const node = walker.currentNode;
-    if (node.parentElement?.closest("button, code, pre")) continue;
+    if (node.parentElement?.closest(".research-workspace, button, code, pre")) continue;
     nodes.push({ node, start: raw.length, end: raw.length + (node.textContent || "").length });
     raw += node.textContent || "";
   }
@@ -5644,7 +5647,7 @@ function focusResearchSource(note) {
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(located.range);
-  const section = located.root.closest?.(".aw-section") || located.root;
+  const section = located.root.closest?.('[data-research-source="true"]') || located.root;
   section.scrollIntoView({ behavior: "smooth", block: "center" });
   section.classList.add("is-note-target");
   window.setTimeout(() => section.classList.remove("is-note-target"), 1800);
@@ -6316,19 +6319,30 @@ function renderResearchWorkspace(narrative, reviewElement) {
   const captureSelection = () => {
     const selected = window.getSelection();
     const text = selected?.toString().trim().slice(0, 12000) || "";
-    if (!text || !selected?.anchorNode || !reviewElement.contains(selected.anchorNode)) {
+    const anchorElement = selected?.anchorNode?.nodeType === Node.ELEMENT_NODE
+      ? selected.anchorNode
+      : selected?.anchorNode?.parentElement;
+    const sourceBlock = anchorElement?.closest?.('[data-research-source="true"]');
+    if (!text || !sourceBlock || !elements.projectView.contains(sourceBlock)) {
       removeResearchSelectionToolbar({ clearDraft: true });
       return;
     }
     const range = selected.getRangeAt(0);
-    const section = (range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    const rangeContainer = (range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? range.commonAncestorContainer
       : range.commonAncestorContainer.parentElement
-    )?.closest?.(".aw-section");
+    )?.closest?.('[data-research-source="true"]') || sourceBlock;
+    if (
+      !rangeContainer.contains(range.startContainer)
+      || !rangeContainer.contains(range.endContainer)
+    ) {
+      removeResearchSelectionToolbar({ clearDraft: true });
+      return;
+    }
     let sourceOffset = null;
-    if (section) {
+    if (rangeContainer) {
       const prefixRange = document.createRange();
-      prefixRange.selectNodeContents(section);
+      prefixRange.selectNodeContents(rangeContainer);
       try {
         prefixRange.setEnd(range.startContainer, range.startOffset);
         sourceOffset = prefixRange.toString().length;
@@ -6338,13 +6352,13 @@ function renderResearchWorkspace(narrative, reviewElement) {
     }
     state.researchSelectionDraft = {
       text,
-      source_section_id: section?.id || "",
+      source_section_id: rangeContainer.id || "",
       source_offset: sourceOffset,
     };
     showSelectionToolbar(state.researchSelectionDraft, range);
   };
-  reviewElement.addEventListener("pointerup", () => window.setTimeout(captureSelection, 0));
-  reviewElement.addEventListener("keyup", () => window.setTimeout(captureSelection, 0));
+  elements.projectView.onpointerup = () => window.setTimeout(captureSelection, 0);
+  elements.projectView.onkeyup = () => window.setTimeout(captureSelection, 0);
   panel.append(
     h("header", {}, [
       h("div", {}, [h("strong", {}, "研究工作台"), h("small", {}, "多轮聊天、批注与笔记")]),
@@ -6422,6 +6436,8 @@ function setResearchWorkspaceOpen(open) {
 
 function renderOutcome(snapshot) {
   removeResearchSelectionToolbar({ clearDraft: true });
+  elements.projectView.onpointerup = null;
+  elements.projectView.onkeyup = null;
   const narrative = latestArtifact(snapshot, "NarrativeReview")?.payload;
   const review = latestArtifact(snapshot, "ReviewResult")?.payload;
   const insufficient = snapshot?.project?.stage === "INCONCLUSIVE"
@@ -6441,7 +6457,7 @@ function renderOutcome(snapshot) {
     elements.primaryOutcome.hidden = false;
     elements.projectSummary.classList.add("has-outcome");
     elements.primaryOutcome.append(
-      h("div", { cls: "outcome-header" }, [
+      h("div", { cls: "outcome-header", id: "research-result-title", "data-research-source": "true" }, [
         h("div", {}, [
           h("p", { cls: "eyebrow" }, needsRecovery ? "成果待补全" : "最终成果"),
           h("h3", {}, narrative.title || "文献综述已生成"),
@@ -6453,8 +6469,8 @@ function renderOutcome(snapshot) {
         ),
       ]),
       narrative.abstract
-        ? h("p", { cls: "outcome-abstract" }, narrative.abstract)
-        : h("p", { cls: "outcome-abstract muted" }, "综述已生成，摘要暂未填写。"),
+        ? h("p", { cls: "outcome-abstract", id: "research-result-summary", "data-research-source": "true" }, narrative.abstract)
+        : h("p", { cls: "outcome-abstract muted", id: "research-result-summary", "data-research-source": "true" }, "综述已生成，摘要暂未填写。"),
     );
     const reviewElement = renderNarrativeReviewHTML(narrative);
     const researchLayout = h("div", { cls: "research-review-layout" });

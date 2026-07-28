@@ -141,6 +141,13 @@ def test_research_workspace_supports_explicit_quotes_chat_sessions_and_source_no
     assert "researchConversationPreview(session)" in script
     assert '"点击记录可返回并高亮原文"' in script
     assert "if (note.selected_text) focusResearchSource(note)" in script
+    assert 'nameEl.dataset.researchSource = "true"' in script
+    assert 'topicLine.dataset.researchSource = "true"' in script
+    assert "id:'research-review-toc'" in script
+    assert 'id: "research-result-title"' in script
+    assert 'id: "research-result-summary"' in script
+    assert "elements.projectView.onpointerup" in script
+    assert 'querySelectorAll(\'[data-research-source="true"]\')' in script
     assert ".research-selection-toolbar {" in styles
     assert ".research-selection-context[hidden]" in styles
     assert ".research-chat-archive-preview {" in styles
